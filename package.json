@@ -1,0 +1,34 @@
+{
+  "name": "pi-goal",
+  "version": "0.1.0",
+  "description": "Goal mode extension for pi: persistent long-running objectives with /goal and model tools.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "goal",
+    "agent-loop"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/goal.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-ai": "^0.73.0",
+    "@mariozechner/pi-coding-agent": "^0.73.0",
+    "@mariozechner/pi-tui": "^0.73.0",
+    "typescript": "^5.9.3",
+    "typebox": "^1.0.58"
+  }
+}
