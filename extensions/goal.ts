@@ -21,7 +21,6 @@ interface GoalRecord {
 	tokensUsed: number;
 	timeUsedSeconds: number;
 	turns: number;
-	maxTurns?: number;
 	autoContinue: boolean;
 	createdAt: string;
 	updatedAt: string;
@@ -39,7 +38,6 @@ interface GoalStateEntry {
 interface ParsedGoalArgs {
 	objective: string;
 	tokenBudget?: number;
-	maxTurns?: number;
 	autoContinue: boolean;
 }
 
@@ -56,7 +54,36 @@ function newGoalId(): string {
 }
 
 function cloneGoal(goal: GoalRecord): GoalRecord {
-	return { ...goal };
+	return normalizeGoalRecord({ ...goal });
+}
+
+function normalizeGoalRecord(goal: GoalRecord): GoalRecord {
+	const next: GoalRecord = {
+		id: goal.id,
+		objective: goal.objective,
+		status: goal.status,
+		tokenBudget: goal.tokenBudget,
+		tokensUsed: goal.tokensUsed,
+		timeUsedSeconds: goal.timeUsedSeconds,
+		turns: goal.turns,
+		autoContinue: goal.autoContinue,
+		createdAt: goal.createdAt,
+		updatedAt: goal.updatedAt,
+		activeStartedAt: goal.activeStartedAt,
+		stopReason: goal.stopReason,
+		activePath: goal.activePath,
+		archivedPath: goal.archivedPath,
+	};
+	if (next.status === "budget_limited" && next.stopReason === "max_turns") {
+		next.status = "active";
+		delete next.stopReason;
+	}
+	if (next.status === "paused" && next.autoContinue) {
+		next.status = "active";
+		delete next.stopReason;
+	}
+	if (next.status !== "active") delete next.activeStartedAt;
+	return next;
 }
 
 function currentElapsedSeconds(goal: GoalRecord, now = Date.now()): number {
@@ -124,12 +151,6 @@ function parseBudget(value: string): number | undefined {
 	return Math.floor(n * multiplier);
 }
 
-function parsePositiveInteger(value: string): number | undefined {
-	const parsed = Number(value.trim());
-	if (!Number.isInteger(parsed) || parsed < 0) return undefined;
-	return parsed;
-}
-
 function tokenizeArgs(raw: string): string[] {
 	const tokens: string[] = [];
 	let current = "";
@@ -175,7 +196,6 @@ function tokenizeArgs(raw: string): string[] {
 function parseGoalArgs(raw: string): ParsedGoalArgs | { error: string } {
 	const tokens = tokenizeArgs(raw.trim());
 	let tokenBudget: number | undefined;
-	let maxTurns: number | undefined;
 	let autoContinue = true;
 	let index = 0;
 
@@ -197,17 +217,12 @@ function parseGoalArgs(raw: string): ParsedGoalArgs | { error: string } {
 			continue;
 		}
 		if (token === "--max-turns") {
-			if (!next) return { error: "Missing value for --max-turns." };
-			const parsed = parsePositiveInteger(next);
-			if (parsed === undefined) return { error: `Invalid max turns: ${next}.` };
-			maxTurns = parsed === 0 ? undefined : parsed;
-			index++;
+			// Deprecated: goals run until completion unless the user pauses or clears them.
+			if (next) index++;
 			continue;
 		}
 		if (token.startsWith("--max-turns=")) {
-			const parsed = parsePositiveInteger(token.slice("--max-turns=".length));
-			if (parsed === undefined) return { error: `Invalid max turns: ${token}.` };
-			maxTurns = parsed === 0 ? undefined : parsed;
+			// Deprecated: keep old invocations from turning the flag into objective text.
 			continue;
 		}
 		if (token === "--no-auto" || token === "--no-start") {
@@ -223,7 +238,7 @@ function parseGoalArgs(raw: string): ParsedGoalArgs | { error: string } {
 
 	const objective = tokens.slice(index).join(" ").trim();
 	if (!objective) return { error: "Goal objective must not be empty." };
-	return { objective, tokenBudget, maxTurns, autoContinue };
+	return { objective, tokenBudget, autoContinue };
 }
 
 function createGoal(args: ParsedGoalArgs, now = Date.now()): GoalRecord {
@@ -236,7 +251,6 @@ function createGoal(args: ParsedGoalArgs, now = Date.now()): GoalRecord {
 		tokensUsed: 0,
 		timeUsedSeconds: 0,
 		turns: 0,
-		maxTurns: args.maxTurns,
 		autoContinue: args.autoContinue,
 		createdAt: timestamp,
 		updatedAt: timestamp,
@@ -257,6 +271,24 @@ function statusLabel(status: GoalStatus): string {
 	}
 }
 
+function activityLabel(goal: GoalRecord): string {
+	if (goal.status === "active" && goal.autoContinue) return "running";
+	return statusLabel(goal.status);
+}
+
+function tokenBudgetLine(goal: GoalRecord): string | null {
+	if (!goal.tokenBudget) return null;
+	const remaining = Math.max(0, goal.tokenBudget - goal.tokensUsed);
+	return `${formatTokens(goal.tokensUsed)} / ${formatTokens(goal.tokenBudget)} (${formatTokens(remaining)} left)`;
+}
+
+function promptProgressLines(goal: GoalRecord): string[] {
+	const lines = [`Elapsed: ${formatDuration(goal.timeUsedSeconds)}`];
+	const tokenLine = tokenBudgetLine(goal);
+	if (tokenLine) lines.push(`Token budget: ${tokenLine}`);
+	return lines;
+}
+
 function truncateText(value: string, max = 120): string {
 	const oneLine = value.replace(/\s+/g, " ").trim();
 	return oneLine.length > max ? `${oneLine.slice(0, max - 3)}...` : oneLine;
@@ -265,9 +297,9 @@ function truncateText(value: string, max = 120): string {
 function oneLineSummary(goal: GoalRecord | null): string {
 	if (!goal) return "No goal is set.";
 	const g = snapshotGoal(goal);
-	const parts = [statusLabel(g.status), `${formatDuration(g.timeUsedSeconds)}`, `${formatTokens(g.tokensUsed)} tokens`];
-	if (g.tokenBudget) parts.push(`${formatTokens(Math.max(0, g.tokenBudget - g.tokensUsed))} tokens left`);
-	if (g.maxTurns) parts.push(`${g.turns}/${g.maxTurns} turns`);
+	const parts = [activityLabel(g), `${formatDuration(g.timeUsedSeconds)}`];
+	const tokenLine = tokenBudgetLine(g);
+	if (tokenLine) parts.push(`token budget ${tokenLine}`);
 	return `${parts.join(" | ")} - ${truncateText(g.objective)}`;
 }
 
@@ -276,12 +308,12 @@ function detailedSummary(goal: GoalRecord | null): string {
 	const g = snapshotGoal(goal);
 	const lines = [
 		`Goal: ${g.objective}`,
-		`Status: ${statusLabel(g.status)}`,
+		`Status: ${activityLabel(g)}`,
 		`Elapsed: ${formatDuration(g.timeUsedSeconds)}`,
-		`Tokens: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)}` : ""}`,
-		`Turns: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}`,
 		`Auto-continue: ${g.autoContinue ? "on" : "off"}`,
 	];
+	const tokenLine = tokenBudgetLine(g);
+	if (tokenLine) lines.splice(3, 0, `Token budget: ${tokenLine}`);
 	if (g.activePath) lines.push(`File: ${g.activePath}`);
 	if (g.archivedPath) lines.push(`Archive: ${g.archivedPath}`);
 	if (g.stopReason) lines.push(`Stop reason: ${g.stopReason}`);
@@ -290,13 +322,12 @@ function detailedSummary(goal: GoalRecord | null): string {
 
 function goalPrompt(goal: GoalRecord): string {
 	const g = snapshotGoal(goal);
-	const remaining = g.tokenBudget ? Math.max(0, g.tokenBudget - g.tokensUsed) : undefined;
-	return `[PI GOAL ACTIVE goalId=${g.id}]\nObjective: ${g.objective}\nStatus: ${statusLabel(g.status)}\nElapsed: ${formatDuration(g.timeUsedSeconds)}\nTokens used: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)} (${formatTokens(remaining ?? 0)} remaining)` : ""}\nTurns used: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}\n\nContinue working toward the objective until it is actually achieved. Do not pause for confirmation just because a phase, chapter, file, or checklist item is finished; immediately choose the next concrete action toward the objective. Use get_goal when you need the current state. Call update_goal with status=complete only when no required work remains. If blocked, explain the blocker to the user instead of marking the goal complete. The user may tweak this objective during the run; always follow the latest objective shown here.`;
+	return `[PI GOAL ACTIVE goalId=${g.id}]\nObjective: ${g.objective}\nStatus: ${activityLabel(g)}\n${promptProgressLines(g).join("\n")}\n\nContinue working toward the objective until it is actually achieved. Do not pause for confirmation just because a phase, chapter, file, or checklist item is finished; immediately choose the next concrete action toward the objective. Use get_goal when you need the current state. Call update_goal with status=complete only when no required work remains. If blocked, explain the blocker to the user instead of marking the goal complete. The user may tweak this objective during the run; always follow the latest objective shown here.`;
 }
 
 function continuationPrompt(goal: GoalRecord): string {
 	const g = snapshotGoal(goal);
-	return `[GOAL CONTINUATION goalId=${g.id}]\nContinue working toward the active goal.\n\nObjective:\n${g.objective}\n\nBudget:\n- Elapsed: ${formatDuration(g.timeUsedSeconds)}\n- Tokens used: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)}` : ""}\n- Turns used: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}\n\nAvoid repeating work that is already done. Do not pause for confirmation after a partial milestone; if the objective implies a sequence, continue with the next item immediately. Before deciding that the goal is achieved, audit the objective against real evidence in the current project state. If any requirement is missing, incomplete, or unverified, keep working. If the goal is fully achieved, call update_goal with status=complete and then summarize the result. If you are blocked, explain exactly what is blocking progress.`;
+	return `[GOAL CONTINUATION goalId=${g.id}]\nContinue working toward the active goal.\n\nObjective:\n${g.objective}\n\nProgress:\n${promptProgressLines(g).map((line) => `- ${line}`).join("\n")}\n\nAvoid repeating work that is already done. Do not pause for confirmation after a partial milestone; if the objective implies a sequence, continue with the next item immediately. Before deciding that the goal is achieved, audit the objective against real evidence in the current project state. If any requirement is missing, incomplete, or unverified, keep working. If the goal is fully achieved, call update_goal with status=complete and then summarize the result. If you are blocked, explain exactly what is blocking progress.`;
 }
 
 function timestampForFile(iso = nowIso()): string {
@@ -368,7 +399,7 @@ function isSafeArchivedPath(ctx: ExtensionContext, relPath: string | undefined):
 }
 
 function sanitizeGoalPaths(ctx: ExtensionContext, current: GoalRecord): GoalRecord {
-	const next = { ...current };
+	const next = normalizeGoalRecord({ ...current });
 	if (!isSafeActivePath(ctx, next.activePath)) delete next.activePath;
 	if (!isSafeArchivedPath(ctx, next.archivedPath)) delete next.archivedPath;
 	return next;
@@ -523,7 +554,6 @@ function parseGoalFile(filePath: string): GoalRecord | null {
 		tokensUsed: typeof raw.tokensUsed === "number" && Number.isFinite(raw.tokensUsed) ? Math.max(0, Math.floor(raw.tokensUsed)) : 0,
 		timeUsedSeconds: typeof raw.timeUsedSeconds === "number" && Number.isFinite(raw.timeUsedSeconds) ? Math.max(0, Math.floor(raw.timeUsedSeconds)) : 0,
 		turns: typeof raw.turns === "number" && Number.isFinite(raw.turns) ? Math.max(0, Math.floor(raw.turns)) : 0,
-		maxTurns: optionalPositiveNumber(raw.maxTurns),
 		autoContinue: typeof raw.autoContinue === "boolean" ? raw.autoContinue : true,
 		createdAt: typeof raw.createdAt === "string" ? raw.createdAt : timestamp,
 		updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : timestamp,
@@ -531,19 +561,19 @@ function parseGoalFile(filePath: string): GoalRecord | null {
 		stopReason: isStopReason(raw.stopReason) ? raw.stopReason : undefined,
 	};
 	if (status !== "active") delete goal.activeStartedAt;
-	return goal;
+	return normalizeGoalRecord(goal);
 }
 
 function serializeGoalFile(goal: GoalRecord): string {
 	const g = snapshotGoal(goal);
 	const meta = JSON.stringify({ version: 1, ...g }, null, 2);
 	const progress = [
-		`- Status: ${statusLabel(g.status)}`,
-		`- Tokens: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)}` : ""}`,
-		`- Turns: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}`,
+		`- Status: ${activityLabel(g)}`,
 		`- Elapsed: ${formatDuration(g.timeUsedSeconds)}`,
 		`- Auto-continue: ${g.autoContinue ? "on" : "off"}`,
 	];
+	const tokenLine = tokenBudgetLine(g);
+	if (tokenLine) progress.splice(2, 0, `- Token budget: ${tokenLine}`);
 	return `${meta}\n\n# Goal Prompt\n\n${g.objective.trim()}\n\n## Progress\n\n${progress.join("\n")}\n`;
 }
 
@@ -677,10 +707,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 
 		const g = snapshotGoal(goal);
-		const usage = g.tokenBudget
-			? `${formatTokens(g.tokensUsed)}/${formatTokens(g.tokenBudget)}`
-			: `${formatTokens(g.tokensUsed)} tok`;
-		ctx.ui.setStatus("goal", `goal: ${statusLabel(g.status)} ${usage}`);
+		const tokenLine = tokenBudgetLine(g);
+		ctx.ui.setStatus("goal", tokenLine ? `goal: ${activityLabel(g)} ${tokenLine}` : `goal: ${activityLabel(g)}`);
 
 		if (g.status === "complete") {
 			ctx.ui.setWidget("goal", [
@@ -693,9 +721,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 		const lines = [
 			ctx.ui.theme.fg("accent", `Goal: ${truncateText(g.objective)}`),
-			ctx.ui.theme.fg("muted", `Status: ${statusLabel(g.status)} | ${formatDuration(g.timeUsedSeconds)} | ${usage}`),
+			ctx.ui.theme.fg("muted", `Status: ${activityLabel(g)} | ${formatDuration(g.timeUsedSeconds)}`),
 		];
-		if (g.maxTurns) lines.push(ctx.ui.theme.fg("dim", `Turns: ${g.turns}/${g.maxTurns}`));
+		if (tokenLine) lines.push(ctx.ui.theme.fg("dim", `Token budget: ${tokenLine}`));
 		if (g.activePath) lines.push(ctx.ui.theme.fg("dim", g.activePath));
 		if (g.status === "active") lines.push(ctx.ui.theme.fg("dim", "Use /goal tweak, /goal pause, or update_goal when complete."));
 		ctx.ui.setWidget("goal", lines);
@@ -758,10 +786,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			stopActiveGoal("budget_limited", "token_budget", ctx);
 			ctx.ui.notify("Goal paused: token budget reached after the current turn.", "warning");
 			return;
-		}
-		if (goal.maxTurns && goal.turns >= goal.maxTurns) {
-			stopActiveGoal("budget_limited", "max_turns", ctx);
-			ctx.ui.notify("Goal paused: max turns reached.", "warning");
 		}
 	}
 
@@ -856,7 +880,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("goal", {
 		description: "Set, view, ask the agent to tweak, pause, resume, or clear a long-running goal",
 		getArgumentCompletions(prefix) {
-			const items = ["status", "tweak", "pause", "resume", "clear", "replace", "--tokens ", "--max-turns ", "--no-auto"];
+			const items = ["status", "tweak", "pause", "resume", "clear", "replace", "--tokens ", "--no-auto"];
 			return items
 				.filter((item) => item.startsWith(prefix))
 				.map((item) => ({ value: item, label: item, description: "goal command" }));
@@ -891,6 +915,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 						ctx.ui.notify("Goal is already complete.", "warning");
 						return;
 					}
+					goal = { ...goal, autoContinue: false };
 					stopActiveGoal("paused", "user", ctx);
 					ctx.ui.notify("Goal paused.", "info");
 					return;
@@ -904,7 +929,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 						return;
 					}
 					goal = resumeActiveClock(mergeGoalPromptFromDisk(ctx, goal));
-					setGoal({ ...materializeGoal(goal), status: "active", stopReason: undefined, activeStartedAt: nowIso() }, ctx);
+					setGoal({ ...materializeGoal(goal), status: "active", autoContinue: true, stopReason: undefined, activeStartedAt: nowIso() }, ctx);
 					ctx.ui.notify("Goal resumed.", "info");
 					queueContinuation(ctx, true);
 					return;
@@ -920,7 +945,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	pi.registerTool(defineTool({
 		name: "get_goal",
 		label: "Get Goal",
-		description: "Get the current pi goal for this session, including objective, status, token budget, usage, elapsed time, turn count, and local file paths.",
+		description: "Get the current pi goal for this session, including objective, status, optional token budget, elapsed time, and local file paths.",
 		promptSnippet: "Read the active pi goal state for the current session.",
 		promptGuidelines: [
 			"Use get_goal when you need the current pi goal state before deciding whether to continue or mark it complete.",
@@ -952,7 +977,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			objective: Type.String({ description: "Concrete objective to pursue." }),
 			tokenBudget: Type.Optional(Type.Number({ description: "Optional positive token budget." })),
-			maxTurns: Type.Optional(Type.Number({ description: "Optional maximum autonomous turns. 0 or omitted means no turn limit." })),
 			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Defaults to true." })),
 		}),
 		executionMode: "sequential",
@@ -966,7 +990,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const parsed: ParsedGoalArgs = {
 				objective: params.objective.trim(),
 				tokenBudget: params.tokenBudget && params.tokenBudget > 0 ? Math.floor(params.tokenBudget) : undefined,
-				maxTurns: params.maxTurns && params.maxTurns > 0 ? Math.floor(params.maxTurns) : undefined,
 				autoContinue: params.autoContinue ?? true,
 			};
 			if (!parsed.objective) throw new Error("Goal objective must not be empty.");
@@ -1093,8 +1116,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		goal = mergeGoalPromptFromDisk(ctx, goal);
 
 		if (lastAssistantWasAborted(event.messages as unknown[])) {
-			stopActiveGoal("paused", "user", ctx);
-			ctx.ui.notify("Goal paused after abort.", "warning");
+			persist(ctx);
+			updateUI(ctx);
+			queueContinuation(ctx, true);
 			return;
 		}
 

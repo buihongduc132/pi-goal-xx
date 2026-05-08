@@ -35,7 +35,7 @@ Start a goal and let the agent continue autonomously:
 Start a goal with budgets:
 
 ```text
-/goal --tokens 50k --max-turns 20 improve benchmark coverage for the parser
+/goal --tokens 50k improve benchmark coverage for the parser
 ```
 
 Check status:
@@ -81,7 +81,7 @@ Examples:
 
 ### `/goal status`
 
-Shows the active goal, status, elapsed time, token usage, turn count, auto-continue setting, and local file path.
+Shows the active goal, status, elapsed time, auto-continue setting, optional token budget, and local file path.
 
 ### `/goal tweak <instructions>`
 
@@ -121,7 +121,6 @@ Archives the current unfinished goal and removes it from the active session stat
 Flags must appear before the objective.
 
 - `--tokens <n|k|m>` or `--token-budget <n|k|m>`: pause after the estimated model token usage reaches the budget. Examples: `50000`, `50k`, `1.5m`.
-- `--max-turns <n>`: pause after this many autonomous goal turns. There is no turn limit by default; `0` also disables the turn limit.
 - `--no-auto` or `--no-start`: create the goal and keep it in context, but do not automatically send continuation prompts.
 - `--auto` or `--start`: explicitly enable autonomous continuation. This is the default.
 
@@ -129,7 +128,7 @@ Flags must appear before the objective.
 
 The extension exposes three tools to the model:
 
-- `get_goal`: read the current goal, status, budgets, usage, elapsed time, and file paths.
+- `get_goal`: read the current goal, status, optional token budget, elapsed time, and file paths.
 - `create_goal`: create a goal only when the user explicitly asks the agent to set one.
 - `update_goal`: mark the active goal `complete` when the objective is actually achieved.
 
@@ -142,10 +141,8 @@ When a goal is active and auto-continue is enabled, pi injects goal context into
 Autonomous continuation stops when:
 
 - the agent calls `update_goal` with `status=complete`;
-- the token budget is reached;
-- the configured max-turn budget is reached;
-- the user runs `/goal pause` or `/goal clear`;
-- the user aborts an agent run, which pauses the goal.
+- an explicitly configured token budget is reached;
+- the user runs `/goal pause` or `/goal clear`.
 
 ## Local Files
 
@@ -170,9 +167,10 @@ The current goal prompt lives here.
 
 ## Progress
 
-- Status: active
-- Tokens: 12.4K / 50K
-- Turns: 3 / 20
+- Status: running
+- Elapsed: 8m 12s
+- Token budget: 12.4K / 50K (37.6K left)
+- Auto-continue: on
 ```
 
 The extension treats lifecycle metadata as extension-owned and rereads only the `# Goal Prompt` section from disk before writing progress. This prevents `/goal tweak` edits from being overwritten by stale in-memory state while keeping status, budgets, file paths, and archive transitions controlled by the extension.
@@ -182,7 +180,7 @@ For safety, goal file paths are constrained to `.pi/goals/` and `.pi/goals/archi
 ## Recommended Workflow
 
 1. Start with a concrete objective: `/goal migrate auth tests to the new helper API`.
-2. Add budgets for long tasks when desired: `--tokens 100k`, optionally with a turn cap such as `--max-turns 25`.
+2. Add a token budget only when you genuinely want a budget stop, for example `--tokens 100k`.
 3. Use `/goal status` when you want to inspect progress.
 4. Use `/goal tweak ...` when you want to change direction without bypassing the agent.
 5. Use `/goal pause` before manual intervention or risky operations.
