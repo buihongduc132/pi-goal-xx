@@ -1,0 +1,57 @@
+{
+  "name": "pi-goal-xx",
+  "version": "0.1.0",
+  "description": "Goal mode extension for pi: persistent long-running objectives, /goal-set drafting, Sisyphus prompt style, autoContinue, verification contracts, recursive task lists, and an above-editor status overlay. Fork of pi-goal-x (which forked @capyup/pi-goal).",
+  "license": "MIT",
+  "author": "buihongduc132",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "goal",
+    "sisyphus",
+    "autoresearch",
+    "agent-loop",
+    "long-running"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/buihongduc132/pi-goal-xx.git"
+  },
+  "homepage": "https://github.com/buihongduc132/pi-goal-xx#readme",
+  "bugs": {
+    "url": "https://github.com/buihongduc132/pi-goal-xx/issues"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "docs",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/goal.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.74.0",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-tui": "^0.74.0",
+    "typebox": "^1.0.58",
+    "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
