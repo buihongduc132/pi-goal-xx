@@ -28,6 +28,7 @@ import {
 	saveGoalSettingsFileConfig,
 	type GoalSettings,
 } from "./goal-settings.ts";
+import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import {
 	proposalDialogFailureMessage,
 	registerQuestionnaireTools,
@@ -392,6 +393,9 @@ function isMeaningfulProgressToolCall(toolName: string, args: unknown): boolean 
 export default function goalExtension(pi: ExtensionAPI): void {
 	let goalsById = new Map<string, GoalRecord>();
 	let focusedGoalId: string | null = null;
+	// Cached cwd so syncGoalTools (which has no ctx parameter) can read settings.
+	// Set on every turn_start / extension lifecycle entry.
+	let cachedCwd: string | null = null;
 	const state = {
 		get goal(): GoalRecord | null {
 			return focusedGoalFromPool(goalsById, focusedGoalId);
@@ -438,6 +442,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let goalWorkToolCalledThisTurn = false;
 	let turnSeq = 0;
 	let turnStoppedFor: { goalId: string; turnSeq: number } | null = null;
+	function setTurnStopped(goalId: string | null): void {
+		turnStoppedFor = goalId ? { goalId, turnSeq } : null;
+	}
 	let checkpointGoalId: string | null = null;
 
 	// #5 post-compaction resync: when a compaction just happened, the next agent
@@ -459,6 +466,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				console.error("[pi-goal] syncGoalTools: pi.getActiveTools() did not return an array, got", typeof initialTools);
 				return;
 			}
+			const disabledToolsSet = cachedCwd
+				? new Set(loadGoalSettings(cachedCwd).disabledTools ?? [])
+				: new Set<string>();
 			const active = new Set(initialTools);
 			for (const name of goalExecutionWorkTools) active.add(name);
 			active.delete(QUESTION_TOOL_NAME);
@@ -497,6 +507,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				active.add(QUESTION_TOOL_NAME);
 				active.add(QUESTIONNAIRE_TOOL_NAME);
 			}
+			// Per-tool disable: hide any tool listed in settings.disabledTools.
+			// All tool names are eligible (lifecycle included); the user accepts
+			// breakage if they disable a lifecycle tool. Unknown tool names are
+			// silently no-ops.
+			for (const disabledName of disabledToolsSet) active.delete(disabledName);
 			pi.setActiveTools(Array.from(active));
 		} catch (err) {
 			console.error("[pi-goal] syncGoalTools error:", err instanceof Error ? err.message : String(err));
@@ -1336,16 +1351,21 @@ Verification contract:
 		}
 		continuationQueuedFor = goalId;
 		const settings = loadGoalSettings(ctx.cwd);
+		const goal = state.goal;
+		if (!goal) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
 		pi.sendMessage<GoalEventDetails>(
 			{
 				customType: GOAL_EVENT_ENTRY,
-				content: continuationPrompt(state.goal, settings),
+				content: continuationPrompt(goal, settings),
 				display: false,
 				details: {
 					kind: "checkpoint",
-					goalId: state.goal.id,
-					status: state.goal.status,
-					objective: state.goal.objective,
+					goalId: goal.id,
+					status: goal.status,
+					objective: goal.objective,
 					timestamp: Date.now(),
 				},
 			},
@@ -1653,6 +1673,12 @@ Verification contract:
 		if (key === "disableTasks") return config.disableTasks === true ? "true" : "false";
 		if (key === "disableContracts") return config.disableContracts === true ? "true" : "false";
 		if (key === "subtaskDepth") return config.subtaskDepth !== undefined ? String(config.subtaskDepth) : "1";
+		if (key === "disabledTools") return config.disabledTools && config.disabledTools.length > 0 ? config.disabledTools.join(", ") : "(none)";
+		if (key === "auditorSubscriptions") {
+			return config.auditorSubscriptions && config.auditorSubscriptions.length > 0
+				? config.auditorSubscriptions.map((s) => `${s.event}:${s.mode}`).join(", ")
+				: "(none)";
+		}
 		return config[key] ?? "(default)";
 	}
 
@@ -2324,7 +2350,7 @@ ${objective}` : objective,
 				// Reset autoContinue counter — plan changed, agent gets a fresh chain.
 				resetGetGoalNudgeState(state.goal.id);
 				// Mark turn-stopped so subsequent in-turn tool calls are blocked.
-				turnStoppedFor = state.goal.id;
+				setTurnStopped(state.goal.id);
 				syncGoalTools();
 				updateUI(ctx);
 				ctx.ui.notify(`Goal tweaked: ${truncateText(changeSummary, 160)}`, "info");
@@ -2498,7 +2524,7 @@ ${objective}` : objective,
 				};
 				state.goal = writeActiveGoalFile(ctx, state.goal);
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-				turnStoppedFor = state.goal?.id ?? null;
+				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
 				syncGoalTools();
 				updateUI(ctx);
@@ -2565,7 +2591,7 @@ ${objective}` : objective,
 				};
 				state.goal = writeActiveGoalFile(ctx, state.goal);
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-				turnStoppedFor = state.goal?.id ?? null;
+				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
 				syncGoalTools();
 				updateUI(ctx);
@@ -2609,6 +2635,15 @@ ${objective}` : objective,
 			} catch {
 				// Ledger append failure should not block completion
 			}
+			// Async auditor subscription: forward "audit_started" event.
+			emitAuditorSubscription(
+				ctx,
+				settings,
+				"audit_started",
+				{ goalId: auditTarget.id, details: { provider: settings.provider, model: settings.model } },
+				nowIso,
+				ctx.ui?.notify,
+			);
 			// Set up auditor progress display (before createAgentSession)
 			const auditStartedAt = Date.now();
 			auditProgress = {
@@ -2695,7 +2730,7 @@ ${objective}` : objective,
 					};
 					state.goal = writeActiveGoalFile(ctx, state.goal);
 					pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-					turnStoppedFor = state.goal?.id ?? null;
+					setTurnStopped(state.goal?.id ?? null);
 					resetGetGoalNudgeState(state.goal?.id);
 					syncGoalTools();
 					updateUI(ctx);
@@ -2713,7 +2748,7 @@ ${objective}` : objective,
 				} else {
 					// ── Continue working → pause the goal ──────────────
 					pauseActiveGoal(ctx);
-					turnStoppedFor = state.goal?.id ?? null;
+					setTurnStopped(state.goal?.id ?? null);
 					return {
 						content: [{ type: "text", text: "Goal paused — user chose to continue working after skipping audit." }],
 						details: state.goal ? goalDetails(state.goal) : undefined,
@@ -2796,7 +2831,7 @@ ${objective}` : objective,
 			};
 			state.goal = writeActiveGoalFile(ctx, state.goal);
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-			turnStoppedFor = state.goal?.id ?? null;
+			setTurnStopped(state.goal?.id ?? null);
 			resetGetGoalNudgeState(state.goal?.id);
 			syncGoalTools();
 			updateUI(ctx);
@@ -2863,12 +2898,21 @@ ${objective}` : objective,
 			resetGetGoalNudgeState(next.id);
 			// C9 fix: mark turn-stopped so subsequent in-turn tool calls are blocked.
 			// This is the schema-level closure of "agent kept writing files after pause_goal".
-			turnStoppedFor = state.goal.id;
+			setTurnStopped(state.goal.id);
 
 			const suggestionLine = suggested ? `\nSuggested: ${truncateText(suggested, 160)}` : "";
 			ctx.ui.notify(
 				`Goal paused by agent.\nReason: ${truncateText(reason, 200)}${suggestionLine}\n\nUse /goal-resume to continue, /goal-tweak to revise, or /goal-clear to abandon.`,
 				"warning",
+			);
+			// Async auditor subscription: forward "pause" (blocked) event.
+			emitAuditorSubscription(
+				ctx,
+				loadGoalSettings(ctx.cwd),
+				"pause",
+				{ goalId: next.id, details: { reason, suggestedAction: suggested } },
+				nowIso,
+				ctx.ui?.notify,
 			);
 			return {
 				content: [{
@@ -2923,7 +2967,7 @@ ${objective}` : objective,
 			const archived = archiveCurrentGoal(ctx, "agent");
 			resetGetGoalNudgeState(abortedGoalId);
 			setGoal(null, ctx, true, "aborted");
-			turnStoppedFor = abortedGoalId;
+			setTurnStopped(abortedGoalId);
 
 			const archiveLine = archived?.archivedPath ? `\nArchive: ${archived.archivedPath}` : "";
 			ctx.ui.notify(
@@ -2942,6 +2986,15 @@ ${objective}` : objective,
 			} catch {
 				// Ledger append failure should not crash abort
 			}
+			// Async auditor subscription: forward "abort" event.
+			emitAuditorSubscription(
+				ctx,
+				loadGoalSettings(ctx.cwd),
+				"abort",
+				{ goalId: abortedGoalId, details: { reason, archivePath: archived?.archivedPath } },
+				nowIso,
+				ctx.ui?.notify,
+			);
 			return {
 				content: [{
 					type: "text",
@@ -3112,7 +3165,7 @@ ${objective}` : objective,
 			}
 			state.goal = { ...state.goal, taskList, updatedAt: now };
 			setGoal(state.goal, ctx);
-			turnStoppedFor = state.goal.id;
+			setTurnStopped(state.goal.id);
 			resetGetGoalNudgeState(state.goal.id);
 			syncGoalTools();
 			updateUI(ctx);
@@ -3188,6 +3241,15 @@ ${objective}` : objective,
 					verificationSummary: params.verificationSummary,
 				});
 				if (!contractGate.ok) {
+					// Async auditor subscription: forward "contract_violation" event.
+					emitAuditorSubscription(
+						ctx,
+						settings,
+						"contract_violation",
+						{ goalId: state.goal?.id, taskId: params.taskId, details: { contract: taskToComplete?.verificationContract, message: contractGate.message } },
+						nowIso,
+						ctx.ui?.notify,
+					);
 					return {
 						content: [{ type: "text", text: contractGate.message }],
 						details: goalDetails(state.goal),
@@ -3336,6 +3398,18 @@ promptGuidelines: [
 				// Ledger failure should not block task skip
 			}
 
+			// Async auditor subscription: forward "task_skip" event (only on actual skip, not unskip toggle).
+			if (!wasAlreadySkipped) {
+				emitAuditorSubscription(
+					ctx,
+					loadGoalSettings(ctx.cwd),
+					"task_skip",
+					{ goalId: state.goal?.id, taskId: params.taskId, details: { reason: params.reason.trim() } },
+					nowIso,
+					ctx.ui?.notify,
+				);
+			}
+
 			const taskSummary = buildTaskSummary(state.goal.taskList!);
 			const action = wasAlreadySkipped ? "unsikpped" : "skipped";
 			return {
@@ -3388,6 +3462,8 @@ promptGuidelines: [
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
+		// Cache cwd for syncGoalTools settings access.
+		cachedCwd = ctx.cwd;
 		// Per-turn flag resets (#4 + C9 fix).
 		advanceTurnSeq();
 		goalWorkToolCalledThisTurn = false;

@@ -19,7 +19,8 @@ export type GoalLedgerEvent =
   | { type: "goal_aborted"; goalId: string; reason: string; archivePath?: string; at: string }
   | { type: "task_list_set"; goalId: string; taskCount: number; blockCompletion: boolean; at: string }
   | { type: "task_complete"; goalId: string; taskId: string; evidence?: string; at: string }
-  | { type: "task_skipped"; goalId: string; taskId: string; reason: string; at: string };
+  | { type: "task_skipped"; goalId: string; taskId: string; reason: string; at: string }
+  | { type: "audit_subscription_emitted"; event: string; goalId?: string; taskId?: string; details?: Record<string, unknown>; at: string };
 
 export interface GoalLedgerContext {
   cwd: string;
@@ -156,6 +157,8 @@ function isValidLedgerEvent(value: unknown): value is GoalLedgerEvent {
       return typeof obj.goalId === "string" && typeof obj.taskId === "string" && (obj.evidence === undefined || typeof obj.evidence === "string");
     case "task_skipped":
       return typeof obj.goalId === "string" && typeof obj.taskId === "string" && typeof obj.reason === "string";
+    case "audit_subscription_emitted":
+      return typeof obj.event === "string" && (obj.goalId === undefined || typeof obj.goalId === "string") && (obj.taskId === undefined || typeof obj.taskId === "string");
     default:
       return false;
   }
@@ -191,7 +194,11 @@ function sanitizeEvent(event: GoalLedgerEvent): GoalLedgerEvent {
       return { ...event, goalId: safeGoalId(event.goalId) };
     case "task_skipped":
       return { ...event, goalId: safeGoalId(event.goalId) };
+    case "audit_subscription_emitted":
+      return { ...event, goalId: event.goalId ? safeGoalId(event.goalId) : undefined };
     case "goal_unfocused":
+      return event;
+    default:
       return event;
   }
 }

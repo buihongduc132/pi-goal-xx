@@ -36,7 +36,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:coverage": "c8 --all --include='extensions/**' --exclude='tests/**' --exclude='node_modules/**' --reporter=text --reporter=json node --experimental-strip-types --test tests/*.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -48,6 +49,7 @@
     "@earendil-works/pi-ai": "^0.74.0",
     "@earendil-works/pi-coding-agent": "^0.74.0",
     "@earendil-works/pi-tui": "^0.74.0",
+    "c8": "^11.0.0",
     "typebox": "^1.0.58",
     "typescript": "^5.9.3"
   },

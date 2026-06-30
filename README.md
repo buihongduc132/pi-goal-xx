@@ -219,7 +219,9 @@ Configured interactively via `/goal-settings`, or edited directly:
   "provider": "fireworks",
   "model": "accounts/fireworks/models/deepseek-v4-flash",
   "thinkingLevel": "high",
-  "disabled": false
+  "disabled": false,
+  "disabledTools": ["goal_question"],
+  "auditorSubscriptions": [{"event": "pause", "mode": "async"}]
 }
 ```
 
@@ -232,10 +234,13 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `model` | system default | Model name for the auditor agent |
 | `thinkingLevel` | system default | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `disabled` | `false` | When `true`, skip the completion audit entirely |
+| `disabledTools` | `[]` | Tool names to hide entirely (never registered, agent never sees them). All tool names are eligible including lifecycle tools (`complete_goal`/`pause_goal`/`abort_goal`); you accept breakage if you disable a lifecycle tool. Unknown tool names are silently skipped. |
+| `auditorSubscriptions` | `[]` | Events to forward asynchronously to the auditor channel (non-blocking). Each entry: `{event: string, mode: "async"}`. Arbitrary event strings allowed (lifecycle: `pause`, `abort`, `complete`, `audit_started`; task: `task_skip`, `contract_violation`; any custom string). Unmatched event names are silently skipped. |
 
 **Env var overrides:**
 - `PI_GOAL_DISABLE_TASKS=1` — disable task features (takes precedence over file)
 - `PI_GOAL_DISABLE_CONTRACTS=1` — disable contract enforcement (takes precedence over file)
+- `PI_GOAL_DISABLED_TOOLS=tool_a,tool_b` — comma/whitespace-separated tool names to hide (takes precedence over file)
 - `PI_GOAL_SETTINGS_FILE=custom-path.json` — alternative settings file path (relative to cwd or absolute)
 
 ## Environment variables
@@ -245,6 +250,7 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `PI_GOAL_AUTO_CONFIRM` | unset | When `1`, auto-confirms drafts in headless/test contexts |
 | `PI_GOAL_DISABLE_TASKS` | — | When `1`, disable task features (overrides settings file) |
 | `PI_GOAL_DISABLE_CONTRACTS` | — | When `1`, disable contract enforcement (overrides settings file) |
+| `PI_GOAL_DISABLED_TOOLS` | — | Comma/whitespace-separated tool names to hide (overrides settings file) |
 | `PI_GOAL_SETTINGS_FILE` | `.pi/pi-goal-xx-settings.json` | Alternative settings file path (relative to cwd or absolute) |
 
 ## Development

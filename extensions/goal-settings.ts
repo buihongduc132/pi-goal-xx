@@ -1,14 +1,16 @@
 /**
  * Unified global goal settings.
  *
- * Reads `.pi/pi-goal-x-settings.json` with env var overrides:
+ * Reads `.pi/pi-goal-xx-settings.json` with env var overrides:
  *   PI_GOAL_DISABLE_TASKS     — "true" to disable, any other value = use file config
  *   PI_GOAL_DISABLE_CONTRACTS — "true" to disable, any other value = use file config
+ *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
  *   PI_GOAL_SETTINGS_FILE     — alternative settings file path (relative to cwd or absolute)
  *
  * The file may contain:
  *   disableTasks, disableContracts, subtaskDepth,
- *   provider, model, thinkingLevel, disabled
+ *   provider, model, thinkingLevel, disabled,
+ *   disabledTools (string[]), auditorSubscriptions (AuditorSubscription[])
  *
  * additionalProperties: false — unknown keys are rejected.
  */
@@ -18,6 +20,16 @@ import * as path from "node:path";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+/**
+ * Subscription entry: when `event` fires, asynchronously forward to the auditor.
+ * `event` may be any string — unmatched event names are silently skipped.
+ * `mode` is currently restricted to "async" (sync invocation is not supported yet).
+ */
+export interface AuditorSubscription {
+	event: string;
+	mode: "async";
+}
+
 export interface GoalSettings {
 	disableTasks?: boolean;
 	disableContracts?: boolean;
@@ -26,6 +38,10 @@ export interface GoalSettings {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	disabled?: boolean;
+	/** Tool names to hide entirely (never registered, agent never sees them). */
+	disabledTools?: string[];
+	/** Events that should be asynchronously forwarded to the auditor. */
+	auditorSubscriptions?: AuditorSubscription[];
 }
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
@@ -41,19 +57,21 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"thinkingLevel",
 	"thinking_level",
 	"disabled",
+	"disabledTools",
+	"auditorSubscriptions",
 ]);
 
 /**
  * Resolve the path to the unified settings file.
  * Uses `PI_GOAL_SETTINGS_FILE` env var if set (relative to cwd or absolute).
- * Otherwise defaults to `.pi/pi-goal-x-settings.json`.
+ * Otherwise defaults to `.pi/pi-goal-xx-settings.json`.
  */
 export function goalSettingsPath(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
 	const override = asNonEmptyString(env[PI_GOAL_SETTINGS_FILE_ENV]);
 	if (override) {
 		return path.isAbsolute(override) ? override : path.join(cwd, override);
 	}
-	return path.join(cwd, ".pi", "pi-goal-x-settings.json");
+	return path.join(cwd, ".pi", "pi-goal-xx-settings.json");
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -81,6 +99,48 @@ function asThinkingLevel(value: unknown): ThinkingLevel | undefined {
 }
 
 /**
+ * Coerce unknown value into a string[]. Accepts array of strings or a
+ * comma/whitespace-separated string. Returns undefined if not coercible.
+ * Empty strings are dropped. Duplicates are preserved (callers de-dup if needed).
+ */
+function asStringArray(value: unknown): string[] | undefined {
+	if (Array.isArray(value)) {
+		const out: string[] = [];
+		for (const v of value) {
+			const s = typeof v === "string" ? v.trim() : "";
+			if (s) out.push(s);
+		}
+		return out.length > 0 ? out : undefined;
+	}
+	if (typeof value === "string") {
+		const parts = value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+		return parts.length > 0 ? parts : undefined;
+	}
+	return undefined;
+}
+
+/**
+ * Coerce unknown value into AuditorSubscription[]. Each entry must have a
+ * non-empty `event` string and `mode` === "async". Entries that don't match
+ * are silently dropped (treated as unmatched config).
+ */
+function asAuditorSubscriptions(value: unknown): AuditorSubscription[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const out: AuditorSubscription[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+		const rec = entry as Record<string, unknown>;
+		const event = asNonEmptyString(rec.event);
+		const mode = asNonEmptyString(rec.mode);
+		if (!event) continue;
+		// Only "async" is currently supported; unknown modes silently dropped.
+		if (mode !== "async") continue;
+		out.push({ event, mode: "async" });
+	}
+	return out.length > 0 ? out : undefined;
+}
+
+/**
  * Parse raw (deserialized JSON) into a GoalSettings object.
  * Rejects unknown keys (additionalProperties: false semantics).
  */
@@ -89,7 +149,7 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	const record = raw as Record<string, unknown>;
 	const unknownKeys = Object.keys(record).filter((k) => !ALLOWED_SETTINGS_KEYS.has(k));
 	if (unknownKeys.length > 0) {
-		throw new Error(`Unknown pi-goal-x-settings.json key(s): ${unknownKeys.join(", ")}`);
+		throw new Error(`Unknown pi-goal-xx-settings.json key(s): ${unknownKeys.join(", ")}`);
 	}
 	const settings: GoalSettings = {};
 	const disableTasks = asBool(record.disableTasks);
@@ -105,6 +165,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (model !== undefined) settings.model = model;
 	if (thinkingLevel !== undefined) settings.thinkingLevel = thinkingLevel;
 	if (record.disabled === true || record.disabled === "true") settings.disabled = true;
+	const disabledTools = asStringArray(record.disabledTools);
+	if (disabledTools !== undefined) settings.disabledTools = disabledTools;
+	const auditorSubscriptions = asAuditorSubscriptions(record.auditorSubscriptions);
+	if (auditorSubscriptions !== undefined) settings.auditorSubscriptions = auditorSubscriptions;
 	return settings;
 }
 
@@ -136,6 +200,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		model: fileConfig.model,
 		thinkingLevel: fileConfig.thinkingLevel,
 		disabled: fileConfig.disabled,
+		disabledTools: asStringArray(env.PI_GOAL_DISABLED_TOOLS) ?? fileConfig.disabledTools,
+		auditorSubscriptions: fileConfig.auditorSubscriptions,
 	};
 }
 
@@ -159,6 +225,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const disableTasks = asBool(settings.disableTasks);
 	const disableContracts = asBool(settings.disableContracts);
 	const subtaskDepth = asPositiveInt(settings.subtaskDepth);
+	const disabledTools = asStringArray(settings.disabledTools);
+	const auditorSubscriptions = asAuditorSubscriptions(settings.auditorSubscriptions);
 	if (provider) clean.provider = provider;
 	if (model) clean.model = model;
 	if (thinkingLevel) clean.thinkingLevel = thinkingLevel;
@@ -166,6 +234,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (disableTasks === true) clean.disableTasks = true;
 	if (disableContracts === true) clean.disableContracts = true;
 	if (subtaskDepth !== undefined) clean.subtaskDepth = subtaskDepth;
+	if (disabledTools !== undefined) clean.disabledTools = disabledTools;
+	if (auditorSubscriptions !== undefined) clean.auditorSubscriptions = auditorSubscriptions;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -176,6 +246,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.disableTasks) persisted.disableTasks = true;
 	if (clean.disableContracts) persisted.disableContracts = true;
 	if (clean.subtaskDepth !== undefined) persisted.subtaskDepth = clean.subtaskDepth;
+	if (clean.disabledTools) persisted.disabledTools = clean.disabledTools;
+	if (clean.auditorSubscriptions) persisted.auditorSubscriptions = clean.auditorSubscriptions;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }
