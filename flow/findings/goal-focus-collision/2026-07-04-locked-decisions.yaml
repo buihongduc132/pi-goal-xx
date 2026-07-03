@@ -1,0 +1,27 @@
+# Locked decisions for goal-focus-collision explore
+# Each entry: immutable input to future proposals. Traceability via turn + parts + user_quote.
+
+- id: LD1
+  turn: turn4
+  parts: ["D1"]
+  user_quote: |
+    "1. The suspended-laptop case. Lock lapses after 3 min of suspension. On resume, your session might find someone else took over. Acceptable? Or do you want a longer lease (say 30 min) to tolerate suspension? Ignore this. super edge cases , we are not using laptop nor it sleep; just follow least resistant path for this;"
+  decision: "No special handling for suspended-laptop or sleep edge cases. Follow least-resistant path — pick a sensible default lease (3 min proposed), no suspend detection, no long-lease logic."
+  status: locked
+
+- id: LD2
+  turn: turn4
+  parts: ["D2"]
+  user_quote: |
+    "2. Explicit override. If goal A is locked by S1, and you manually /goal-focus A in S2 — should it (a) refuse with owned by S1, (b) warn but allow (steal), or (c) ask S1 looks alive, take over anyway? The lock is advisory; the user is the authority. `c`"
+  decision: "Explicit /goal-focus on a locked goal asks the user before stealing (option c). Prompt: 'S1 looks alive, take over anyway?' The lock is advisory; the user is the authority."
+  status: locked
+
+- id: LD3
+  turn: turn4
+  parts: ["D3"]
+  user_quote: |
+    "3. The === 1 auto-focus itself. Even with the lock, should a fresh session auto-focus any goal? Or should auto-focus only happen on session reason: resume (youre coming back to your own session) and never on reason: "new" or "startup"? This would kill the "I just opened pi for an unrelated task and it stole my goal" case entirely.
+    Have env flag for this configuration. Default: "resume" only ."
+  decision: "Auto-focus gated by env flag. Default: auto-focus only fires on session reason 'resume'. Never on 'new' or 'startup'. Env flag (name TBD) allows opting into broader auto-focus."
+  status: locked
