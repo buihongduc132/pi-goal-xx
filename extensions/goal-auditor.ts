@@ -7,7 +7,9 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	createExtensionRuntime,
+	DefaultResourceLoader,
 	defineTool,
+	getAgentDir,
 	SessionManager,
 	SettingsManager,
 	type ExtensionContext,
@@ -205,21 +207,24 @@ export const reportAuditorProgressParams = Type.Object({
 /**
  * Build the auditor's resource loader.
  *
- * When `mainResourceLoader` is provided, skills / extensions / prompts / themes
- * are inherited from the main session (filtered per the resolved resources).
- * When omitted, the auditor gets an empty resource set (legacy baseline).
+ * `mainResourceLoader` is the source of discovered resources (extensions /
+ * skills / prompts / themes). In production it is a `DefaultResourceLoader`
+ * built from the main session's cwd (see `runGoalCompletionAuditor`), so the
+ * auditor inherits the same project-local + user-level resources a normal pi
+ * session would load — including MCP servers, which arrive via the
+ * `pi-mcp-adapter` extension that `DefaultResourceLoader` discovers.
  *
- * Isolation invariants:
+ * The returned loader applies the resolved include/exclude filters to skills
+ * and extensions, then enforces two isolation invariants:
  *  - `getSystemPrompt` always returns the auditor's own read-only-minded prompt.
  *  - `getAppendSystemPrompt` always returns [] — main-session append prompts
  *    are NOT inherited, to keep the auditor's effective system prompt
  *    independent of the executor's prompt-injected state.
  *
- * Limitation: `resolved.mcp` is currently computed but not yet applied.
- * `@earendil-works/pi-coding-agent`'s `createAgentSession` exposes no MCP
- * allowlist parameter and the auditor uses `SettingsManager.inMemory()` (which
- * carries no MCP config). MCP filtering will take effect once pi-coding-agent
- * exposes an MCP allowlist API; the resolution logic here is ready for it.
+ * `resolved.mcp` is computed for documentation/future use; pi-core has no
+ * MCP allowlist API, so MCP servers are inherited wholesale via the
+ * pi-mcp-adapter extension (filtered only by `auditorExclude.extensions`
+ * matching `pi-mcp-adapter*` if the user wants to strip MCP from the auditor).
  */
 function makeAuditorResourceLoader(
 	resolved: ResolvedAuditorResources,
@@ -301,8 +306,7 @@ function modelLabel(model: Model<any> | undefined): string | undefined {
  *
  * `tools` is the main session's active tool list (e.g. from
  * `pi.getActiveTools()`). The others are optional and only used when
- * a real `resourceLoader` is supplied; when omitted the corresponding
- * auditor resource list is empty (baseline).
+ * a real `resourceLoader` is supplied (directly or via `inheritFromCwd`).
  */
 export interface MainSessionResources {
 	tools?: string[];
@@ -311,10 +315,18 @@ export interface MainSessionResources {
 	extensions?: string[];
 	/**
 	 * Main session's resource loader, used to inherit skills/extensions/prompts.
-	 * Optional: when omitted, the auditor runs with an empty resource set
-	 * (only the resolved tool list is honoured).
+	 * When omitted AND `inheritFromCwd` is false/absent, the auditor runs with
+	 * an empty resource set (legacy baseline — used by tests).
 	 */
 	resourceLoader?: ResourceLoader;
+	/**
+	 * When true and no `resourceLoader` is supplied, the auditor builds a
+	 * `DefaultResourceLoader` from the main session's cwd (+ `getAgentDir()`)
+	 * so it inherits project-local + user-level extensions / skills / prompts /
+	 * themes / MCP (via the pi-mcp-adapter extension) exactly like a normal pi
+	 * session. Set this in production; omit it in tests to keep them isolated.
+	 */
+	inheritFromCwd?: boolean;
 }
 
 export async function runGoalCompletionAuditor(args: {
@@ -349,16 +361,56 @@ export async function runGoalCompletionAuditor(args: {
 	}
 	try {
 		const createSession = args.createSession ?? createAgentSession;
+		const patternCache = new AuditorPatternCache();
+
+		// Source of discovered resources. Priority:
+		//  1. Caller-injected `mainResources.resourceLoader` (tests, or a future
+		//     pi API that hands over the main session's loader).
+		//  2. `mainResources.inheritFromCwd` → build a DefaultResourceLoader from
+		//     the main session's cwd so the auditor inherits the same project +
+		//     user resources (incl. MCP via pi-mcp-adapter) a normal pi session
+		//     would load for this cwd.
+		//  3. Otherwise → undefined (legacy empty resource set; test isolation).
+		let mainResourceLoader = args.mainResources?.resourceLoader;
+		if (!mainResourceLoader && args.mainResources?.inheritFromCwd) {
+			const agentDir = getAgentDir();
+			const settingsManager = SettingsManager.create(args.ctx.cwd, agentDir);
+			mainResourceLoader = new DefaultResourceLoader({
+				cwd: args.ctx.cwd,
+				agentDir,
+				settingsManager,
+			});
+			await mainResourceLoader.reload();
+		}
+
+		// Derive the main skill / extension name lists from the loader when the
+		// caller didn't supply them explicitly. This makes the include/exclude
+		// filter operate on the resources the auditor will actually see (the
+		// loader's discovery), instead of an empty list that would strip
+		// everything in inherit mode.
+		let mainSkills = args.mainResources?.skills;
+		let mainExtensions = args.mainResources?.extensions;
+		if (mainResourceLoader && (mainSkills === undefined || mainExtensions === undefined)) {
+			try {
+				if (mainSkills === undefined) {
+					mainSkills = mainResourceLoader.getSkills().skills.map((s) => s.name);
+				}
+			} catch { /* loader not ready — leave undefined */ }
+			try {
+				if (mainExtensions === undefined) {
+					mainExtensions = mainResourceLoader.getExtensions().extensions.map((e) => e.path ?? e.resolvedPath).filter((x): x is string => typeof x === "string");
+				}
+			} catch { /* loader not ready — leave undefined */ }
+		}
 
 		// Resolve auditor resources (tools/mcp/skills/extensions) from the main
 		// session's resources and the user's auditorMode + include/exclude config.
-		const patternCache = new AuditorPatternCache();
 		const resolved = resolveAuditorResources(
 			{
 				tools: args.mainResources?.tools,
 				mcp: args.mainResources?.mcp,
-				skills: args.mainResources?.skills,
-				extensions: args.mainResources?.extensions,
+				skills: mainSkills,
+				extensions: mainExtensions,
 			},
 			config,
 			patternCache,
@@ -415,7 +467,7 @@ export async function runGoalCompletionAuditor(args: {
 			model,
 			thinkingLevel,
 			modelRegistry: args.ctx.modelRegistry,
-			resourceLoader: makeAuditorResourceLoader(resolved, args.mainResources?.resourceLoader),
+			resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
 			sessionManager: SessionManager.inMemory(args.ctx.cwd),
 			settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 			tools: resolved.tools,
