@@ -393,12 +393,12 @@ export async function runGoalCompletionAuditor(args: {
 		if (mainResourceLoader && (mainSkills === undefined || mainExtensions === undefined)) {
 			try {
 				if (mainSkills === undefined) {
-					mainSkills = mainResourceLoader.getSkills().skills.map((s) => s.name);
+					mainSkills = mainResourceLoader.getSkills()?.skills?.map((s) => s.name);
 				}
 			} catch { /* loader not ready — leave undefined */ }
 			try {
 				if (mainExtensions === undefined) {
-					mainExtensions = mainResourceLoader.getExtensions().extensions.map((e) => e.path ?? e.resolvedPath).filter((x): x is string => typeof x === "string");
+					mainExtensions = mainResourceLoader.getExtensions()?.extensions?.map((e) => e.path ?? e.resolvedPath).filter((x): x is string => typeof x === "string");
 				}
 			} catch { /* loader not ready — leave undefined */ }
 		}

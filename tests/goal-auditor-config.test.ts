@@ -327,6 +327,10 @@ describe("runGoalCompletionAuditor — resourceLoader inheritance", () => {
 		} finally {
 			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = prev;
+			try {
+				fs.rmSync(fakeAgentDir, { recursive: true, force: true });
+				fs.rmSync(cwd, { recursive: true, force: true });
+			} catch { /* best-effort cleanup */ }
 		}
 	});
 });
