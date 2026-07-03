@@ -252,11 +252,10 @@ describe("runGoalCompletionAuditor — prompt resolution", () => {
 });
 
 describe("runGoalCompletionAuditor — resourceLoader inheritance", () => {
-	it("passes an empty resourceLoader when mainResources.resourceLoader is omitted", async () => {
+	it("uses an empty resourceLoader when neither inheritFromCwd nor resourceLoader is provided (legacy/test path)", async () => {
 		const cwd = makeTmpCwd();
 		const c = await capture(cwd, {}, { tools: ["read", "bash"] });
 		assert.equal(typeof c.resourceLoader.getSkills, "function");
-		// No main loader → empty skills/extensions
 		assert.deepEqual(c.resourceLoader.getSkills().skills, []);
 		assert.deepEqual(c.resourceLoader.getExtensions().extensions, []);
 	});
@@ -307,5 +306,31 @@ describe("runGoalCompletionAuditor — resourceLoader inheritance", () => {
 		const skills = c.resourceLoader.getSkills().skills;
 		// resolveAuditorResources filters to only test-skill (deploy excluded)
 		assert.deepEqual(skills.map((s: any) => s.name), ["test-skill"]);
+	});
+
+	it("inheritFromCwd=true discovers project-local skills written to <cwd>/.pi/skills/", async () => {
+		// Proves the auditor inherits cwd's resources via DefaultResourceLoader:
+		// a skill placed under <cwd>/.pi/skills/ is discovered and survives the
+		// filter wrapper (inherit mode, no excludes).
+		const cwd = makeTmpCwd();
+		const fakeAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-agentdir-"));
+		// Plant a project-local skill on disk.
+		const skillDir = path.join(cwd, ".pi", "skills", "my-proj-skill");
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: my-proj-skill\ndescription: x\n---\nbody\n");
+		const prev = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = fakeAgentDir;
+		try {
+			const c = await capture(cwd, {}, { tools: ["read"], inheritFromCwd: true });
+			const skillNames = c.resourceLoader.getSkills().skills.map((s: any) => s.name);
+			assert.ok(skillNames.includes("my-proj-skill"), `expected my-proj-skill in ${JSON.stringify(skillNames)}`);
+		} finally {
+			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prev;
+			try {
+				fs.rmSync(fakeAgentDir, { recursive: true, force: true });
+				fs.rmSync(cwd, { recursive: true, force: true });
+			} catch { /* best-effort cleanup */ }
+		}
 	});
 });

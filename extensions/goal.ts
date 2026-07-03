@@ -2738,6 +2738,10 @@ ${objective}` : objective,
 					// verify work using the same tools the executor had (filtered by
 					// auditorMode + auditorExclude/auditorInclude in settings).
 					tools: safeGetActiveTools(pi),
+					// Build a DefaultResourceLoader from cwd so the auditor inherits
+					// the same project + user extensions / skills / prompts / themes /
+					// MCP (via pi-mcp-adapter) the main session has.
+					inheritFromCwd: true,
 				},
 				onProgress: (progress) => {
 					auditProgress = {

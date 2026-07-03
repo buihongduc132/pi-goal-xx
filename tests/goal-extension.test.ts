@@ -297,6 +297,7 @@ describe("goal.ts — complete_goal paths", () => {
 
 	it("complete_goal rejects when TASK GATE has pending blocking tasks", async () => {
 		const cwd = tmpCwd();
+		fs.writeFileSync(path.join(cwd, ".pi", "pi-goal-xx-settings.json"), JSON.stringify({ disabled: true }));
 		await h.commands.get("goals-set")!.handler("Objective: x. Success criteria: y.", makeCtx(cwd));
 		await h.tools.get("propose_task_list")!.execute(
 			"t", { tasks: [{ id: "p1", title: "Must do" }] }, undefined, undefined, makeCtx(cwd),
