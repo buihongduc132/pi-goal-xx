@@ -543,7 +543,7 @@ This repository can be validated locally with tests and packaging checks. Publis
 
 - **Worker session isolation** — Workers spawned by pi-agent-teams no longer inherit the leader's goal focus. Prevents workers from accidentally executing the leader's goal instead of their assigned task. Fixes zombie process accumulation (22 processes at 90% CPU for 2+ days).
 - **Comprehensive timer cleanup** — All internal timers (`statusRefreshTimer`, `auditAnimationTimer`, `debugMockAuditTimer`, `continuationTimer`) are now cleared in `session_shutdown` handler, preventing test runner hangs and zombie processes.
-- **Test reliability** — Re-enabled `afterEach` cleanup in test suite with proper timeout guards. All 564 tests pass and exit cleanly within 1.6s.
+- **Test reliability** — Re-enabled `afterEach` cleanup in test suite with proper timeout guards. All 653 tests pass and exit cleanly within 1.6s.
 - **`disabledTools` config** — Hide specific tools entirely from the agent via settings file or `PI_GOAL_DISABLED_TOOLS` env var.
 - **`auditorSubscriptions` config** — Forward events asynchronously to the auditor channel for non-blocking audit tracking.
 - **Widget timing fix** — Convert milliseconds to seconds before passing to `formatDuration` for tool timing display.
