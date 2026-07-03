@@ -102,7 +102,7 @@ New env flag:
 - `PI_GOAL_AUTO_FOCUS=resume` (default) — auto-focus only on resume-like reasons.
 - `PI_GOAL_AUTO_FOCUS=all` — opt back into auto-focus on any reason (legacy behavior).
 
-**Rationale** (LD3): The "I just opened pi for an unrelated task and it stole my goal" case is the core complaint. Killing auto-focus on `new`/`startup`/`fork`/tree-nav eliminates it. `resume` and `reload` are safe because they are the user's OWN session continuing.
+**Rationale** (LD3): The "I just opened pi for an unrelated task and it stole my goal" case is the core complaint. Killing auto-focus on `new`/`startup`/`fork`/tree-nav eliminates it. `resume` is safe because it is the user's OWN session continuing. `reload` would be safe by the same logic (own session, hot-reload), but LD3 is locked at literal "resume only" — so `reload` is excluded from the DEFAULT and is only reachable via `PI_GOAL_AUTO_FOCUS=all`. This is a deliberate deviation-from-the-rationale to honor the locked decision verbatim; if the focus-drop on hot-reload proves annoying, a new locked-decision update can promote `reload` (requires user sign-off, not a silent plan extension).
 
 **Alternatives**:
 - Kill auto-focus entirely — breaks the "reopen, goal continues" UX.
