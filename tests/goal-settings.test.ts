@@ -315,3 +315,88 @@ describe("isAuditorEnabledByDefault", () => {
 		assert.equal(isAuditorEnabledByDefault({ disabled: true }), false);
 	});
 });
+
+describe("parseGoalSettings — auditor config fields", () => {
+	it("parses auditorMode valid values", () => {
+		assert.equal(parseGoalSettings({ auditorMode: "inherit" }).auditorMode, "inherit");
+		assert.equal(parseGoalSettings({ auditorMode: "minimal" }).auditorMode, "minimal");
+	});
+	it("rejects invalid auditorMode (undefined, caller defaults later)", () => {
+		assert.equal(parseGoalSettings({ auditorMode: "bogus" }).auditorMode, undefined);
+		assert.equal(parseGoalSettings({ auditorMode: 42 }).auditorMode, undefined);
+	});
+	it("parses auditorPromptMode valid values", () => {
+		for (const m of ["global-local", "local", "global-local-merge"] as const) {
+			assert.equal(parseGoalSettings({ auditorPromptMode: m }).auditorPromptMode, m);
+		}
+	});
+	it("rejects invalid auditorPromptMode", () => {
+		assert.equal(parseGoalSettings({ auditorPromptMode: "nope" }).auditorPromptMode, undefined);
+	});
+	it("parses auditorPrompt inline string", () => {
+		assert.equal(parseGoalSettings({ auditorPrompt: "  be strict  " }).auditorPrompt, "be strict");
+		assert.equal(parseGoalSettings({ auditorPrompt: "   " }).auditorPrompt, undefined);
+	});
+	it("parses auditorExclude with arrays", () => {
+		const s = parseGoalSettings({
+			auditorExclude: { tools: ["write", "edit_*"], mcp: ["danger"], skills: ["deploy"], extensions: ["cc*"] },
+		});
+		assert.deepEqual(s.auditorExclude?.tools, ["write", "edit_*"]);
+		assert.deepEqual(s.auditorExclude?.mcp, ["danger"]);
+		assert.deepEqual(s.auditorExclude?.skills, ["deploy"]);
+		assert.deepEqual(s.auditorExclude?.extensions, ["cc*"]);
+	});
+	it("parses auditorInclude partially", () => {
+		const s = parseGoalSettings({ auditorInclude: { tools: ["gitnexus_query"] } });
+		assert.deepEqual(s.auditorInclude?.tools, ["gitnexus_query"]);
+		assert.equal(s.auditorInclude?.mcp, undefined);
+		assert.equal(s.auditorInclude?.skills, undefined);
+		assert.equal(s.auditorInclude?.extensions, undefined);
+	});
+	it("auditorExclude with empty arrays yields undefined", () => {
+		assert.equal(parseGoalSettings({ auditorExclude: { tools: [], mcp: [] } }).auditorExclude, undefined);
+	});
+	it("accepts comma-separated string in filter arrays", () => {
+		const s = parseGoalSettings({ auditorExclude: { tools: "write, edit, bash" } });
+		assert.deepEqual(s.auditorExclude?.tools, ["write", "edit", "bash"]);
+	});
+	it("rejects unknown settings keys still", () => {
+		assert.throws(() => parseGoalSettings({ bogus: 1 }), /Unknown/);
+	});
+});
+
+describe("loadGoalSettings / saveGoalSettingsFileConfig — auditor round trip", () => {
+	it("persists and reloads auditor config fields", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-set-"));
+		const original: GoalSettings = {
+			disableContracts: true,
+			subtaskDepth: 3,
+			disabledTools: ["a"],
+			auditorSubscriptions: [{ event: "e", mode: "async" } as AuditorSubscription],
+			auditorMode: "minimal",
+			auditorPromptMode: "local",
+			auditorPrompt: "strict audit",
+			auditorExclude: { tools: ["write"], extensions: ["cc*"] },
+			auditorInclude: { mcp: ["gitnexus"] },
+		};
+		saveGoalSettingsFileConfig(tmp, original);
+		const loaded = loadGoalSettingsFileConfig(tmp, {});
+		assert.equal(loaded.disableContracts, true);
+		assert.equal(loaded.subtaskDepth, 3);
+		assert.deepEqual(loaded.disabledTools, ["a"]);
+		assert.deepEqual(loaded.auditorSubscriptions, [{ event: "e", mode: "async" }]);
+		assert.equal(loaded.auditorMode, "minimal");
+		assert.equal(loaded.auditorPromptMode, "local");
+		assert.equal(loaded.auditorPrompt, "strict audit");
+		assert.deepEqual(loaded.auditorExclude?.tools, ["write"]);
+		assert.deepEqual(loaded.auditorExclude?.extensions, ["cc*"]);
+		assert.deepEqual(loaded.auditorInclude?.mcp, ["gitnexus"]);
+	});
+	it("loadGoalSettings defaults auditorMode to undefined and auditorPromptMode to undefined when absent", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-set2-"));
+		const loaded = loadGoalSettings(tmp, {});
+		assert.equal(loaded.auditorMode, undefined);
+		assert.equal(loaded.auditorPromptMode, undefined);
+		assert.equal(loaded.auditorPrompt, undefined);
+	});
+});

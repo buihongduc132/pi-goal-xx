@@ -197,6 +197,20 @@ function isWorkerSession(): boolean {
 	return process.env.PI_TEAMS_WORKER === "1";
 }
 
+/**
+ * Safely fetch the main session's active tool list for auditor inheritance.
+ * Returns [] if pi.getActiveTools() is unavailable (e.g. extension runtime
+ * not yet bound). Never throws.
+ */
+function safeGetActiveTools(pi: ExtensionAPI): string[] {
+	try {
+		const tools = pi.getActiveTools();
+		return Array.isArray(tools) ? tools : [];
+	} catch {
+		return [];
+	}
+}
+
 // ---------- summaries ----------
 
 function usageLines(goal: GoalRecord): string[] {
@@ -1705,7 +1719,20 @@ Verification contract:
 				? config.auditorSubscriptions.map((s) => `${s.event}:${s.mode}`).join(", ")
 				: "(none)";
 		}
-		return config[key] ?? "(default)";
+		if (key === "auditorMode") return config.auditorMode ?? "inherit";
+		if (key === "auditorPromptMode") return config.auditorPromptMode ?? "global-local";
+		if (key === "auditorPrompt") return config.auditorPrompt ?? "(default)";
+		if (key === "auditorExclude" || key === "auditorInclude") {
+			const filter = (key === "auditorExclude" ? config.auditorExclude : config.auditorInclude) ?? {};
+			const parts: string[] = [];
+			parts.push(`tools=[${(filter.tools ?? []).join(",") || "none"}]`);
+			parts.push(`mcp=[${(filter.mcp ?? []).join(",") || "none"}]`);
+			parts.push(`skills=[${(filter.skills ?? []).join(",") || "none"}]`);
+			parts.push(`extensions=[${(filter.extensions ?? []).join(",") || "none"}]`);
+			return parts.join(" ");
+		}
+		const fallback = config[key as keyof GoalSettings];
+		return typeof fallback === "string" ? fallback : "(default)";
 	}
 
 	function settingsLines(config: GoalSettings): string[] {
@@ -2701,6 +2728,12 @@ ${objective}` : objective,
 				verificationSummary: params.verificationSummary,
 				settings: loadGoalSettings(ctx.cwd),
 				signal: auditAbortController.signal,
+				mainResources: {
+					// Inherit the main session's active tool list so the auditor can
+					// verify work using the same tools the executor had (filtered by
+					// auditorMode + auditorExclude/auditorInclude in settings).
+					tools: safeGetActiveTools(pi),
+				},
 				onProgress: (progress) => {
 					auditProgress = {
 						...progress,

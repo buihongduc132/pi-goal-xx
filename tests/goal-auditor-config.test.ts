@@ -1,0 +1,311 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import { runGoalCompletionAuditor } from "../extensions/goal-auditor.ts";
+import type { GoalRecord } from "../extensions/goal-record.ts";
+
+function makeGoal(over: Partial<GoalRecord> = {}): GoalRecord {
+	return {
+		id: "g-aud",
+		objective: "Build the thing",
+		status: "active",
+		autoContinue: false,
+		usage: { tokensUsed: 0, activeSeconds: 0 },
+		sisyphus: false,
+		createdAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:00:00.000Z",
+		...over,
+	};
+}
+
+function makeTmpCwd(): string {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-aud-int-"));
+	fs.mkdirSync(path.join(tmp, ".pi"), { recursive: true });
+	return tmp;
+}
+
+function makeCtx(cwd: string): any {
+	const model = { provider: "def", id: "m1", name: "m1" };
+	return {
+		cwd,
+		model,
+		modelRegistry: {
+			find: (p: string, i: string) => (p === "def" && i === "m1" ? model : undefined),
+			getAvailable: () => [model],
+		},
+		hasUI: false,
+	};
+}
+
+interface CapturedSessionArgs {
+	tools: string[];
+	resourceLoader: any;
+	cwd: string;
+}
+
+function makeCapturingCreateSession(
+	captured: CapturedSessionArgs,
+	finalOutput = "<approved/>",
+): any {
+	return async (sessionArgs: any) => {
+		captured.tools = [...(sessionArgs.tools ?? [])];
+		captured.resourceLoader = sessionArgs.resourceLoader;
+		captured.cwd = sessionArgs.cwd;
+		let subscriber: ((event: any) => void) | null = null;
+		const session = {
+			subscribe(cb: (event: any) => void) {
+				subscriber = cb;
+				return () => { subscriber = null; };
+			},
+			async prompt(_text: string) {
+				subscriber?.({
+					type: "message_end",
+					message: { role: "assistant", content: [{ type: "text", text: finalOutput }] },
+				});
+			},
+			abort() {},
+		};
+		return { session };
+	};
+}
+
+async function capture(cwd: string, settings: any, mainResources?: any): Promise<CapturedSessionArgs> {
+	const captured: CapturedSessionArgs = { tools: [], resourceLoader: null as any, cwd: "" };
+	if (settings && Object.keys(settings).length > 0) {
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify(settings),
+		);
+	}
+	await runGoalCompletionAuditor({
+		ctx: makeCtx(cwd),
+		goal: makeGoal(),
+		detailedSummary: "d",
+		createSession: makeCapturingCreateSession(captured),
+		...(mainResources ? { mainResources } : {}),
+	});
+	return captured;
+}
+
+describe("runGoalCompletionAuditor — backward compat (no mainResources)", () => {
+	it("falls back to baseline tools when no mainResources", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(cwd, {});
+		// Inherit mode with empty main tools → baseline + report_auditor_progress
+		assert.ok(c.tools.includes("read"));
+		assert.ok(c.tools.includes("bash"));
+		assert.ok(c.tools.includes("report_auditor_progress"));
+	});
+});
+
+describe("runGoalCompletionAuditor — tool inheritance (inherit mode)", () => {
+	const mainTools = ["read", "write", "edit", "bash", "gitnexus_query", "gitnexus_context"];
+
+	it("inherits all main tools by default", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(cwd, {}, { tools: mainTools });
+		assert.ok(c.tools.includes("write"));
+		assert.ok(c.tools.includes("gitnexus_query"));
+		assert.ok(c.tools.includes("report_auditor_progress"));
+	});
+
+	it("applies auditorExclude.tools (exact)", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(
+			cwd,
+			{ auditorExclude: { tools: ["write", "edit"] } },
+			{ tools: mainTools },
+		);
+		assert.equal(c.tools.includes("write"), false);
+		assert.equal(c.tools.includes("edit"), false);
+		assert.ok(c.tools.includes("bash"));
+	});
+
+	it("applies auditorExclude.tools (wildcard)", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(
+			cwd,
+			{ auditorExclude: { tools: ["gitnexus*"] } },
+			{ tools: mainTools },
+		);
+		assert.equal(c.tools.includes("gitnexus_query"), false);
+		assert.equal(c.tools.includes("gitnexus_context"), false);
+		assert.ok(c.tools.includes("write"));
+	});
+
+	it("never strips report_auditor_progress even with wildcard exclude", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(
+			cwd,
+			{ auditorExclude: { tools: ["*"] } },
+			{ tools: mainTools },
+		);
+		assert.deepEqual(c.tools, ["report_auditor_progress"]);
+	});
+});
+
+describe("runGoalCompletionAuditor — minimal mode", () => {
+	const mainTools = ["read", "write", "gitnexus_query"];
+
+	it("uses baseline only when no includes", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(cwd, { auditorMode: "minimal" }, { tools: mainTools });
+		assert.ok(c.tools.includes("read"));
+		assert.ok(c.tools.includes("bash"));
+		assert.equal(c.tools.includes("write"), false);
+		assert.equal(c.tools.includes("gitnexus_query"), false);
+	});
+
+	it("adds included tools from main", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(
+			cwd,
+			{ auditorMode: "minimal", auditorInclude: { tools: ["gitnexus_query"] } },
+			{ tools: mainTools },
+		);
+		assert.ok(c.tools.includes("gitnexus_query"));
+		assert.ok(c.tools.includes("read"));
+		assert.equal(c.tools.includes("write"), false);
+	});
+});
+
+describe("runGoalCompletionAuditor — prompt resolution", () => {
+	it("uses hardcoded default when no inline/file prompts", async () => {
+		const cwd = makeTmpCwd();
+		let promptedText = "";
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal({ objective: "UNIQUE-OBJECTIVE-MARKER" }),
+			detailedSummary: "d",
+			createSession: async (sessionArgs: any) => {
+				let sub: ((e: any) => void) | null = null;
+				const session = {
+					subscribe(cb: (e: any) => void) { sub = cb; return () => { sub = null; }; },
+					async prompt(t: string) {
+						promptedText = t;
+						sub?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "<approved/>" }] } });
+					},
+					abort() {},
+				};
+				return { session };
+			},
+		});
+		// Default prompt is buildGoalAuditorPrompt output, which contains the objective.
+		assert.match(promptedText, /UNIQUE-OBJECTIVE-MARKER/);
+		assert.match(promptedText, /independent completion auditor/);
+	});
+
+	it("uses inline auditorPrompt override", async () => {
+		const cwd = makeTmpCwd();
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ auditorPrompt: "INLINE-OVERRIDE-PROMPT" }),
+		);
+		let promptedText = "";
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal({ objective: "UNIQUE-OBJECTIVE-MARKER" }),
+			detailedSummary: "d",
+			createSession: async (_sessionArgs: any) => {
+				let sub: ((e: any) => void) | null = null;
+				const session = {
+					subscribe(cb: (e: any) => void) { sub = cb; return () => { sub = null; }; },
+					async prompt(t: string) {
+						promptedText = t;
+						sub?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "<approved/>" }] } });
+					},
+					abort() {},
+				};
+				return { session };
+			},
+		});
+		assert.equal(promptedText, "INLINE-OVERRIDE-PROMPT");
+		// The default prompt with the objective is NOT used.
+		assert.doesNotMatch(promptedText, /UNIQUE-OBJECTIVE-MARKER/);
+	});
+
+	it("uses local file prompt when present (global-local mode default)", async () => {
+		const cwd = makeTmpCwd();
+		fs.writeFileSync(path.join(cwd, ".pi", "auditor-prompt.md"), "LOCAL-FILE-PROMPT");
+		let promptedText = "";
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "d",
+			createSession: async (_sessionArgs: any) => {
+				let sub: ((e: any) => void) | null = null;
+				const session = {
+					subscribe(cb: (e: any) => void) { sub = cb; return () => { sub = null; }; },
+					async prompt(t: string) {
+						promptedText = t;
+						sub?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "<approved/>" }] } });
+					},
+					abort() {},
+				};
+				return { session };
+			},
+		});
+		assert.equal(promptedText, "LOCAL-FILE-PROMPT");
+	});
+});
+
+describe("runGoalCompletionAuditor — resourceLoader inheritance", () => {
+	it("passes an empty resourceLoader when mainResources.resourceLoader is omitted", async () => {
+		const cwd = makeTmpCwd();
+		const c = await capture(cwd, {}, { tools: ["read", "bash"] });
+		assert.equal(typeof c.resourceLoader.getSkills, "function");
+		// No main loader → empty skills/extensions
+		assert.deepEqual(c.resourceLoader.getSkills().skills, []);
+		assert.deepEqual(c.resourceLoader.getExtensions().extensions, []);
+	});
+
+	it("delegates to main resourceLoader when provided (inherit mode)", async () => {
+		const cwd = makeTmpCwd();
+		const fakeSkill = { name: "deploy-skill", filePath: "/x", baseDir: "/x", sourceInfo: {}, disableModelInvocation: false, description: "d" };
+		const fakeExt = { path: "cc-safety-net", resolvedPath: "/cc", sourceInfo: {}, handlers: new Map(), tools: new Map(), messageRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map() };
+		const mainLoader = {
+			getExtensions: () => ({ extensions: [fakeExt], errors: [], runtime: {} }),
+			getSkills: () => ({ skills: [fakeSkill], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => "",
+			getAppendSystemPrompt: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		};
+		const c = await capture(cwd, {}, { tools: ["read", "bash"], skills: ["deploy-skill"], extensions: ["cc-safety-net"], resourceLoader: mainLoader });
+		const skills = c.resourceLoader.getSkills().skills;
+		assert.equal(skills.length, 1);
+		assert.equal(skills[0].name, "deploy-skill");
+		const exts = c.resourceLoader.getExtensions().extensions;
+		assert.equal(exts.length, 1);
+	});
+
+	it("filters inherited skills by exclude pattern", async () => {
+		const cwd = makeTmpCwd();
+		const fakeSkillA = { name: "deploy-skill", filePath: "/a", baseDir: "/a", sourceInfo: {}, disableModelInvocation: false, description: "d" };
+		const fakeSkillB = { name: "test-skill", filePath: "/b", baseDir: "/b", sourceInfo: {}, disableModelInvocation: false, description: "d" };
+		const mainLoader = {
+			getExtensions: () => ({ extensions: [], errors: [], runtime: {} }),
+			getSkills: () => ({ skills: [fakeSkillA, fakeSkillB], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => "",
+			getAppendSystemPrompt: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		};
+		const c = await capture(
+			cwd,
+			{ auditorExclude: { skills: ["deploy*"] } },
+			{ tools: ["read"], skills: ["deploy-skill", "test-skill"], extensions: [], resourceLoader: mainLoader },
+		);
+		const skills = c.resourceLoader.getSkills().skills;
+		// resolveAuditorResources filters to only test-skill (deploy excluded)
+		assert.deepEqual(skills.map((s: any) => s.name), ["test-skill"]);
+	});
+});

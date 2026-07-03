@@ -15,6 +15,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { GoalRecord, GoalTask, GoalTaskList } from "./goal-record.ts";
 import { loadGoalSettings, type GoalSettings } from "./goal-settings.ts";
+import { AuditorPatternCache } from "./auditor-patterns.ts";
+import {
+	resolveAuditorResources,
+	type ResolvedAuditorResources,
+} from "./auditor-modes.ts";
+import { loadAuditorPrompt } from "./auditor-prompt.ts";
 
 export interface AuditorProgress {
 	/** Current tool being executed by the auditor, if any */
@@ -196,13 +202,46 @@ export const reportAuditorProgressParams = Type.Object({
 	percentage: Type.Number({ description: "Completion percentage from 0 to 100", minimum: 0, maximum: 100 }),
 });
 
-function makeAuditorResourceLoader(): ResourceLoader {
+/**
+ * Build the auditor's resource loader.
+ *
+ * When `mainResourceLoader` is provided, skills / extensions / prompts are
+ * inherited from the main session (filtered per the resolved resources).
+ * When omitted, the auditor gets an empty resource set (legacy baseline).
+ *
+ * The auditor always uses a read-only-minded system prompt; the inherited
+ * resource loader is only consulted for skills/extensions/prompts/themes.
+ */
+function makeAuditorResourceLoader(
+	resolved: ResolvedAuditorResources,
+	mainResourceLoader?: ResourceLoader,
+): ResourceLoader {
+	const skillAllow = new Set(resolved.skills);
+	const extAllow = new Set(resolved.extensions);
 	return {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getExtensions: () => {
+			if (!mainResourceLoader) {
+				return { extensions: [], errors: [], runtime: createExtensionRuntime() };
+			}
+			const all = mainResourceLoader.getExtensions();
+			if (resolved.extensions.length === 0 && resolved.mode === "minimal") {
+				return { ...all, extensions: [] };
+			}
+			const filtered = all.extensions.filter((e) => extAllow.has(e.path) || extAllow.has(e.resolvedPath));
+			return { ...all, extensions: filtered };
+		},
+		getSkills: () => {
+			if (!mainResourceLoader) return { skills: [], diagnostics: [] };
+			const all = mainResourceLoader.getSkills();
+			if (resolved.skills.length === 0 && resolved.mode === "minimal") {
+				return { ...all, skills: [] };
+			}
+			const filtered = all.skills.filter((s) => skillAllow.has(s.name));
+			return { ...all, skills: filtered };
+		},
+		getPrompts: () => mainResourceLoader?.getPrompts() ?? { prompts: [], diagnostics: [] },
+		getThemes: () => mainResourceLoader?.getThemes() ?? { themes: [], diagnostics: [] },
+		getAgentsFiles: () => mainResourceLoader?.getAgentsFiles() ?? { agentsFiles: [] },
 		getSystemPrompt: () => [
 			"You are a read-only completion auditor running in an isolated pi agent session.",
 			"Inspect the repository and decide whether the claimed goal completion is genuinely satisfied.",
@@ -213,9 +252,9 @@ function makeAuditorResourceLoader(): ResourceLoader {
 			"producing report). This helps the user understand what the auditor is doing and how far",
 			"along it is.",
 		].join("\n"),
-		getAppendSystemPrompt: () => [],
-	extendResources: () => {},
-		reload: async () => {},
+		getAppendSystemPrompt: () => mainResourceLoader?.getAppendSystemPrompt() ?? [],
+		extendResources: () => {},
+		reload: async () => { await mainResourceLoader?.reload(); },
 	};
 }
 
@@ -246,6 +285,27 @@ function modelLabel(model: Model<any> | undefined): string | undefined {
 	return model ? `${model.provider}/${model.id}` : undefined;
 }
 
+/**
+ * Main session resources to inherit into the auditor.
+ *
+ * `tools` is the main session's active tool list (e.g. from
+ * `pi.getActiveTools()`). The others are optional and only used when
+ * a real `resourceLoader` is supplied; when omitted the corresponding
+ * auditor resource list is empty (baseline).
+ */
+export interface MainSessionResources {
+	tools?: string[];
+	mcp?: string[];
+	skills?: string[];
+	extensions?: string[];
+	/**
+	 * Main session's resource loader, used to inherit skills/extensions/prompts.
+	 * Optional: when omitted, the auditor runs with an empty resource set
+	 * (only the resolved tool list is honoured).
+	 */
+	resourceLoader?: ResourceLoader;
+}
+
 export async function runGoalCompletionAuditor(args: {
 	ctx: ExtensionContext;
 	goal: GoalRecord;
@@ -255,6 +315,12 @@ export async function runGoalCompletionAuditor(args: {
 	settings?: GoalSettings;
 	signal?: AbortSignal;
 	onProgress?: AuditorProgressCallback;
+	/**
+	 * Main session resources to inherit into the auditor. When omitted, the
+	 * auditor falls back to baseline tools and an empty resource loader
+	 * (legacy behavior, backward compatible).
+	 */
+	mainResources?: MainSessionResources;
 	/**
 	 * Optional factory for creating the auditor agent session.
 	 * Exposed for testing so a mock/controllable session can be injected.
@@ -272,6 +338,25 @@ export async function runGoalCompletionAuditor(args: {
 	}
 	try {
 		const createSession = args.createSession ?? createAgentSession;
+
+		// Resolve auditor resources (tools/mcp/skills/extensions) from the main
+		// session's resources and the user's auditorMode + include/exclude config.
+		const patternCache = new AuditorPatternCache();
+		const resolved = resolveAuditorResources(
+			{
+				tools: args.mainResources?.tools,
+				mcp: args.mainResources?.mcp,
+				skills: args.mainResources?.skills,
+				extensions: args.mainResources?.extensions,
+			},
+			config,
+			patternCache,
+		);
+
+		// Resolve the auditor prompt. Inline override > file-based > hardcoded fallback.
+		const hardcodedDefault = buildGoalAuditorPrompt(args);
+		const resolvedPrompt = loadAuditorPrompt(config, args.ctx.cwd, hardcodedDefault);
+
 		const startedAt = Date.now();
 		const progress: AuditorProgress = {
 			recentOutput: [],
@@ -319,10 +404,10 @@ export async function runGoalCompletionAuditor(args: {
 			model,
 			thinkingLevel,
 			modelRegistry: args.ctx.modelRegistry,
-			resourceLoader: makeAuditorResourceLoader(),
+			resourceLoader: makeAuditorResourceLoader(resolved, args.mainResources?.resourceLoader),
 			sessionManager: SessionManager.inMemory(args.ctx.cwd),
 			settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-			tools: ["read", "grep", "find", "ls", "bash", REPORT_AUDITOR_PROGRESS_TOOL_NAME],
+			tools: resolved.tools,
 			customTools: [reportProgressTool],
 		});
 		const unsubscribe = session.subscribe((event) => {
@@ -396,7 +481,7 @@ export async function runGoalCompletionAuditor(args: {
 		emitProgress();
 		try {
 			if (args.signal?.aborted) return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: "Auditor aborted." };
-			await session.prompt(buildGoalAuditorPrompt(args));
+			await session.prompt(resolvedPrompt.prompt);
 		} finally {
 			args.signal?.removeEventListener("abort", abortSession);
 			progress.phase = "done";
