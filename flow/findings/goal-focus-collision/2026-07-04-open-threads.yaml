@@ -1,0 +1,58 @@
+# Open threads for goal-focus-collision explore
+# Tracks unresolved items, deferred decisions, and ongoing discussions.
+
+status: closed  # explore concluded, ready for proposal
+
+threads:
+  - id: OT1
+    topic: "C1 — auto-focus steals only open goal into fresh session"
+    raised_in: turn2
+    status: resolved
+    resolution: "Lock prevents stealing a held goal (acquisition checks isLockHeldByOther). LD3 further restricts auto-focus to session reason 'resume' only by default — fresh 'new'/'startup' sessions never auto-focus. Both mechanisms converge to prevent the steal."
+    resolved_in: turn4
+
+  - id: OT2
+    topic: "C2 — lost update on goal file (two sessions write same file)"
+    raised_in: turn2
+    status: deferred
+    resolution: "Lock prevents dual-focus (which prevents concurrent writes in the common case), but does not serialize writes if a reap-race loser holds a stale view. User did not raise C2 as in-scope. Out of scope for the proposal; revisit if it bites."
+
+  - id: OT3
+    topic: "C4 — auditor sub-session loads pi-goal-xx and auto-focuses, colliding with parent"
+    raised_in: turn2
+    status: resolved
+    resolution: "Two converging fixes: (1) LD3 — auditor's session_start is reason 'startup', so auto-focus does not fire by default. (2) Lock — if parent holds the goal lock, auditor's acquisition fails → starts unfocused. Both solve C4. Mechanism (2) was hypothesized in turn3 as 'solved for free'; mechanism (1) from LD3 makes it robust regardless of lock state."
+    resolved_in: turn4
+
+  - id: OT4
+    topic: "C5 — two sessions focus same goal (per-session focus entry, shared goal file)"
+    raised_in: turn2
+    status: resolved
+    resolution: "Lock prevents dual-focus: if S1 holds lock on goal A, S2's acquireLock(A) fails (isHeldByOther). S2 cannot focus A unless it steals via the LD2 prompt."
+    resolved_in: turn3
+
+  - id: OT5
+    topic: "C3 — settings.json cross-contamination"
+    raised_in: turn2
+    status: out-of-scope
+    resolution: "User: 'Setting thing is not the problem.' Out of scope. Settings remain cwd-shared by design."
+
+  - id: OT6
+    topic: "Lease duration / heartbeat interval specifics"
+    raised_in: turn3
+    status: deferred
+    resolution: "LD1 says 'least resistant path' — pick a sensible default (3 min lease, 60s heartbeat proposed) during implementation. Not a locked decision; tunable."
+
+  - id: OT7
+    topic: "MCP actually connects inside auditor's isolated session (inheritance assumption)"
+    raised_in: turn1
+    status: open
+    resolution: ""
+    note: "Unrelated to goal-focus-locking, but flagged during this explore. pi-mcp-adapter extension is discovered by DefaultResourceLoader, but whether its session_start hook completes an MCP handshake before the auditor prompts is unverified. Separate concern."
+
+  - id: OT8
+    topic: "AGENTS.md behavioral coupling via loader inheritance"
+    raised_in: turn1
+    status: open
+    resolution: ""
+    note: "Unrelated to goal-focus-locking. getAgentsFiles delegates to the main loader, so the auditor reads the same AGENTS.md as the executor. Not a locked decision (LD1-LD6 in auditor-config-design don't mention it). Side-effect of the inheritance fix. Separate concern."
