@@ -17,6 +17,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { GoalSettings, AuditorPromptMode } from "./goal-settings.ts";
 
@@ -51,7 +52,8 @@ function readFileIfExists(filePath: string): string | undefined {
 }
 
 /** Compute the global prompt path (`<home>/.pi/auditor-prompt.md`). */
-export function globalAuditorPromptPath(home: string = process.env.HOME ?? ""): string {
+export function globalAuditorPromptPath(home: string = os.homedir()): string {
+	if (!home) return ""; // unreachable on most platforms; caller treats "" as missing
 	return path.join(home, ".pi", "auditor-prompt.md");
 }
 
@@ -85,13 +87,16 @@ export function loadAuditorPrompt(
 	const mode = resolveAuditorPromptMode(settings);
 	const globalPath = globalAuditorPromptPath(home);
 	const localPath = localAuditorPromptPath(cwd);
-	const globalText = readFileIfExists(globalPath);
-	const localText = readFileIfExists(localPath);
 
 	if (mode === "local") {
+		// `local` mode: global is never consulted — do not even read it.
+		const localText = readFileIfExists(localPath);
 		if (localText) return { prompt: localText, source: "local" };
 		return { prompt: defaultPrompt, source: "default" };
 	}
+
+	const globalText = globalPath ? readFileIfExists(globalPath) : undefined;
+	const localText = readFileIfExists(localPath);
 
 	if (mode === "global-local-merge") {
 		if (globalText && localText) {

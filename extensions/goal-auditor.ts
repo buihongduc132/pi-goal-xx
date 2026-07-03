@@ -205,12 +205,21 @@ export const reportAuditorProgressParams = Type.Object({
 /**
  * Build the auditor's resource loader.
  *
- * When `mainResourceLoader` is provided, skills / extensions / prompts are
- * inherited from the main session (filtered per the resolved resources).
+ * When `mainResourceLoader` is provided, skills / extensions / prompts / themes
+ * are inherited from the main session (filtered per the resolved resources).
  * When omitted, the auditor gets an empty resource set (legacy baseline).
  *
- * The auditor always uses a read-only-minded system prompt; the inherited
- * resource loader is only consulted for skills/extensions/prompts/themes.
+ * Isolation invariants:
+ *  - `getSystemPrompt` always returns the auditor's own read-only-minded prompt.
+ *  - `getAppendSystemPrompt` always returns [] — main-session append prompts
+ *    are NOT inherited, to keep the auditor's effective system prompt
+ *    independent of the executor's prompt-injected state.
+ *
+ * Limitation: `resolved.mcp` is currently computed but not yet applied.
+ * `@earendil-works/pi-coding-agent`'s `createAgentSession` exposes no MCP
+ * allowlist parameter and the auditor uses `SettingsManager.inMemory()` (which
+ * carries no MCP config). MCP filtering will take effect once pi-coding-agent
+ * exposes an MCP allowlist API; the resolution logic here is ready for it.
  */
 function makeAuditorResourceLoader(
 	resolved: ResolvedAuditorResources,
@@ -252,7 +261,9 @@ function makeAuditorResourceLoader(
 			"producing report). This helps the user understand what the auditor is doing and how far",
 			"along it is.",
 		].join("\n"),
-		getAppendSystemPrompt: () => mainResourceLoader?.getAppendSystemPrompt() ?? [],
+		// Isolation: never inherit main-session append prompts. The auditor's
+		// effective system prompt must stay independent of the executor's state.
+		getAppendSystemPrompt: () => [],
 		extendResources: () => {},
 		reload: async () => { await mainResourceLoader?.reload(); },
 	};

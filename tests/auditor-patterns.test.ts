@@ -99,6 +99,15 @@ describe("AuditorPatternCache", () => {
 		resolvePattern("a*", ["a", "b", "c"], c);
 		assert.equal(c.size, 2);
 	});
+	it("does not collide when candidate strings contain commas", () => {
+		// ["a,b", "c"] and ["a", "b", "c"] must NOT share a cache entry.
+		const c = new AuditorPatternCache();
+		const r1 = resolvePattern("*", ["a,b", "c"], c);
+		assert.deepEqual(r1, ["a,b", "c"]);
+		const r2 = resolvePattern("*", ["a", "b", "c"], c);
+		assert.deepEqual(r2, ["a", "b", "c"]);
+		assert.equal(c.size, 2);
+	});
 	it("clear empties the cache", () => {
 		const c = new AuditorPatternCache();
 		resolvePattern("a*", ["a"], c);

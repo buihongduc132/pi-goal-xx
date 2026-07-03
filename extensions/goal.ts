@@ -1744,6 +1744,11 @@ Verification contract:
 			`disableTasks: ${settingsValue(config, "disableTasks")}`,
 			`disableContracts: ${settingsValue(config, "disableContracts")}`,
 			`subtaskDepth: ${settingsValue(config, "subtaskDepth")}`,
+			`auditorMode: ${settingsValue(config, "auditorMode")}`,
+			`auditorPromptMode: ${settingsValue(config, "auditorPromptMode")}`,
+			`auditorPrompt: ${settingsValue(config, "auditorPrompt")}`,
+			`auditorExclude: ${settingsValue(config, "auditorExclude")}`,
+			`auditorInclude: ${settingsValue(config, "auditorInclude")}`,
 		];
 	}
 

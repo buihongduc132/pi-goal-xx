@@ -18,16 +18,25 @@
  * and `?` to `.`. The returned source is anchored (`^...$`) so partial matches
  * are not allowed.
  *
+ * Compiled RegExps are memoized in a module-level Map to avoid recompiling
+ * the same pattern on every candidate (matters when filtering large lists).
+ *
  * @internal exported for testing only
  */
+const COMPILED_REGEX_CACHE = new Map<string, RegExp>();
+
 export function globToRegex(pattern: string): RegExp {
+	const cached = COMPILED_REGEX_CACHE.get(pattern);
+	if (cached) return cached;
 	let out = "";
 	for (const ch of pattern) {
 		if (ch === "*") out += ".*";
 		else if (ch === "?") out += ".";
 		else out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 	}
-	return new RegExp(`^${out}$`);
+	const re = new RegExp(`^${out}$`);
+	COMPILED_REGEX_CACHE.set(pattern, re);
+	return re;
 }
 
 /** Match a single candidate against a pattern. Case-sensitive. */
@@ -39,14 +48,15 @@ export function matchPattern(pattern: string, candidate: string): boolean {
 
 /**
  * Resolve a pattern against a candidate list, returning all matching candidates.
- * Uses the provided cache keyed by `${pattern}::${candidates.join(",")}`.
+ * Uses the provided cache keyed by an unambiguous serialization of pattern +
+ * candidates (JSON) to avoid collisions when candidate strings contain commas.
  */
 export function resolvePattern(
 	pattern: string,
 	candidates: string[],
 	cache?: AuditorPatternCache,
 ): string[] {
-	const key = `${pattern}::${candidates.join(",")}`;
+	const key = `${pattern}::${JSON.stringify(candidates)}`;
 	if (cache) {
 		const hit = cache.get(key);
 		if (hit) return hit;

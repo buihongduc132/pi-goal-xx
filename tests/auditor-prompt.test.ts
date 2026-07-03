@@ -114,6 +114,17 @@ describe("loadAuditorPrompt — local mode", () => {
 		assert.equal(r.source, "default");
 		assert.equal(r.prompt, DEFAULT_PROMPT);
 	});
+	it("does not read global file in local mode (deletion after init is safe)", () => {
+		// Write global, run load once to populate any caching, then remove global.
+		// In local mode the global file is NEVER consulted, so removing it has no effect.
+		sb.writeGlobal("GLOBAL");
+		sb.writeLocal("LOCAL");
+		const r1 = loadAuditorPrompt({ auditorPromptMode: "local" }, sb.cwd, DEFAULT_PROMPT, sb.home);
+		assert.equal(r1.prompt, "LOCAL");
+		sb.removeGlobal();
+		const r2 = loadAuditorPrompt({ auditorPromptMode: "local" }, sb.cwd, DEFAULT_PROMPT, sb.home);
+		assert.equal(r2.prompt, "LOCAL");
+	});
 });
 
 describe("loadAuditorPrompt — global-local-merge mode", () => {
