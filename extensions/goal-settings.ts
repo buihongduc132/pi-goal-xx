@@ -10,7 +10,11 @@
  * The file may contain:
  *   disableTasks, disableContracts, subtaskDepth,
  *   provider, model, thinkingLevel, disabled,
- *   disabledTools (string[]), auditorSubscriptions (AuditorSubscription[])
+ *   disabledTools (string[]), auditorSubscriptions (AuditorSubscription[]),
+ *   auditorMode ("inherit" | "minimal"), auditorExclude (AuditorResourceFilter),
+ *   auditorInclude (AuditorResourceFilter),
+ *   auditorPromptMode ("global-local" | "local" | "global-local-merge"),
+ *   auditorPrompt (inline string override)
  *
  * additionalProperties: false — unknown keys are rejected.
  */
@@ -19,6 +23,20 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+/** Auditor operational mode. */
+export type AuditorMode = "inherit" | "minimal";
+
+/** Auditor prompt resolution mode. */
+export type AuditorPromptMode = "global-local" | "local" | "global-local-merge";
+
+/** Resource filter applied to tools / mcp / skills / extensions arrays. */
+export interface AuditorResourceFilter {
+	tools?: string[];
+	mcp?: string[];
+	skills?: string[];
+	extensions?: string[];
+}
 
 /**
  * Subscription entry: when `event` fires, asynchronously forward to the auditor.
@@ -42,6 +60,16 @@ export interface GoalSettings {
 	disabledTools?: string[];
 	/** Events that should be asynchronously forwarded to the auditor. */
 	auditorSubscriptions?: AuditorSubscription[];
+	/** Auditor operational mode. Defaults to "inherit". */
+	auditorMode?: AuditorMode;
+	/** Resources to exclude in "inherit" mode (glob patterns allowed). */
+	auditorExclude?: AuditorResourceFilter;
+	/** Resources to include in "minimal" mode (glob patterns allowed). */
+	auditorInclude?: AuditorResourceFilter;
+	/** Auditor prompt resolution mode. Defaults to "global-local". */
+	auditorPromptMode?: AuditorPromptMode;
+	/** Inline auditor prompt override; takes precedence over file-based prompts. */
+	auditorPrompt?: string;
 }
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
@@ -59,6 +87,18 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"disabled",
 	"disabledTools",
 	"auditorSubscriptions",
+	"auditorMode",
+	"auditorExclude",
+	"auditorInclude",
+	"auditorPromptMode",
+	"auditorPrompt",
+]);
+
+const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
+const AUDITOR_PROMPT_MODES = new Set<AuditorPromptMode>([
+	"global-local",
+	"local",
+	"global-local-merge",
 ]);
 
 /**
@@ -140,6 +180,40 @@ function asAuditorSubscriptions(value: unknown): AuditorSubscription[] | undefin
 	return out.length > 0 ? out : undefined;
 }
 
+/** Parse auditorMode; invalid values fall back to undefined (caller defaults to "inherit"). */
+function asAuditorMode(value: unknown): AuditorMode | undefined {
+	const text = asNonEmptyString(value);
+	return text && AUDITOR_MODES.has(text as AuditorMode) ? (text as AuditorMode) : undefined;
+}
+
+/** Parse auditorPromptMode; invalid values fall back to undefined (caller defaults to "global-local"). */
+function asAuditorPromptMode(value: unknown): AuditorPromptMode | undefined {
+	const text = asNonEmptyString(value);
+	return text && AUDITOR_PROMPT_MODES.has(text as AuditorPromptMode)
+		? (text as AuditorPromptMode)
+		: undefined;
+}
+
+/**
+ * Coerce unknown value into an AuditorResourceFilter. Each of the four arrays
+ * (tools/mcp/skills/extensions) is independently parsed via asStringArray.
+ * Returns undefined if no array yielded any entries.
+ */
+function asAuditorResourceFilter(value: unknown): AuditorResourceFilter | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const rec = value as Record<string, unknown>;
+	const filter: AuditorResourceFilter = {};
+	const tools = asStringArray(rec.tools);
+	if (tools) filter.tools = tools;
+	const mcp = asStringArray(rec.mcp);
+	if (mcp) filter.mcp = mcp;
+	const skills = asStringArray(rec.skills);
+	if (skills) filter.skills = skills;
+	const extensions = asStringArray(rec.extensions);
+	if (extensions) filter.extensions = extensions;
+	return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
 /**
  * Parse raw (deserialized JSON) into a GoalSettings object.
  * Rejects unknown keys (additionalProperties: false semantics).
@@ -169,6 +243,16 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (disabledTools !== undefined) settings.disabledTools = disabledTools;
 	const auditorSubscriptions = asAuditorSubscriptions(record.auditorSubscriptions);
 	if (auditorSubscriptions !== undefined) settings.auditorSubscriptions = auditorSubscriptions;
+	const auditorMode = asAuditorMode(record.auditorMode);
+	if (auditorMode) settings.auditorMode = auditorMode;
+	const auditorExclude = asAuditorResourceFilter(record.auditorExclude);
+	if (auditorExclude) settings.auditorExclude = auditorExclude;
+	const auditorInclude = asAuditorResourceFilter(record.auditorInclude);
+	if (auditorInclude) settings.auditorInclude = auditorInclude;
+	const auditorPromptMode = asAuditorPromptMode(record.auditorPromptMode);
+	if (auditorPromptMode) settings.auditorPromptMode = auditorPromptMode;
+	const auditorPrompt = asNonEmptyString(record.auditorPrompt);
+	if (auditorPrompt) settings.auditorPrompt = auditorPrompt;
 	return settings;
 }
 
@@ -202,6 +286,11 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		disabled: fileConfig.disabled,
 		disabledTools: asStringArray(env.PI_GOAL_DISABLED_TOOLS) ?? fileConfig.disabledTools,
 		auditorSubscriptions: fileConfig.auditorSubscriptions,
+		auditorMode: fileConfig.auditorMode,
+		auditorExclude: fileConfig.auditorExclude,
+		auditorInclude: fileConfig.auditorInclude,
+		auditorPromptMode: fileConfig.auditorPromptMode,
+		auditorPrompt: fileConfig.auditorPrompt,
 	};
 }
 
@@ -227,6 +316,11 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const subtaskDepth = asPositiveInt(settings.subtaskDepth);
 	const disabledTools = asStringArray(settings.disabledTools);
 	const auditorSubscriptions = asAuditorSubscriptions(settings.auditorSubscriptions);
+	const auditorMode = asAuditorMode(settings.auditorMode);
+	const auditorExclude = asAuditorResourceFilter(settings.auditorExclude);
+	const auditorInclude = asAuditorResourceFilter(settings.auditorInclude);
+	const auditorPromptMode = asAuditorPromptMode(settings.auditorPromptMode);
+	const auditorPrompt = asNonEmptyString(settings.auditorPrompt);
 	if (provider) clean.provider = provider;
 	if (model) clean.model = model;
 	if (thinkingLevel) clean.thinkingLevel = thinkingLevel;
@@ -236,6 +330,11 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (subtaskDepth !== undefined) clean.subtaskDepth = subtaskDepth;
 	if (disabledTools !== undefined) clean.disabledTools = disabledTools;
 	if (auditorSubscriptions !== undefined) clean.auditorSubscriptions = auditorSubscriptions;
+	if (auditorMode) clean.auditorMode = auditorMode;
+	if (auditorExclude) clean.auditorExclude = auditorExclude;
+	if (auditorInclude) clean.auditorInclude = auditorInclude;
+	if (auditorPromptMode) clean.auditorPromptMode = auditorPromptMode;
+	if (auditorPrompt) clean.auditorPrompt = auditorPrompt;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -248,6 +347,11 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.subtaskDepth !== undefined) persisted.subtaskDepth = clean.subtaskDepth;
 	if (clean.disabledTools) persisted.disabledTools = clean.disabledTools;
 	if (clean.auditorSubscriptions) persisted.auditorSubscriptions = clean.auditorSubscriptions;
+	if (clean.auditorMode) persisted.auditorMode = clean.auditorMode;
+	if (clean.auditorExclude) persisted.auditorExclude = clean.auditorExclude;
+	if (clean.auditorInclude) persisted.auditorInclude = clean.auditorInclude;
+	if (clean.auditorPromptMode) persisted.auditorPromptMode = clean.auditorPromptMode;
+	if (clean.auditorPrompt) persisted.auditorPrompt = clean.auditorPrompt;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }

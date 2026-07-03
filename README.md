@@ -17,6 +17,7 @@ The extension is designed around one rule: **the user owns intent; the agent exe
 - [Tools That Interrupt](#tools-that-interrupt) — Tools that pause/stop the running state
 - [Auditor Subscriptions](#auditor-subscriptions) — Async event forwarding to auditor
 - [Configuration](#configuration) — Settings file and environment variables
+- [Configurable Auditor](#configurable-auditor) — Modes, wildcard filters, prompt files
 - [Worker Session Isolation](#worker-session-isolation) — Prevent goal inheritance in teams
 - [Advanced Features](#advanced-features) — Verification contracts, task lists, schema gates
 - [Development](#development) — Build, test, and package
@@ -361,6 +362,11 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `disabled` | `false` | When `true`, skip the completion audit entirely |
 | `disabledTools` | `[]` | Tool names to hide entirely (never registered, agent never sees them). All tool names are eligible including lifecycle tools (`complete_goal`/`pause_goal`/`abort_goal`); you accept breakage if you disable a lifecycle tool. Unknown tool names are silently skipped. |
 | `auditorSubscriptions` | `[]` | Events to forward asynchronously to the auditor channel (non-blocking). Each entry: `{event: string, mode: "async"}`. Arbitrary event strings allowed (lifecycle: `pause`, `abort`, `complete`, `audit_started`; task: `task_skip`, `contract_violation`; any custom string). Unmatched event names are silently skipped. |
+| `auditorMode` | `"inherit"` | Auditor resource mode: `"inherit"` (start with all main-session resources, opt out via `auditorExclude`) or `"minimal"` (start with baseline read-only tools, opt in via `auditorInclude`). |
+| `auditorExclude` | `{}` | Resources to exclude in `inherit` mode. Object with `tools`, `mcp`, `skills`, `extensions` arrays; glob patterns allowed (`*`, `?`). |
+| `auditorInclude` | `{}` | Resources to add in `minimal` mode. Same shape as `auditorExclude`; matched against the main session's resources. |
+| `auditorPromptMode` | `"global-local"` | Prompt resolution: `"global-local"` (local overrides global), `"local"` (local only, global ignored), `"global-local-merge"` (global + `\n\n` + local). |
+| `auditorPrompt` | unset | Inline auditor prompt string; takes precedence over all file-based prompts and modes. |
 
 **Env var overrides:**
 - `PI_GOAL_DISABLE_TASKS=1` — disable task features (takes precedence over file)
@@ -378,6 +384,80 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `PI_GOAL_DISABLED_TOOLS` | — | Comma/whitespace-separated tool names to hide (overrides settings file) |
 | `PI_GOAL_SETTINGS_FILE` | `.pi/pi-goal-xx-settings.json` | Alternative settings file path (relative to cwd or absolute) |
 | `PI_TEAMS_WORKER` | unset | When `1`, worker session mode: skips goal focus inheritance from leader's branch context. Workers start goal-unfocused but can still read goal files from disk. Set automatically by pi-agent-teams when spawning worker sessions. |
+
+## Configurable auditor
+
+The completion auditor verifies goal completion before archiving. By default it inherits the main session's tool list (filtered through `auditorExclude`) and uses a hardcoded prompt. You can make it stricter, looser, or project-specific.
+
+### Two modes
+
+- **`inherit`** (default): the auditor starts with **all** the main session's tools/MCP/skills/extensions, then removes anything matching `auditorExclude`. Use this when you trust the auditor to verify anything the executor could.
+- **`minimal`**: the auditor starts with the baseline read-only toolset (`read`, `grep`, `find`, `ls`, `bash`, `report_auditor_progress`) and adds anything matching `auditorInclude` from the main session. Use this for strict, predictable verification.
+
+### Wildcard patterns
+
+`auditorExclude` / `auditorInclude` accept glob patterns in every array:
+
+- `*` — any run of characters (incl. empty)
+- `?` — exactly one character
+- no wildcard — exact match (case-sensitive)
+
+### Prompt modes
+
+Auditor prompts resolve in this order (first non-empty wins):
+
+1. Inline `settings.auditorPrompt` (always wins)
+2. File-based, combined per `auditorPromptMode`:
+   - `global-local` (default): `.pi/auditor-prompt.md` overrides `~/.pi/auditor-prompt.md`
+   - `local`: only `.pi/auditor-prompt.md` (global never checked)
+   - `global-local-merge`: `~/.pi/auditor-prompt.md` + `\n\n` + `.pi/auditor-prompt.md`
+3. Hardcoded default prompt (built into the extension)
+
+Global prompt file: `~/.pi/auditor-prompt.md`  •  Local prompt file: `<cwd>/.pi/auditor-prompt.md`
+
+### Examples
+
+**Read-only auditor with everything else stripped** (default is already broad; tighten it):
+
+```json
+{
+  "auditorMode": "inherit",
+  "auditorExclude": {
+    "tools": ["write", "edit", "bash"],
+    "extensions": ["cc-safety-net*"]
+  }
+}
+```
+
+**Minimal auditor that can also query GitNexus**:
+
+```json
+{
+  "auditorMode": "minimal",
+  "auditorInclude": {
+    "tools": ["gitnexus*"],
+    "mcp": ["gitnexus"]
+  }
+}
+```
+
+**Project-specific auditor prompt** (create `<project>/.pi/auditor-prompt.md`):
+
+```markdown
+You are auditing a financial trading repo. Verify no magic numbers,
+all numeric literals are named constants, and every order path has
+an idempotency guard.
+```
+
+```json
+{ "auditorPromptMode": "local" }
+```
+
+**Inline override** (no files needed):
+
+```json
+{ "auditorPrompt": "Reject unless all tests are green and the diff is < 500 lines." }
+```
 
 ## Worker session isolation
 
