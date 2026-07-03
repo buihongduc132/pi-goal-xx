@@ -4,7 +4,7 @@
 - [ ] 1.2 Implement `lockDir(cwd)` → `<cwd>/.pi/goals/.locks` (ensure dir exists, fail-open on error)
 - [ ] 1.3 Implement `lockPath(cwd, goalId)` → `<cwd>/.pi/goals/.locks/<goalId>.lock`
 - [ ] 1.4 Implement `readLock(cwd, goalId): GoalFocusLock | null` (parse JSON, return null on missing/invalid/corrupt)
-- [ ] 1.5 Implement `isPidAlive(pid): boolean` via `process.kill(pid, 0)` (return false on throw)
+- [ ] 1.5 Implement `isPidAlive(pid): boolean` via `process.kill(pid, 0)`. **Error-code aware**: return `true` on success (alive), `true` on `EPERM` (process exists but owned by another user — still alive, just no permission to signal), `false` on `ESRCH` (no such process) and any other throw. Naively returning `false` on any throw would mark a live cross-user process as dead → false-positive stale lock → steal.
 - [ ] 1.6 Implement `isLockHeld(lock): boolean` — PID alive AND `now < expiresAt`
 - [ ] 1.7 Implement `isLockStale(lock): boolean` — lock exists AND NOT `isLockHeld`
 - [ ] 1.8 Implement `writeLockAtomic(cwd, goalId, lock)` — write `.<pid>.<ts>.tmp` then `fs.renameSync` to final path
@@ -55,7 +55,7 @@
 - [ ] 4.4 `setFocusedGoalId(B)` (goal.ts:706): `releaseLock(A)` then `acquireLock(B)` before arming continuation. Covers `/goal-focus` and explicit focus changes.
 - [ ] 4.5 `replaceGoal` (new-goal creation, goal.ts:~1444): `acquireLock(newGoalId)` before `queueContinuation` so the heartbeat timer refreshes a lock that actually exists.
 - [ ] 4.6 On `complete_goal` success: `releaseLock(focusedGoalId)` (co-located with turn_end archival; status persisted to active file before release so pool excludes it)
-- [ ] 4.7 On `pause_goal` / `abort_goal`: NO explicit release (lazy reap-on-acquire; heartbeat timer stops). `/goal-resume` reacquires via 4.3. Document in code comment.
+- [ ] 4.7 On `pause_goal`: NO explicit release (lazy reap-on-acquire; heartbeat timer stops). `/goal-resume` reacquires via 4.3. Document in code comment. On `abort_goal` (`setGoal(null, "aborted")`): EXPLICIT release via the `state.goal` setter instrumentation (4.8b) — abort is terminal, so releasing immediately is cleaner than lazy reap and honors the "MUST NOT hold locks" invariant. (This resolves the apparent contradiction between 4.7 and 4.8b: pause = lazy reap, abort = explicit release via the setter.)
 - [ ] 4.8 On `session_shutdown`: `releaseLock(focusedGoalId)` then clear heartbeat timer
 - [ ] 4.8b Instrument the `state.goal` setter (goal.ts:427-436): when the new value is `null` OR has a different `id` than current `focusedGoalId`, call `releaseLock(previousId)` BEFORE the assignment. This single-chokepoint covers ALL `setGoal(null)` paths (clear at 1610/1833, replace-topic, aborted at 1860/3037) automatically, mirroring the `queueContinuation` chokepoint philosophy. Verify it fires for `setGoal(null,"cleared")` and `setGoal(differentId)`.
 

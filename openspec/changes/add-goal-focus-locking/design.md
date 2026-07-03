@@ -54,7 +54,9 @@ Reference: `flow/findings/goal-focus-collision/` (full explore transcript with e
 
 ### D2: Two-signal liveness (PID alive AND lease fresh)
 
-**Decision**: A lock is HELD iff BOTH `process.kill(pid, 0)` succeeds (process alive) AND `now < expiresAt` (lease not lapsed). Either failing makes the lock STALE and reapable.
+**Decision**: A lock is HELD iff BOTH the owning PID is alive (`process.kill(pid, 0)` succeeds OR throws `EPERM` — process exists but cross-user) AND `now < expiresAt` (lease not lapsed). Either failing makes the lock STALE and reapable.
+
+**EPERM handling (correctness)**: `process.kill(pid, 0)` throws `ESRCH` only when the PID does not exist. It throws `EPERM` when the process exists but belongs to another user. A naive `return false on throw` would treat a live cross-user process as dead → false-positive stale lock → steal. The implementation MUST distinguish: `EPERM` → alive (treat as HELD), `ESRCH` → dead (STALE).
 
 **Rationale**: Each signal alone has a known blind spot:
 - PID alone: a dead PID can be reused by an unrelated process → false "alive."

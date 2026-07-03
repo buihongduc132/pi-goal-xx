@@ -12,15 +12,19 @@ The system SHALL maintain a per-goal advisory lock at `<cwd>/.pi/goals/.locks/<g
 - **THEN** the `.locks/` subdirectory MUST NOT be scanned as goal files (lock sidecars are never parsed as goals)
 
 ### Requirement: Two-signal liveness check
-The system SHALL consider a lock HELD if and only if BOTH `process.kill(pid, 0)` succeeds (owning process alive) AND `now < expiresAt` (lease not lapsed). If either signal fails, the lock is STALE and reapable.
+The system SHALL consider a lock HELD if and only if BOTH the owning PID is alive (`process.kill(pid, 0)` succeeds OR throws `EPERM` — process exists but owned by another user; both mean alive) AND `now < expiresAt` (lease not lapsed). If either signal fails (PID dead = `ESRCH`, or lease lapsed), the lock is STALE and reapable.
 
 #### Scenario: Both signals healthy
 - **WHEN** a lock's owning PID is alive and `expiresAt` is in the future
 - **THEN** the lock is HELD and acquisition by another session MUST fail
 
 #### Scenario: Owning process dead
-- **WHEN** `process.kill(pid, 0)` throws (ESRCH — no such process) but `expiresAt` is still in the future
+- **WHEN** `process.kill(pid, 0)` throws `ESRCH` (no such process) but `expiresAt` is still in the future
 - **THEN** the lock is STALE and the next acquirer MUST reap it
+
+#### Scenario: Owning process alive but cross-user (EPERM)
+- **WHEN** `process.kill(pid, 0)` throws `EPERM` (process exists but owned by another user) and `expiresAt` is in the future
+- **THEN** the lock is HELD (EPERM = process exists, just no permission to signal — treating it as dead would falsely mark live cross-user processes as stale and cause lock stealing)
 
 #### Scenario: Lease lapsed
 - **WHEN** the owning PID is alive but `now >= expiresAt`
@@ -61,9 +65,9 @@ The system SHALL, during `acquireLock`, read any existing lock file. If a held l
 - **THEN** one's atomic rename wins; the loser's verify-read finds a different ownerId and fails
 
 ### Requirement: Clean release (covers ALL focus-clearing paths)
-The system SHALL release (delete) a session's lock whenever focus leaves a goal, covering ALL paths that change `focusedGoalId` — including `setFocusedGoalId`, `loadState` re-resolution, and `setGoal(null)` (clear/replace/aborted). Concretely: on `session_shutdown`, on focus change via `setFocusedGoalId` (release old before acquiring new), on `setGoal(null, "cleared")` at goal.ts:1610 & 1833, and on goal completion (`complete_goal` success, co-located with the turn_end archival that actually moves the file out of the active pool). `pause_goal` does NOT trigger release (lazy reap; heartbeat stops). `abort_goal` (`setGoal(null, "aborted")`) ALSO does not trigger explicit release (lazy reap by design — abort is terminal). A session MUST NOT hold locks on goals it is no longer focused on.
+The system SHALL release (delete) a session's lock whenever focus leaves a goal, covering ALL paths that change `focusedGoalId` — including `setFocusedGoalId`, `loadState` re-resolution, and `setGoal(null)` (clear/replace/aborted). Concretely: on `session_shutdown`, on focus change via `setFocusedGoalId` (release old before acquiring new), on `setGoal(null, "cleared")` at goal.ts:1610 & 1833, on `setGoal(null, "aborted")` at 1860 & 3037 (abort is terminal — explicit release is cleaner than lazy reap and honors the MUST invariant below), and on goal completion (`complete_goal` success, co-located with the turn_end archival that actually moves the file out of the active pool). `pause_goal` is the ONLY focus-clearing path that does NOT trigger explicit release (lazy reap; heartbeat stops; `/goal-resume` self-heals via reacquire). A session MUST NOT hold locks on goals it is no longer focused on.
 
-**Implementation note**: Because the `state.goal` setter (goal.ts:427-436) assigns `focusedGoalId` directly and `setGoal(null)` bypasses `setFocusedGoalId`, the cleanest single-chokepoint fix is to instrument the `state.goal` setter: when the new value is `null` or has a different `id` than the current `focusedGoalId`, call `releaseLock(previousId)` before the assignment. This covers all `setGoal(null)` sites automatically. **Scope caveat**: a few direct `focusedGoalId = null` assignments OUTSIDE the setter (e.g. `reconcileFocusedGoalFromDisk` at goal.ts:683 when a goal vanishes from disk, `removeFocusedGoal` at 752, debug-goal toggle at 1136) bypass this chokepoint and may leak a lock until `session_shutdown` or lease lapse. These are degenerate cases (goal already gone from pool or debug-only) and the lease (3 min) ensures eventual cleanup, so the invariant is best-effort, not absolute. If absolute guarantee is later required, route those sites through a `clearFocusedGoalIdLocked(prevId)` helper.
+**Implementation note**: Because the `state.goal` setter (goal.ts:427-436) assigns `focusedGoalId` directly and `setGoal(null)` bypasses `setFocusedGoalId`, the cleanest single-chokepoint fix is to instrument the `state.goal` setter: when the new value is `null` or has a different `id` than the current `focusedGoalId`, call `releaseLock(previousId)` before the assignment. This covers all `setGoal(null)` paths automatically — including aborted (1860/3037), which is why abort gets explicit release for free while pause (which does NOT call `setGoal(null)` — it only flips status to paused) correctly relies on lazy reap. **Scope caveat**: a few direct `focusedGoalId = null` assignments OUTSIDE the setter (e.g. `reconcileFocusedGoalFromDisk` at goal.ts:683 when a goal vanishes from disk, `removeFocusedGoal` at 752, debug-goal toggle at 1136) bypass this chokepoint and may leak a lock until `session_shutdown` or lease lapse. These are degenerate cases (goal already gone from pool or debug-only) and the lease (3 min) ensures eventual cleanup, so the invariant is best-effort, not absolute. If absolute guarantee is later required, route those sites through a `clearFocusedGoalIdLocked(prevId)` helper.
 
 #### Scenario: Release on shutdown
 - **WHEN** the `session_shutdown` event fires and the session holds a lock
@@ -82,12 +86,12 @@ The system SHALL release (delete) a session's lock whenever focus leaves a goal,
 - **THEN** the lock is released (co-located with archival; the goal is archived; no longer lockable)
 
 #### Scenario: Pause relies on lazy reap
-- **WHEN** the focused goal is paused (`pause_goal`)
+- **WHEN** the focused goal is paused (`pause_goal` — status flip only, NOT a `setGoal(null)`)
 - **THEN** no explicit release fires; the heartbeat timer stops (goal no longer active); the lock lapses at `expiresAt` and is reaped by the next acquirer (or self-reaped on `/goal-resume`)
 
-#### Scenario: Abort relies on lazy reap
-- **WHEN** the focused goal is aborted (`abort_goal`, `setGoal(null, "aborted")`)
-- **THEN** no explicit release fires (terminal action); the lock lapses and is lazily reaped
+#### Scenario: Abort releases explicitly
+- **WHEN** the focused goal is aborted (`abort_goal` → `setGoal(null, "aborted")` at 1860/3037)
+- **THEN** the `state.goal` setter instrumentation fires `releaseLock(previousId)` immediately (abort is terminal; no stale lock lingers)
 
 ### Requirement: Advisory override with confirmation
 The lock is advisory. The `/goal-focus` selector (including its single-open-goal fast-path) on a goal locked by another live session SHALL prompt the user with the owning session's identity (sessionId, pid) and a confirmation: "looks alive — take over anyway?". On confirmation, the system reaps the held lock and acquires fresh. On decline, focus does not change.
