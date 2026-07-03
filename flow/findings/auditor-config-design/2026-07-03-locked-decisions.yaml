@@ -1,0 +1,60 @@
+# Locked decisions for auditor-config-design explore
+# Each entry: immutable input to future proposals. Traceability via turn + parts + user_quote.
+
+- id: LD1
+  turn: turn2
+  parts: ["user-decisions"]
+  user_quote: |
+    "all of these must be by default inherit main. (*)
+    make auditor having 2 modes:
+    inherit main , then opt-out (filter out one by one that it is not needed , manual , by json configuration)
+    minimal , then opt-in (filter the one that it is will included)"
+  decision: "Auditor has 2 modes: 'inherit' (default, opt-out) and 'minimal' (opt-in). All resources inherit main by default."
+  status: locked
+
+- id: LD2
+  turn: turn2
+  parts: ["user-decisions"]
+  user_quote: |
+    "3. Should auditor cwd be configurable?
+        - Default: same as main session
+        > always cwd"
+  decision: "Auditor cwd always same as main session. Not configurable."
+  status: locked
+
+- id: LD3
+  turn: turn2
+  parts: ["user-decisions"]
+  user_quote: |
+    "global , project can override OR inherit global + local
+    configuration will: global first , local override.
+    prompt config: having 3 modes: global-local (global , local overide) ; local (local only) ; global-local-merge (local append BELOW global)"
+  decision: "Prompt config has 3 modes: 'global-local' (local overrides), 'local' (local only), 'global-local-merge' (local appended below global). Global first, local override."
+  status: locked
+
+- id: LD4
+  turn: turn2
+  parts: ["user-decisions"]
+  user_quote: |
+    "5. Should auditor be able to use the same extensions as main?
+    > default: yes. Same mechanism as (*)."
+  decision: "Auditor inherits extensions from main by default. Same inherit/opt-out mechanism."
+  status: locked
+
+- id: LD5
+  turn: turn2
+  parts: ["user-intention"]
+  user_quote: |
+    "Intention of (*): it must have the capability to verify / delegation by itself. ALSO tools and skill and mcp.
+    If it launch in cwd , it must have all the skill that the project is having."
+  decision: "Auditor must have full capability: tools, skills, MCP, delegation. If launched in cwd, must have all project skills."
+  status: locked
+
+- id: LD6
+  turn: turn3
+  parts: ["user-requirement"]
+  user_quote: |
+    "MAKE THE skill / mcp / tools configuration will be having something_* matching as well ;
+    on each session , ensure that these * matching are cached so that it is not need to do heavy string matching every time ; Just need in memory cache."
+  decision: "Wildcard matching (*, ?) for tools/MCP/skills/extensions config. Per-session in-memory cache for pattern resolution."
+  status: locked
