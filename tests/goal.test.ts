@@ -47,11 +47,18 @@ function setupPi(cwd: string): ReturnType<typeof createMockPi> {
 // Global cleanup: goal.ts leaks setInterval handles (status refresh, audit
 // animation). Emit session_shutdown after each test so they are cleared and
 // the test runner can exit.
-// NOTE: disabled — top-level afterEach appeared to stall the runner.
-// Instead, cleanup is invoked manually where needed.
-// afterEach(async () => {
-// 	if (_lastPi && _lastCwd) await cleanupTimers(_lastPi, _lastCwd);
-// });
+// Timeout guard: if cleanup stalls beyond 5s, log warning and proceed.
+afterEach(async () => {
+	if (_lastPi && _lastCwd) {
+		const timeout = new Promise<void>((resolve) => {
+			setTimeout(() => {
+				console.warn(`[goal.test.ts] cleanupTimers stalled for >5s, proceeding`);
+				resolve();
+			}, 5000).unref();
+		});
+		await Promise.race([cleanupTimers(_lastPi, _lastCwd), timeout]);
+	}
+});
 
 describe("goal extension — load + registration", () => {
 	let pi: ReturnType<typeof createMockPi>;
