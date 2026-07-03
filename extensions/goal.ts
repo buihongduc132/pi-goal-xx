@@ -186,6 +186,17 @@ interface GoalConfirmationIntent {
 let confirmationIntent: GoalConfirmationIntent | null = null;
 
 
+// ---------- worker session detection ----------
+
+/**
+ * Returns true when the current process is a pi-agent-teams worker.
+ * Workers must NOT inherit goal focus from the leader's branch chain.
+ * Detection: PI_TEAMS_WORKER=1 env var (set by leader.ts when spawning workers).
+ */
+function isWorkerSession(): boolean {
+	return process.env.PI_TEAMS_WORKER === "1";
+}
+
 // ---------- summaries ----------
 
 function usageLines(goal: GoalRecord): string[] {
@@ -916,6 +927,21 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	function loadState(ctx: ExtensionContext): void {
 		goalsById = readActiveGoalPool(ctx);
 		focusedGoalId = null;
+
+		// Worker sessions (pi-agent-teams) must NOT inherit goal focus from
+		// the leader's branch chain. Workers start unfocused.
+		if (isWorkerSession()) {
+			for (const [id, current] of goalsById) {
+				if (current.status === "complete") {
+					goalsById.delete(id);
+				}
+			}
+			clearStoppedRuntimeState();
+			runningGoalId = null;
+			updateUI(ctx);
+			return;
+		}
+
 		let focusEntry: GoalFocusEntry | null = null;
 		let legacyGoal: GoalRecord | null = null;
 		let legacyStateSeen = false;
@@ -3766,6 +3792,12 @@ promptGuidelines: [
 		accountProgress(ctx);
 		clearContinuationTimer();
 		stopStatusRefresh();
+		stopAuditAnimation();
+		// Clear debug mock audit timer if running
+		if (debugMockAuditTimer) {
+			clearInterval(debugMockAuditTimer);
+			debugMockAuditTimer = null;
+		}
 		terminalInputUnsubscribe?.();
 		terminalInputUnsubscribe = null;
 		if (state.goal) persist(ctx);

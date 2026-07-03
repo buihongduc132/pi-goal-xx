@@ -47,11 +47,11 @@ function setupPi(cwd: string): ReturnType<typeof createMockPi> {
 // Global cleanup: goal.ts leaks setInterval handles (status refresh, audit
 // animation). Emit session_shutdown after each test so they are cleared and
 // the test runner can exit.
-// NOTE: disabled — top-level afterEach appeared to stall the runner.
-// Instead, cleanup is invoked manually where needed.
-// afterEach(async () => {
-// 	if (_lastPi && _lastCwd) await cleanupTimers(_lastPi, _lastCwd);
-// });
+afterEach(async () => {
+	if (_lastPi && _lastCwd) {
+		await cleanupTimers(_lastPi, _lastCwd);
+	}
+});
 
 describe("goal extension — load + registration", () => {
 	let pi: ReturnType<typeof createMockPi>;

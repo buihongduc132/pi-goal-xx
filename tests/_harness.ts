@@ -185,6 +185,7 @@ export interface MockCtxOptions {
 	hasUI?: boolean;
 	idle?: boolean;
 	systemPrompt?: string;
+	sessionManager?: any;
 }
 
 /**
@@ -197,7 +198,7 @@ export function createMockCtx(pi: ReturnType<typeof createMockPi>, opts: MockCtx
 		ui: pi.ui,
 		hasUI: opts.hasUI ?? true,
 		cwd: opts.cwd ?? pi.getStateDir(),
-		sessionManager: { getBranch: () => [] as any[] } as any,
+		sessionManager: opts.sessionManager ?? { getBranch: () => [] as any[] } as any,
 		modelRegistry: {} as any,
 		model: undefined,
 		isIdle: () => opts.idle ?? true,
