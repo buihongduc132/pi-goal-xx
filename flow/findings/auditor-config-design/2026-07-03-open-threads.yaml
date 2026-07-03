@@ -7,14 +7,14 @@ threads:
   - id: OT1
     topic: "Extension conflicts (cc-safety-net blocking auditor)"
     raised_in: turn2
-    status: deferred
-    resolution: "Identified as edge case. User can auditorExclude.extensions if needed. No default exclusion decided."
+    status: resolved
+    resolution: "No default exclusion. User can auditorExclude.extensions: ['cc-safety-net*'] if needed. Confirmed working: the filter wrapper strips excluded extensions from the active set (runner.js derives tools from the filtered array, not runtime)."
 
   - id: OT2
     topic: "MCP write operations (auditor mutating state)"
     raised_in: turn2
-    status: deferred
-    resolution: "Identified as edge case. Trust auditor to not call write operations, or user can auditorExclude.mcp."
+    status: resolved
+    resolution: "MCP inherits via the pi-mcp-adapter extension (DefaultResourceLoader discovers it). Trust the auditor's read-only system prompt. User can auditorExclude.extensions: ['pi-mcp-adapter*'] to strip all MCP, or auditorExclude.mcp for specific servers once pi exposes an MCP allowlist API."
 
   - id: OT3
     topic: "Subagent recursion (auditor spawning another auditor)"

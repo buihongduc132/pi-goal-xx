@@ -76,13 +76,15 @@ Explore session findings documented in `flow/findings/auditor-config-design/`.
 
 ### D5: Resource inheritance mechanism
 
-**Decision**: Pass main session's `resourceLoader`, MCP config, and tool list to auditor. Apply `auditorExclude`/`auditorInclude` filters with wildcard matching.
+**Decision**: The auditor builds its own `DefaultResourceLoader({ cwd, agentDir, settingsManager })` from the main session's cwd (via `mainResources.inheritFromCwd: true`), then derives the skill/extension allow-lists from the loader's own discovery and applies `auditorExclude`/`auditorInclude` filters with wildcard matching. The tool list is inherited separately from the main session's active tools (`pi.getActiveTools()`).
 
-**Rationale**: Auditor gets full capability by default. Users can opt out of specific resources. Same mechanism for tools, MCP, skills, extensions.
+**Rationale**: `@earendil-works/pi-coding-agent`'s `createAgentSession({ cwd })` with no `resourceLoader` auto-builds a `DefaultResourceLoader` bound to `cwd` and calls `.reload()` — performing the **same** project-local `.pi/` discovery the main session uses (extensions, skills, prompts, themes, `.pi/settings.json`, context files). The auditor does not need the main session to hand over its loader; constructing one from the same cwd yields an identical resource set. MCP servers are not loaded by pi-core at all — they arrive via the `pi-mcp-adapter` extension, which `DefaultResourceLoader` discovers, so MCP inherits automatically.
 
 **Alternatives considered**:
-- Separate config for each resource type: more verbose, same result
-- Hardcoded safe defaults: limits verification capability
+- Have the extension API expose the main session's `ResourceLoader` (requires an upstream change; unnecessary since cwd-discovery is identical)
+- Separate config for each resource type (more verbose, same result)
+- Hardcoded safe defaults (limits verification capability)
+- Omit `resourceLoader` from `createAgentSession` entirely (would inherit the executor's `APPEND_SYSTEM.md` too — breaks isolation)
 
 ## Risks / Trade-offs
 
