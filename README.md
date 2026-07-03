@@ -1,5 +1,8 @@
 # pi-goal-xx
 
+**Owner:** [buihongduc132](https://github.com/buihongduc132)  
+**Upstream:** Fork of [pi-goal-x](https://github.com/tmonk/pi-goal-x) (which forked [@capyup/pi-goal](https://github.com/capyup/pi-goal))
+
 `pi-goal-xx` is a long-running goal extension for [pi](https://github.com/earendil-works/pi-coding-agent). It gives the agent a durable objective, a visible lifecycle, and schema-gated tools for drafting, executing, pausing, resuming, and completing work.
 
 The extension is designed around one rule: **the user owns intent; the agent executes only after the goal is explicit and confirmed**.
@@ -19,8 +22,11 @@ The extension is designed around one rule: **the user owns intent; the agent exe
 - **Built-in questionnaire tools** — During drafting, agents can ask structured questions through `goal_question` and `goal_questionnaire` without depending on external packages.
 - **Disk-backed state** — Active and archived goals persist in `.pi/goals/`. Goal state survives session compaction, workspace switches, and context churn.
 - **Configurable settings** — Tune the auditor model, disable the task system or contracts, and set subtask depth through `/goal-settings` or `.pi/pi-goal-xx-settings.json`.
+- **Worker session isolation** — When spawned as a pi-agent-teams worker (`PI_TEAMS_WORKER=1`), the extension skips goal focus inheritance from the leader's branch context. Workers start goal-unfocused and can still read goal files from disk without inheriting the leader's active goal.
 
-> **Fork of [pi-goal-x](https://github.com/tmonk/pi-goal-x)** (which itself forked [@capyup/pi-goal](https://github.com/capyup/pi-goal)) — pi-goal-xx preserves all upstream features and adds: verification contracts (per-goal and per-task), unified goal+task acceptance in a single confirmation dialog, recursive task lists with subtasks, an immutable objective enforced by tools, deferred archival with cleaner lifecycle hooks, an improved completion auditor with configurable model and progress widget, drafting UX refinements, and lifecycle reliability fixes.
+> **Fork lineage:** pi-goal-xx ← [pi-goal-x](https://github.com/tmonk/pi-goal-x) ← [@capyup/pi-goal](https://github.com/capyup/pi-goal)
+>
+> pi-goal-xx preserves all upstream features and adds: verification contracts (per-goal and per-task), unified goal+task acceptance in a single confirmation dialog, recursive task lists with subtasks, an immutable objective enforced by tools, deferred archival with cleaner lifecycle hooks, an improved completion auditor with configurable model and progress widget, drafting UX refinements, worker session isolation for pi-agent-teams, and lifecycle reliability fixes (including zombie process prevention via comprehensive timer cleanup).
 
 ## Install
 
@@ -252,6 +258,20 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `PI_GOAL_DISABLE_CONTRACTS` | — | When `1`, disable contract enforcement (overrides settings file) |
 | `PI_GOAL_DISABLED_TOOLS` | — | Comma/whitespace-separated tool names to hide (overrides settings file) |
 | `PI_GOAL_SETTINGS_FILE` | `.pi/pi-goal-xx-settings.json` | Alternative settings file path (relative to cwd or absolute) |
+| `PI_TEAMS_WORKER` | unset | When `1`, worker session mode: skips goal focus inheritance from leader's branch context. Workers start goal-unfocused but can still read goal files from disk. Set automatically by pi-agent-teams when spawning worker sessions. |
+
+## Worker session isolation
+
+When pi-agent-teams spawns a worker session with `contextMode: "branch"`, the worker inherits the leader's session entries including goal focus state. This can cause workers to accidentally work on the leader's goal instead of their assigned task.
+
+Setting `PI_TEAMS_WORKER=1` (done automatically by pi-agent-teams) triggers worker isolation mode:
+
+- **No focus inheritance**: The worker skips reading `pi-goal-focus` and `pi-goal-state` entries from the branch context
+- **Starts unfocused**: Worker sessions begin with `focusedGoalId=null` and no active goal
+- **Can still read goals**: Workers can read goal files from `.pi/goals/` via disk, but don't auto-focus any goal
+- **Leader unchanged**: Leader sessions continue to inherit focus normally (backward compatible)
+
+This prevents the bug where 22 zombie test processes accumulated at 90% CPU for 2+ days due to workers inheriting and executing the leader's goal.
 
 ## Development
 
@@ -317,6 +337,17 @@ The `upstream` remote should point to `https://github.com/tmonk/pi-goal-x.git`.
 ## Release policy
 
 This repository can be validated locally with tests and packaging checks. Publishing a new npm version, pushing tags, and running `pi update` are explicit release steps and are not part of ordinary implementation goals unless requested.
+
+## Recent changes
+
+### v0.1.0 (2026-07-03)
+
+- **Worker session isolation** — Workers spawned by pi-agent-teams no longer inherit the leader's goal focus. Prevents workers from accidentally executing the leader's goal instead of their assigned task. Fixes zombie process accumulation (22 processes at 90% CPU for 2+ days).
+- **Comprehensive timer cleanup** — All internal timers (`statusRefreshTimer`, `auditAnimationTimer`, `debugMockAuditTimer`, `continuationTimer`) are now cleared in `session_shutdown` handler, preventing test runner hangs and zombie processes.
+- **Test reliability** — Re-enabled `afterEach` cleanup in test suite with proper timeout guards. All 564 tests pass and exit cleanly within 1.6s.
+- **`disabledTools` config** — Hide specific tools entirely from the agent via settings file or `PI_GOAL_DISABLED_TOOLS` env var.
+- **`auditorSubscriptions` config** — Forward events asynchronously to the auditor channel for non-blocking audit tracking.
+- **Widget timing fix** — Convert milliseconds to seconds before passing to `formatDuration` for tool timing display.
 
 ## License
 
