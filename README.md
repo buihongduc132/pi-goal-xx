@@ -7,6 +7,22 @@
 
 The extension is designed around one rule: **the user owns intent; the agent executes only after the goal is explicit and confirmed**.
 
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start) — Create your first goal in 30 seconds
+- [User Commands](#user-commands) — All `/goal-*` slash commands
+- [Agent Tools](#agent-tools) — Tools available to the AI agent
+- [Tools That Interrupt](#tools-that-interrupt) — Tools that pause/stop the running state
+- [Auditor Subscriptions](#auditor-subscriptions) — Async event forwarding to auditor
+- [Configuration](#configuration) — Settings file and environment variables
+- [Worker Session Isolation](#worker-session-isolation) — Prevent goal inheritance in teams
+- [Advanced Features](#advanced-features) — Verification contracts, task lists, schema gates
+- [Development](#development) — Build, test, and package
+
+---
+
 ## Features
 
 - **Two goal styles** — Regular goals for open-ended research and implementation. Sisyphus goals for patient ordered execution, one step at a time.
@@ -132,6 +148,109 @@ The extension exposes tools only when they make sense for the current lifecycle 
 | `propose_goal_tweak` | tweak drafting only | Submit a revision to the focused goal (shows Confirm / Continue Chatting dialog) |
 | `step_complete` | hidden / legacy | Compatibility no-op; Sisyphus no longer requires a step counter |
 | `create_goal` | hidden | Direct calls are rejected; normal creation goes through `propose_goal_draft` |
+
+---
+
+## Tools that interrupt
+
+These tools **stop the current turn** and block subsequent work tool calls (except read-only tools like `read`, `bash` with safe commands):
+
+| Tool | Effect | When to use |
+|------|--------|-------------|
+| `pause_goal` | Pauses goal, stops turn, blocks subsequent work tools | Agent encounters a real blocker (missing info, dependency failure, unclear requirement) |
+| `abort_goal` | Archives goal, stops turn | Goal is obsolete, impossible, unsafe, or user cancels |
+| `complete_goal` | Marks complete, runs auditor, stops turn | All success criteria met, ready for independent verification |
+| `propose_goal_tweak` | Starts tweak drafting, stops turn | User wants to revise the objective or task list |
+| `propose_goal_draft` | Confirmation dialog, stops turn | Agent has clarified intent, ready to create goal |
+| `propose_task_list` | Task confirmation dialog, stops turn | Agent wants to break goal into trackable tasks |
+
+**Turn-stopping mechanism:**
+
+When these tools execute, they call `setTurnStopped()` which:
+1. Sets a turn-scoped marker (`turnStoppedFor` with `turnSeq`)
+2. Blocks all subsequent tool calls in the same turn (except `POST_STOP_ALLOWED_TOOLS`)
+3. Forces the agent to yield the turn instead of continuing work
+
+**Allowed tools after stop:**
+- Read-only tools: `read`, `bash` (with safe commands like `ls`, `grep`, `find`)
+- Inspection tools: `get_goal`, `goal_status`
+- No write/edit/bash with side effects
+
+**Stale checkpoint guard:**
+
+If a continuation is queued for a goal that becomes inactive (paused, cleared, replaced) before the turn starts, the stale checkpoint guard blocks work tools with:
+```
+Cannot call <tool>: the goal checkpoint that triggered this turn is no longer active.
+Goal <id> has been paused, cleared, or replaced.
+```
+
+---
+
+## Auditor subscriptions
+
+**Auditor subscriptions** allow you to forward lifecycle events asynchronously to the auditor channel. These are **non-blocking notifications** — they log events and show UI notifications, but do NOT intercept or block tool execution.
+
+### Configuration
+
+In `.pi/pi-goal-xx-settings.json`:
+
+```json
+{
+  "auditorSubscriptions": [
+    {"event": "pause", "mode": "async"},
+    {"event": "abort", "mode": "async"},
+    {"event": "audit_started", "mode": "async"},
+    {"event": "task_skip", "mode": "async"},
+    {"event": "contract_violation", "mode": "async"}
+  ]
+}
+```
+
+### Available events
+
+| Event | When emitted | Payload |
+|-------|-------------|----------|
+| `pause` | After `pause_goal` succeeds | `{goalId, details: {reason, suggestedAction}}` |
+| `abort` | After `abort_goal` succeeds | `{goalId, details: {reason, archivePath}}` |
+| `audit_started` | When completion auditor begins | `{goalId, details: {provider, model}}` |
+| `task_skip` | After `skip_task` succeeds | `{goalId, taskId, details: {reason}}` |
+| `contract_violation` | When `complete_task` lacks required evidence | `{goalId, taskId, details: {contract, message}}` |
+
+### Behavior
+
+- **Non-blocking**: Events are forwarded on the microtask queue; failures are swallowed and logged
+- **UI notifications**: Each event shows a UI notification (e.g., "Auditor subscription: pause (goal=abc123)")
+- **Ledger entries**: Each event appends an `audit_subscription_emitted` entry to the goal ledger
+- **Unknown events**: Silently skipped (no error, no notification)
+- **Mode restriction**: Only `"async"` is supported; other modes are silently dropped
+
+### Example: Track all pauses and aborts
+
+```json
+{
+  "auditorSubscriptions": [
+    {"event": "pause", "mode": "async"},
+    {"event": "abort", "mode": "async"}
+  ]
+}
+```
+
+When the agent pauses or aborts a goal, you'll see:
+```
+Auditor subscription: pause (goal=abc123)
+Auditor subscription: abort (goal=abc123)
+```
+
+### Future: Question gating
+
+**Not yet implemented.** To intercept `goal_question` → forward to auditor first → auditor decides if question should go to user, you would need:
+
+1. New config: `gateQuestions: true`
+2. `goal_question` tool intercepts → calls auditor agent → auditor approves/rejects/rewrites question → then shows to user
+
+This feature is planned but not in the current release. Current `goal_question` goes directly to user.
+
+---
 
 ## Drafting behavior
 
