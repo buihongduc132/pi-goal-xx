@@ -48,10 +48,8 @@ export function resolveGoalPromptMode(settings?: GoalSettings): GoalPromptMode {
 /** Read a file's content if it exists and is non-empty, else undefined. */
 function readFileIfExists(filePath: string): string | undefined {
 	try {
-		if (!fs.existsSync(filePath)) return undefined;
-		const content = fs.readFileSync(filePath, "utf8");
-		const trimmed = content.trim();
-		return trimmed.length > 0 ? content.trim() : undefined;
+		const content = fs.readFileSync(filePath, "utf8").trim();
+		return content.length > 0 ? content : undefined;
 	} catch {
 		return undefined;
 	}
@@ -93,10 +91,9 @@ export function loadGoalPrompt(
 		return { prompt: "", source: "none" };
 	}
 
-	const globalText = globalPath ? readFileIfExists(globalPath) : undefined;
-	const localText = readFileIfExists(localPath);
-
 	if (mode === "global-local-merge") {
+		const globalText = globalPath ? readFileIfExists(globalPath) : undefined;
+		const localText = readFileIfExists(localPath);
 		if (globalText && localText) {
 			return { prompt: `${globalText}\n\n${localText}`, source: "merged" };
 		}
@@ -105,8 +102,10 @@ export function loadGoalPrompt(
 		return { prompt: "", source: "none" };
 	}
 
-	// mode === "global-local" (default)
+	// mode === "global-local" (default): defer global read until local is known missing.
+	const localText = readFileIfExists(localPath);
 	if (localText) return { prompt: localText, source: "local" };
+	const globalText = globalPath ? readFileIfExists(globalPath) : undefined;
 	if (globalText) return { prompt: globalText, source: "global" };
 	return { prompt: "", source: "none" };
 }

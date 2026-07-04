@@ -279,6 +279,14 @@ describe("continuationPrompt", () => {
 		it("does NOT inject when cwd omitted", () => {
 			assert.doesNotMatch(continuationPrompt(makeGoal({ id: "gKNC" })), /PI GOAL CUSTOM PROMPT/);
 		});
+		it("does NOT leave trailing newline when cwd given but nothing configured", () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-cont-trail-"));
+			try {
+				const out = continuationPrompt(makeGoal({ id: "gKT" }), { goalPromptMode: "local" }, cwd);
+				assert.doesNotMatch(out, /PI GOAL CUSTOM PROMPT/);
+				assert.equal(out.endsWith("\n"), false, "must not end with trailing newline");
+			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+		});
 		it("injects and orders after sisyphus", () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-cont-sis-"));
 			try {
