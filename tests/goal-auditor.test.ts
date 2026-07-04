@@ -233,6 +233,56 @@ describe("buildGoalAuditorPrompt", () => {
 	});
 });
 
+describe("buildGoalAuditorPrompt — step-8: prompt-size guards", () => {
+	it("caps a 200k-char objective to stay under 60k total prompt", () => {
+		const huge = "Z".repeat(200_000);
+		const out = buildGoalAuditorPrompt({
+			goal: makeGoal({ objective: huge }),
+			detailedSummary: "d",
+		});
+		assert.ok(out.length < 60_000, `prompt should be capped, got ${out.length} chars`);
+		assert.match(out, /\u2026\(\+\d+ chars truncated from objective\)/);
+	});
+
+	it("caps detailedSummary when it exceeds the limit", () => {
+		const huge = "X".repeat(100_000);
+		const out = buildGoalAuditorPrompt({
+			goal: makeGoal(),
+			detailedSummary: huge,
+		});
+		assert.match(out, /\u2026\(\+\d+ chars truncated from detailedSummary\)/);
+		assert.ok(out.length < 60_000);
+	});
+
+	it("caps verificationSummary when it exceeds the limit", () => {
+		const out = buildGoalAuditorPrompt({
+			goal: makeGoal(),
+			detailedSummary: "d",
+			verificationSummary: "V".repeat(80_000),
+		});
+		assert.match(out, /\u2026\(\+\d+ chars truncated from verificationSummary\)/);
+	});
+
+	it("caps verificationContract when it exceeds the limit", () => {
+		const out = buildGoalAuditorPrompt({
+			goal: makeGoal({ verificationContract: "C".repeat(80_000) }),
+			detailedSummary: "d",
+		});
+		assert.match(out, /\u2026\(\+\d+ chars truncated from verificationContract\)/);
+	});
+
+	it("leaves small fields untouched", () => {
+		const out = buildGoalAuditorPrompt({
+			goal: makeGoal({ objective: "short" }),
+			detailedSummary: "short",
+			completionSummary: "short",
+			verificationSummary: "short",
+		});
+		assert.doesNotMatch(out, /truncated/);
+		assert.match(out, /short/);
+	});
+});
+
 describe("runGoalCompletionAuditor — model resolution", () => {
 	it("returns error result when configured model not found (provider+model)", async () => {
 		const cwd = makeTmpCwd();
@@ -479,5 +529,116 @@ describe("runGoalCompletionAuditor — session orchestration", () => {
 		});
 		// user message_end ignored; only the final approved assistant output counts
 		assert.equal(res.approved, true);
+	});
+});
+
+describe("runGoalCompletionAuditor — compaction enabled (step-2)", () => {
+	it("passes a settingsManager with compaction enabled to createSession", async () => {
+		const cwd = makeTmpCwd();
+		let capturedSettingsManager: any = null;
+		const capturingCreate: any = async (sessionArgs: any) => {
+			capturedSettingsManager = sessionArgs.settingsManager;
+			let subscriber: ((event: any) => void) | null = null;
+			const session = {
+				subscribe(cb: (event: any) => void) { subscriber = cb; return () => { subscriber = null; }; },
+				async prompt(_text: string) {
+					subscriber?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "<approved/>" }] } });
+				},
+				abort() {},
+			};
+			return { session };
+		};
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd), goal: makeGoal(), detailedSummary: "d",
+			createSession: capturingCreate,
+		});
+		assert.ok(capturedSettingsManager, "settingsManager must be passed to createSession");
+		// The auditor session must have compaction ENABLED. Previously this was
+		// hardcoded to { enabled: false }, which meant a long audit could blow
+		// the context window with no recovery path.
+		assert.equal(
+			capturedSettingsManager.compaction?.enabled !== false,
+			true,
+			`expected compaction enabled, got: ${JSON.stringify(capturedSettingsManager.compaction)}`,
+		);
+	});
+});
+
+describe("runGoalCompletionAuditor — B6: onProgress guarded after abort", () => {
+	it("does not call onProgress after abort signal fires", async () => {
+		// B6 failure mode: after abortAudit nulls auditProgress, late session
+		// events could still call onProgress, resurrecting a stale progress
+		// object on an already-aborted audit. The fix adds a local `aborted`
+		// flag that gates emitProgress.
+		const cwd = makeTmpCwd();
+		const ac = new AbortController();
+		const progressCalls: any[] = [];
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd), goal: makeGoal(), detailedSummary: "d",
+			signal: ac.signal,
+			onProgress: (p) => progressCalls.push(p),
+			createSession: makeMockCreateSession({
+				finalOutput: "<approved/>",
+				events: [
+					// Simulate: event arrives AFTER abort, which is the race window
+					{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+					{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "<approved/>" }] } },
+				],
+				promptHook: () => ac.abort(),
+			}),
+		});
+		// After abort, no further onProgress calls should fire.
+		// The abort happens during promptHook; subsequent events are the race.
+		// Find the last progress call BEFORE vs AFTER abort.
+		// Since abort fires during prompt, any progress call that was triggered
+		// by events AFTER the abort should NOT exist.
+		// We verify by checking that no progress call has phase=thinking
+		// (which would come from the thinking_start event AFTER abort).
+		const postAbortPhases = progressCalls.map((p) => p.phase);
+		assert.ok(
+			!postAbortPhases.includes("thinking"),
+			`onProgress should not be called after abort, but got phases: ${JSON.stringify(postAbortPhases)}`,
+		);
+	});
+
+	it("does not call onProgress when signal already aborted before prompt", async () => {
+		const cwd = makeTmpCwd();
+		const ac = new AbortController();
+		ac.abort();
+		const progressCalls: any[] = [];
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd), goal: makeGoal(), detailedSummary: "d",
+			signal: ac.signal,
+			onProgress: (p) => progressCalls.push(p),
+			createSession: makeMockCreateSession({ finalOutput: "<approved/>" }),
+		});
+		assert.equal(progressCalls.length, 0, "no progress calls when already aborted");
+	});
+
+	it("returns aborted result when abort fires during prompt resolution (B6/B9 race)", async () => {
+		// B9 defense-in-depth: abort fires while session.prompt() is resolving.
+		// The local `aborted` flag is set synchronously, so the post-prompt
+		// check catches the abort even if the signal hasn't fully propagated.
+		const cwd = makeTmpCwd();
+		const ac = new AbortController();
+		const res = await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd), goal: makeGoal(), detailedSummary: "d",
+			signal: ac.signal,
+			createSession: makeMockCreateSession({
+				finalOutput: "<approved/>",
+				events: [
+					{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "<approved/>" }] } },
+				],
+				promptHook: () => {
+					// Abort AFTER the message_end event has been emitted but
+					// BEFORE prompt() resolves. This is the race window.
+					ac.abort();
+				},
+			}),
+		});
+		// Must return aborted, NOT approved — even though <approved/> was in
+		// the output, the abort takes precedence.
+		assert.equal(res.approved, false, "should not approve when aborted during prompt");
+		assert.match(res.error!, /Auditor aborted/);
 	});
 });

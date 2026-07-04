@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { runGoalCompletionAuditor } from "../extensions/goal-auditor.ts";
+import { runGoalCompletionAuditor, isGoalSelfExtension } from "../extensions/goal-auditor.ts";
 import type { GoalRecord } from "../extensions/goal-record.ts";
 
 function makeGoal(over: Partial<GoalRecord> = {}): GoalRecord {
@@ -332,5 +332,66 @@ describe("runGoalCompletionAuditor — resourceLoader inheritance", () => {
 				fs.rmSync(cwd, { recursive: true, force: true });
 			} catch { /* best-effort cleanup */ }
 		}
+	});
+});
+
+describe("B3 — auditor excludes pi-goal self from inherited extensions", () => {
+	it("isGoalSelfExtension matches source and deployed paths", () => {
+		assert.equal(isGoalSelfExtension("/home/user/pi-goal-xx/extensions/goal.ts"), true);
+		assert.equal(isGoalSelfExtension("C:\\Users\\pi-goal-xx\\extensions\\goal.ts"), true);
+		assert.equal(isGoalSelfExtension("npm:pi-goal-xx"), true);
+		assert.equal(isGoalSelfExtension("/home/user/.pi/agent/extensions/pi-goal-xx/goal.ts"), true);
+	});
+
+	it("isGoalSelfExtension does not match unrelated extensions", () => {
+		assert.equal(isGoalSelfExtension("cc-safety-net"), false);
+		assert.equal(isGoalSelfExtension("/path/to/lint-on-edit/index.ts"), false);
+		assert.equal(isGoalSelfExtension("pi-mcp-adapter"), false);
+		assert.equal(isGoalSelfExtension(undefined), false);
+	});
+
+	it("resource loader filters out the goal extension even in inherit mode", async () => {
+		// B3 failure mode: the auditor inherits ALL main extensions including
+		// pi-goal itself. createAgentSession then re-instantiates the goal
+		// plugin inside the auditor → double state, locks, timers, hooks →
+		// 100%-reproducible crash on complete_goal.
+		//
+		// This test proves the goal extension is stripped from the auditor's
+		// resolved extensions even when it's present in the main loader and
+		// no auditorExclude is configured.
+		const cwd = makeTmpCwd();
+		const goalExt = {
+			path: "/home/user/pi-goal-xx/extensions/goal.ts",
+			resolvedPath: "/home/user/pi-goal-xx/extensions/goal.ts",
+			sourceInfo: {}, handlers: new Map(), tools: new Map(),
+			messageRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map(),
+		};
+		const safeExt = {
+			path: "cc-safety-net", resolvedPath: "/cc", sourceInfo: {}, handlers: new Map(), tools: new Map(),
+			messageRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map(),
+		};
+		const mainLoader = {
+			getExtensions: () => ({ extensions: [goalExt, safeExt], errors: [], runtime: {} }),
+			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => "",
+			getAppendSystemPrompt: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		};
+		const c = await capture(
+			cwd,
+			{},
+			{ tools: ["read"], extensions: [goalExt.path, safeExt.path], resourceLoader: mainLoader },
+		);
+		const exts = c.resourceLoader.getExtensions().extensions;
+		const extPaths = exts.map((e: any) => e.path);
+		// cc-safety-net survives
+		assert.ok(extPaths.includes("cc-safety-net"), `expected cc-safety-net in ${JSON.stringify(extPaths)}`);
+		// pi-goal itself is EXCLUDED
+		assert.ok(!extPaths.some((p: string) => p.includes("pi-goal") || p.endsWith("goal.ts")),
+			`goal extension must NOT be in auditor extensions: ${JSON.stringify(extPaths)}`);
 	});
 });

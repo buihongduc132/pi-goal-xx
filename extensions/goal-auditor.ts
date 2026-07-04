@@ -23,6 +23,16 @@ import {
 	type ResolvedAuditorResources,
 } from "./auditor-modes.ts";
 import { loadAuditorPrompt } from "./auditor-prompt.ts";
+import {
+	buildEndEntry,
+	buildEventEntry,
+	buildStartEntry,
+	logAuditorTrace,
+	previewBytes,
+} from "./auditor-log.ts";
+
+/** Cap on per-event payload logged to the trace file (bytes). */
+const TRACE_EVENT_PREVIEW_BYTES = 1_000;
 
 export interface AuditorProgress {
 	/** Current tool being executed by the auditor, if any */
@@ -121,6 +131,15 @@ function taskSummaryBlock(taskList?: GoalTaskList | null): string {
 	return lines.join("\n");
 }
 
+/** Cap on each unbounded string field in the auditor prompt (bytes). */
+const PROMPT_FIELD_CAP = 50_000;
+
+/** Truncate a string field to PROMPT_FIELD_CAP bytes with a marker. */
+function capPromptField(value: string, label: string): string {
+	if (value.length <= PROMPT_FIELD_CAP) return value;
+	return `${value.slice(0, PROMPT_FIELD_CAP)}\n\n…(+${value.length - PROMPT_FIELD_CAP} chars truncated from ${label})`;
+}
+
 export function buildGoalAuditorPrompt(args: {
 	goal: GoalRecord;
 	completionSummary?: string | null;
@@ -141,31 +160,31 @@ export function buildGoalAuditorPrompt(args: {
 		"",
 		"Goal objective:",
 		"<objective>",
-		args.goal.objective,
+		capPromptField(args.goal.objective, "objective"),
 		"</objective>",
 		"",
 		"Executor completion claim:",
 		"<completion_summary>",
-		args.completionSummary?.trim() || "(none provided)",
+		capPromptField(args.completionSummary?.trim() || "(none provided)", "completionSummary"),
 		"</completion_summary>",
 		"",
 		"Current goal metadata:",
 		"<goal_details>",
-		args.detailedSummary,
+		capPromptField(args.detailedSummary, "detailedSummary"),
 		...(!args.settings?.disableTasks && taskSummaryBlock(args.goal.taskList) ? ["", taskSummaryBlock(args.goal.taskList)] : []),
 		"</goal_details>",
 		...(args.verificationSummary?.trim() ? [
 			"",
 			"Executor verification summary:",
 			"<verification_summary>",
-			args.verificationSummary.trim(),
+			capPromptField(args.verificationSummary.trim(), "verificationSummary"),
 			"</verification_summary>",
 		] : []),
 		...(!args.settings?.disableContracts && args.goal.verificationContract?.trim() ? [
 			"",
 			"Goal verification contract (what the executor was required to verify):",
 			"<verification_contract>",
-			args.goal.verificationContract.trim(),
+			capPromptField(args.goal.verificationContract.trim(), "verificationContract"),
 			"</verification_contract>",
 		] : []),
 		"",
@@ -226,6 +245,26 @@ export const reportAuditorProgressParams = Type.Object({
  * pi-mcp-adapter extension (filtered only by `auditorExclude.extensions`
  * matching `pi-mcp-adapter*` if the user wants to strip MCP from the auditor).
  */
+/**
+ * Detect whether an extension path belongs to the pi-goal plugin itself.
+ * The auditor must NEVER inherit the goal extension — re-instantiating it
+ * inside the auditor's sub-session causes goal state, lock files, timers,
+ * and hooks to fire a second time, which is the prime suspect for the
+ * 100%-reproducible complete_goal crash.
+ *
+ * Matches by path patterns:
+ *   - ends with /extensions/goal.ts (local source layout)
+ *   - contains "pi-goal" (deployed package name)
+ */
+export function isGoalSelfExtension(extPath: string | undefined): boolean {
+	if (!extPath) return false;
+	const normalized = extPath.replace(/\\/g, "/").toLowerCase();
+	return (
+		normalized.endsWith("/extensions/goal.ts") ||
+		normalized.includes("pi-goal")
+	);
+}
+
 function makeAuditorResourceLoader(
 	resolved: ResolvedAuditorResources,
 	mainResourceLoader?: ResourceLoader,
@@ -241,7 +280,14 @@ function makeAuditorResourceLoader(
 			if (resolved.extensions.length === 0 && resolved.mode === "minimal") {
 				return { ...all, extensions: [] };
 			}
-			const filtered = all.extensions.filter((e) => extAllow.has(e.path) || extAllow.has(e.resolvedPath));
+			const filtered = all.extensions.filter((e) => {
+				// B3: never inherit the goal extension itself — re-instantiating
+				// it inside the auditor causes double state/locks/timers/hooks.
+				if (isGoalSelfExtension(e.path) || isGoalSelfExtension(e.resolvedPath)) {
+					return false;
+				}
+				return extAllow.has(e.path) || extAllow.has(e.resolvedPath);
+			});
 			return { ...all, extensions: filtered };
 		},
 		getSkills: () => {
@@ -359,6 +405,7 @@ export async function runGoalCompletionAuditor(args: {
 	if (resolved.error) {
 		return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: resolved.error };
 	}
+	const startedAt = Date.now();
 	try {
 		const createSession = args.createSession ?? createAgentSession;
 		const patternCache = new AuditorPatternCache();
@@ -420,13 +467,26 @@ export async function runGoalCompletionAuditor(args: {
 		const hardcodedDefault = buildGoalAuditorPrompt(args);
 		const resolvedPrompt = loadAuditorPrompt(config, args.ctx.cwd, hardcodedDefault);
 
-		const startedAt = Date.now();
+		// Forensic trace: log the audit start with a bounded preview of the prompt
+		// and the resolved resource counts. Never throws.
+		logAuditorTrace(args.ctx.cwd, buildStartEntry({
+			goalId: args.goal.id,
+			model: modelLabel(model),
+			thinkingLevel,
+			prompt: resolvedPrompt.prompt,
+			cwd: args.ctx.cwd,
+			resolvedTools: resolved.tools,
+			resolvedSkills: resolved.skills,
+			resolvedExtensions: resolved.extensions,
+		}));
+
 		const progress: AuditorProgress = {
 			recentOutput: [],
 			phase: "running",
 			elapsedMs: 0,
 		};
 		function emitProgress(): void {
+			if (aborted) return; // B6: no progress updates after abort
 			progress.elapsedMs = Date.now() - startedAt;
 			args.onProgress?.({ ...progress });
 		}
@@ -462,18 +522,69 @@ export async function runGoalCompletionAuditor(args: {
 			},
 		});
 
-		const { session } = await createSession({
-			cwd: args.ctx.cwd,
-			model,
-			thinkingLevel,
-			modelRegistry: args.ctx.modelRegistry,
-			resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
-			sessionManager: SessionManager.inMemory(args.ctx.cwd),
-			settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-			tools: resolved.tools,
-			customTools: [reportProgressTool],
+		// Forensic trace: log a 'pre-createSession' marker BEFORE createSession,
+		// so a crash/hang during session creation (e.g. extension onLoad) is
+		// visible in the trace. The 'start' entry after createSession only fires
+		// if creation succeeds.
+		logAuditorTrace(args.ctx.cwd, {
+			ts: new Date().toISOString(),
+			phase: "pre-createSession",
+			goalId: args.goal.id,
+			model: modelLabel(model),
+			toolsCount: resolved.tools.length,
+			extensionsCount: resolved.extensions.length,
+			extensions: resolved.extensions,
 		});
+		let session: Awaited<ReturnType<typeof createSession>>["session"];
+		try {
+			const created = await createSession({
+				cwd: args.ctx.cwd,
+				model,
+				thinkingLevel,
+				modelRegistry: args.ctx.modelRegistry,
+				resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
+				sessionManager: SessionManager.inMemory(args.ctx.cwd),
+				settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+				tools: resolved.tools,
+				customTools: [reportProgressTool],
+			});
+			session = created.session;
+		} catch (createError) {
+			// createSession itself threw — almost certainly an extension onLoad
+			// failure in the auditor's inherited resource loader. Log it.
+			logAuditorTrace(args.ctx.cwd, {
+				ts: new Date().toISOString(),
+				phase: "error",
+				goalId: args.goal.id,
+				error: createError instanceof Error ? createError.message : String(createError),
+				errorStack: createError instanceof Error ? createError.stack?.slice(0, 4000) : undefined,
+				source: "createSession",
+			});
+			throw createError;
+		}
 		const unsubscribe = session.subscribe((event) => {
+			// Forensic trace: record every session event with a bounded preview.
+			// This is the timeline used to diagnose crashes/hangs after the fact.
+			try {
+				const summary: Record<string, unknown> = { };
+				if (event.type === "tool_execution_start") {
+					summary.tool = (event as any).toolName;
+					summary.argsPreview = previewBytes(
+						typeof (event as any).args === "object" && (event as any).args !== null
+							? JSON.stringify((event as any).args)
+							: String((event as any).args ?? ""),
+						TRACE_EVENT_PREVIEW_BYTES,
+					);
+				} else if (event.type === "message_update") {
+					const se = (event as any).assistantMessageEvent;
+					summary.subType = se?.type;
+				} else if (event.type === "message_end") {
+					summary.role = (event as any).message?.role;
+				}
+				logAuditorTrace(args.ctx.cwd, buildEventEntry(event.type, summary));
+			} catch {
+				// trace logging must never crash the audit
+			}
 			if (event.type === "tool_execution_start") {
 				progress.currentTool = event.toolName;
 				progress.currentToolArgs = typeof event.args === "object" && event.args !== null
@@ -535,7 +646,12 @@ export async function runGoalCompletionAuditor(args: {
 		});
 		// Wire the external AbortSignal to abort the running session when fired
 		// This is the mechanism that makes Esc-to-skip actually stop the auditor.
-		const abortSession = () => { session.abort(); };
+		// B6: set a local `aborted` flag so emitProgress stops writing to the
+		// caller's progress state after abort. Without this, late events from
+		// the session (which may fire after session.abort() returns) would
+		// resurrect the nulled auditProgress in the caller.
+		let aborted = args.signal?.aborted ?? false;
+		const abortSession = () => { aborted = true; session.abort(); };
 		args.signal?.addEventListener("abort", abortSession, { once: true });
 
 		// Emit initial progress
@@ -543,7 +659,18 @@ export async function runGoalCompletionAuditor(args: {
 		progress.percentage = 0;
 		emitProgress();
 		try {
-			if (args.signal?.aborted) return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: "Auditor aborted." };
+			if (args.signal?.aborted) {
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: "Auditor aborted.",
+					output: "",
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: "Auditor aborted." };
+			}
 			await session.prompt(resolvedPrompt.prompt);
 		} finally {
 			args.signal?.removeEventListener("abort", abortSession);
@@ -554,14 +681,26 @@ export async function runGoalCompletionAuditor(args: {
 			unsubscribe();
 		}
 		// session.abort() does NOT throw — the agent loop returns normally with
-		// whatever output was captured before the abort. Check the signal after
-		// prompt completes and treat any abort as auditor-aborted regardless of
-		// whether an exception propagated.
-		if (args.signal?.aborted) {
+		// whatever output was captured before the abort. Check BOTH the local
+		// `aborted` flag (set synchronously before session.abort()) AND the
+		// signal's aborted state for defense-in-depth. The local flag catches
+		// the race where abort fires during prompt resolution but the signal
+		// check hasn't propagated yet.
+		if (aborted || args.signal?.aborted) {
+			const abortedOutput = outputParts.join("\n\n").trim();
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: false,
+				disapproved: true,
+				model: modelLabel(model),
+				error: "Auditor aborted.",
+				output: abortedOutput,
+				elapsedMs: Date.now() - startedAt,
+			}));
 			return {
 				approved: false,
 				disapproved: true,
-				output: outputParts.join("\n\n").trim(),
+				output: abortedOutput,
 				model: modelLabel(model),
 				thinkingLevel,
 				error: "Auditor aborted.",
@@ -569,16 +708,35 @@ export async function runGoalCompletionAuditor(args: {
 		}
 		const output = outputParts.join("\n\n").trim();
 		const decision = parseAuditorDecision(output);
+		logAuditorTrace(args.ctx.cwd, buildEndEntry({
+			goalId: args.goal.id,
+				approved: decision.approved,
+				disapproved: decision.disapproved,
+				model: modelLabel(model),
+				output,
+				elapsedMs: Date.now() - startedAt,
+			}));
 		return { ...decision, output, model: modelLabel(model), thinkingLevel };
 	} catch (error) {
 		const isAborted = args.signal?.aborted || (error instanceof Error && error.name === "AbortError");
+		const errorMsg = isAborted ? "Auditor aborted." : (error instanceof Error ? error.message : String(error));
+		const errOutput = outputParts.join("\n\n").trim();
+		logAuditorTrace(args.ctx.cwd, buildEndEntry({
+			goalId: args.goal.id,
+			approved: false,
+			disapproved: true,
+			model: modelLabel(model),
+			error: errorMsg,
+			output: errOutput,
+			elapsedMs: Date.now() - startedAt,
+		}));
 		return {
 			approved: false,
 			disapproved: true,
-			output: outputParts.join("\n\n").trim(),
+			output: errOutput,
 			model: modelLabel(model),
 			thinkingLevel,
-			error: isAborted ? "Auditor aborted." : (error instanceof Error ? error.message : String(error)),
+			error: errorMsg,
 		};
 	}
 }

@@ -30,6 +30,7 @@ import {
 	type GoalSettings,
 } from "./goal-settings.ts";
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
+import { logAuditorTrace } from "./auditor-log.ts";
 import {
 	proposalDialogFailureMessage,
 	registerQuestionnaireTools,
@@ -592,26 +593,22 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 	function abortAudit(ctx: ExtensionContext): void {
 		if (!auditAbortController || !auditProgress) return;
-		const settings = loadGoalSettingsFileConfig(ctx.cwd);
+		const abortedGoalId = state.goal?.id;
+		logAuditorTrace(ctx.cwd, {
+			ts: nowIso(),
+			phase: "abort",
+			goalId: abortedGoalId,
+			source: "esc-abortAudit",
+		});
 		auditAbortController.abort();
 		auditAbortController = null;
 		stopAuditAnimation();
 		auditProgress = null;
 		goalWidgetComponent?.invalidate();
 		if (state.goal) {
-			try {
-				appendGoalEvent(ctx, {
-					type: "audit_skipped",
-					goalId: state.goal.id,
-					reason: "user_aborted",
-					provider: settings.provider,
-					model: settings.model,
-					thinkingLevel: settings.thinkingLevel,
-					at: nowIso(),
-				});
-			} catch {
-				// Ledger append failure should not block skip
-			}
+			// B4: audit_skipped ledger is written by complete_goal.execute's
+			// aborted branch (the lifecycle handler), not here. Writing it in
+			// both places caused duplicate entries on every Esc-abort.
 		}
 	}
 
@@ -2718,6 +2715,11 @@ ${objective}` : objective,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			reconcileFocusedGoalFromDisk(ctx);
 
+			// B5: load settings ONCE for the entire complete_goal call. Previously
+			// loadGoalSettings/loadGoalSettingsFileConfig were called 4 times per
+			// invocation, with potential drift if the settings file changed mid-call.
+			const settings = loadGoalSettings(ctx.cwd);
+
 			// -- Phase 2: Status validation --
 			const effectiveStatus = params.status ?? COMPLETE_STATUS;
 			if (effectiveStatus !== COMPLETE_STATUS) {
@@ -2735,8 +2737,7 @@ ${objective}` : objective,
 			if (!state.goal) throw new Error("Goal disappeared during completion validation.");
 
 			// Task gate: warn if blockCompletion is enabled and tasks remain pending
-			const disableTasksSettings = loadGoalSettings(ctx.cwd).disableTasks;
-			if (!disableTasksSettings) {
+			if (!settings.disableTasks) {
 				const taskWarning = state.goal.taskList ? taskCompletionBlockWarning(state.goal.taskList) : null;
 				if (taskWarning) {
 					return {
@@ -2747,8 +2748,7 @@ ${objective}` : objective,
 			}
 
 			// Verification contract gate: if the goal has a contract, verificationSummary must be non-empty
-			const disableContractsSettings = loadGoalSettings(ctx.cwd).disableContracts;
-			if (!disableContractsSettings) {
+			if (!settings.disableContracts) {
 				const contractGate = validateVerificationSummary({
 					verificationContract: state.goal.verificationContract,
 					verificationSummary: params.verificationSummary,
@@ -2773,7 +2773,6 @@ ${objective}` : objective,
 			} catch {
 				// Ledger append failure should not block completion
 			}
-			const settings = loadGoalSettingsFileConfig(ctx.cwd);
 			const auditorLabel = settings.provider || settings.model || settings.thinkingLevel
 				? `${settings.provider ?? "default"}/${settings.model ?? "default"}${settings.thinkingLevel ? `:${settings.thinkingLevel}` : ""}`
 				: "default";
@@ -2907,7 +2906,7 @@ ${objective}` : objective,
 				].filter((line): line is string => line !== undefined).join("\n"),
 				display: true,
 				details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
-			}, { triggerTurn: true });
+			});
 			// Append ledger: audit started
 			try {
 				appendGoalEvent(ctx, {
@@ -2959,7 +2958,7 @@ ${objective}` : objective,
 				completionSummary: params.completionSummary,
 				detailedSummary: detailedSummary(auditTarget),
 				verificationSummary: params.verificationSummary,
-				settings: loadGoalSettings(ctx.cwd),
+				settings,
 				signal: auditAbortController.signal,
 				mainResources: {
 					// Inherit the main session's active tool list so the auditor can
@@ -2987,6 +2986,12 @@ ${objective}` : objective,
 			// If the audit was aborted by the user (Esc), show a TUI dialog letting
 			// the user choose: mark complete without audit, or continue working.
 			if (auditor.error === "Auditor aborted.") {
+				logAuditorTrace(ctx.cwd, {
+					ts: nowIso(),
+					phase: "abort-handled",
+					goalId: auditTarget.id,
+					source: "complete_goal-aborted-branch",
+				});
 				auditProgress = null;
 				goalWidgetComponent?.invalidate();
 				updateUI(ctx);

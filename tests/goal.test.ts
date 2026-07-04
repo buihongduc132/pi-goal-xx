@@ -383,6 +383,42 @@ describe("complete_goal tool — validation gates", () => {
 	});
 });
 
+describe("complete_goal tool — B2: no triggerTurn inside execute body", () => {
+	it("no sendMessage inside complete_goal.execute passes triggerTurn:true (static source check)", async () => {
+		// B2 failure mode: the "Auditor: I am starting" sendMessage used
+		// { triggerTurn: true } while complete_goal was mid-execute. That
+		// queued a continuation turn on a session that was about to run a
+		// sub-session (the auditor) — undefined behavior / crash surface.
+		//
+		// We assert this structurally because running the real auditor in
+		// a unit test invokes createAgentSession which leaves untracked
+		// handles. The source-level check is faithful to the verification
+		// contract item 4 and catches regressions.
+		const source = fs.readFileSync(
+			path.resolve(import.meta.dirname, "..", "extensions", "goal.ts"),
+			"utf8",
+		);
+		// Locate the complete_goal tool definition and its execute body.
+		// The execute body starts at `async execute(` after the complete_goal
+		// name and ends at the next `renderCall(` or the tool's closing `}));`.
+		const toolStart = source.indexOf('name: "complete_goal"');
+		assert.ok(toolStart > 0, "complete_goal tool definition not found");
+		// Find the execute function body within this tool definition
+		const executeStart = source.indexOf("async execute(", toolStart);
+		assert.ok(executeStart > 0, "execute function not found in complete_goal");
+		// Find the end of this tool definition (next renderCall after execute)
+		const renderCallAfter = source.indexOf("renderCall(", executeStart);
+		assert.ok(renderCallAfter > 0, "renderCall not found after complete_goal execute");
+		const executeBody = source.slice(executeStart, renderCallAfter);
+		// Assert no triggerTurn:true appears in the execute body
+		assert.doesNotMatch(
+			executeBody,
+			/triggerTurn:\s*true/,
+			"complete_goal.execute body must not contain triggerTurn:true — it fires while the tool is mid-execute and can crash the host session",
+		);
+	});
+});
+
 describe("propose_goal_tweak tool", () => {
 	it("rejects tweak when no goal focused", async () => {
 		const cwd = tmpWorkspace();
@@ -538,5 +574,57 @@ describe("event handlers — broader coverage", () => {
 		const results = await emit(pi, ctx2, "context", { messages: [] });
 		// Handler ran; whether it injected depends on internal state
 		assert.ok(Array.isArray(results));
+	});
+});
+
+describe("B4 — abortAudit does not duplicate audit_skipped ledger", () => {
+	it("abortAudit function body contains no audit_skipped appendGoalEvent", () => {
+		// B4 failure mode: both abortAudit (Esc handler) and the
+		// complete_without_audit branch in complete_goal.execute wrote
+		// audit_skipped to the ledger, creating duplicate entries on every
+		// Esc-abort. The fix removed it from abortAudit (the mechanism layer),
+		// keeping it only in complete_goal.execute (the lifecycle layer).
+		const source = fs.readFileSync(
+			path.resolve(import.meta.dirname, "..", "extensions", "goal.ts"),
+			"utf8",
+		);
+		const abortStart = source.indexOf("function abortAudit(");
+		assert.ok(abortStart > 0, "abortAudit function not found");
+		const nextFn = source.indexOf("\n\tfunction ", abortStart + 1);
+		assert.ok(nextFn > 0, "end of abortAudit not found");
+		const body = source.slice(abortStart, nextFn);
+		assert.doesNotMatch(
+			body,
+			/type:\s*"audit_skipped"/,
+			"abortAudit must not write audit_skipped to the ledger — complete_goal.execute handles it (B4 dedupe)",
+		);
+	});
+});
+
+describe("B5 — complete_goal.execute loads settings exactly once", () => {
+	it("no more than one loadGoalSettings/loadGoalSettingsFileConfig call in execute body", () => {
+		// B5 failure mode: loadGoalSettings was called 4 times per
+		// complete_goal invocation (disableTasks check, disableContracts check,
+		// auditorLabel computation, runGoalCompletionAuditor settings arg).
+		// Between calls, the settings file could change, causing inconsistent
+		// behavior (e.g. disableTasks=true but disableContracts from an older
+		// read). The fix caches settings in a single const at the top.
+		const source = fs.readFileSync(
+			path.resolve(import.meta.dirname, "..", "extensions", "goal.ts"),
+			"utf8",
+		);
+		const toolStart = source.indexOf('name: "complete_goal"');
+		assert.ok(toolStart > 0, "complete_goal tool definition not found");
+		const executeStart = source.indexOf("async execute(", toolStart);
+		assert.ok(executeStart > 0);
+		const renderCallAfter = source.indexOf("renderCall(", executeStart);
+		assert.ok(renderCallAfter > 0);
+		const body = source.slice(executeStart, renderCallAfter);
+		const loadMatches = body.match(/loadGoalSettings(FileConfig)?\s*\(/g) ?? [];
+		assert.equal(
+			loadMatches.length,
+			1,
+			`complete_goal.execute should load settings exactly once, found ${loadMatches.length}: ${JSON.stringify(loadMatches)}`,
+		);
 	});
 });
