@@ -167,6 +167,9 @@ export function acquireLock(
 export function releaseLock(cwd: string, goalId: string, self?: LockOwner): void {
 	try {
 		if (self) {
+			// TOCTOU guard: re-read right before unlink. Another session may have
+			// acquired a fresh lock (after ours went stale and was reaped) between
+			// an earlier read and this unlink. Verify identity is still ours.
 			const existing = readLock(cwd, goalId);
 			if (!existing || existing.owner.sessionId !== self.sessionId) {
 				return;
@@ -187,9 +190,22 @@ export function reapStaleLock(cwd: string, goalId: string): void {
 	try {
 		const existing = readLock(cwd, goalId);
 		if (!existing) return;
-		if (isLockStale(existing)) {
-			fs.unlinkSync(lockPath(cwd, goalId));
+		if (!isLockStale(existing)) return;
+		// TOCTOU guard: re-read right before unlink. Between the stale read above
+		// and the unlink below, another session may have acquired a fresh lock
+		// (reaping the stale one and writing its own). Unlinking blindly would
+		// delete the newcomer's fresh lock → transient split-brain. Verify the
+		// on-disk lock is STILL the same stale one before unlinking.
+		const current = readLock(cwd, goalId);
+		if (
+			!current ||
+			current.owner.sessionId !== existing.owner.sessionId ||
+			current.acquiredAt !== existing.acquiredAt ||
+			!isLockStale(current)
+		) {
+			return;
 		}
+		fs.unlinkSync(lockPath(cwd, goalId));
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return;

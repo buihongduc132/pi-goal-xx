@@ -412,7 +412,7 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `PI_GOAL_DISABLED_TOOLS` | — | Comma/whitespace-separated tool names to hide (overrides settings file) |
 | `PI_GOAL_SETTINGS_FILE` | `.pi/pi-goal-xx-settings.json` | Alternative settings file path (relative to cwd or absolute) |
 | `PI_TEAMS_WORKER` | unset | When `1`, worker session mode: skips goal focus inheritance from leader's branch context. Workers start goal-unfocused but can still read goal files from disk. Set automatically by pi-agent-teams when spawning worker sessions. |
-| `PI_GOAL_AUTO_FOCUS` | `resume` | Multi-session auto-focus policy. `resume` (default): only a session with `reason: "resume"` auto-focuses the single open goal. `all`: restore legacy behavior — auto-focus on any session reason (including `new`/`startup`/`fork`/`reload`). See [Multi-session goal focus](#multi-session-goal-focus). |
+| `PI_GOAL_AUTO_FOCUS` | `resume` | Multi-session auto-focus policy. `resume` (default): only a session with `reason: "resume"` auto-focuses the single open goal. `all`: restore legacy behavior — auto-focus on any session reason (including `new`/`startup`/`fork`/`reload` and `/tree` navigation, which is routed as `null`). See [Multi-session goal focus](#multi-session-goal-focus). |
 
 ## Configurable auditor
 
