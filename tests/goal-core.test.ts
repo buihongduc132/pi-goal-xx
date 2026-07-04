@@ -7,6 +7,11 @@ import {
 	formatDuration,
 	statusLabel,
 	footerStatus,
+	shortGoalId,
+	shortSessionId,
+	formatRelativeTime,
+	formatAbsoluteShort,
+	compactStatusLabel,
 } from "../extensions/goal-core.ts";
 import type { GoalDisplayRecordLike } from "../extensions/goal-core.ts";
 
@@ -261,5 +266,180 @@ describe("footerStatus", () => {
 		const long = "x".repeat(200);
 		const g = goal({ objective: long });
 		assert.equal(footerStatus(g), `goal: active - ${truncateText(long, 60)}`);
+	});
+});
+
+// ── goal-focus-picker-ux: new helpers ────────────────────────────────────────
+// These tests pin the requirements in
+// openspec/changes/goal-focus-picker-ux/specs/goal-focus-picker/spec.md.
+
+describe("shortGoalId", () => {
+	it("returns substring after the final dash", () => {
+		assert.equal(shortGoalId("mr62bc2x-qi4x4i"), "qi4x4i");
+	});
+
+	it("returns whole id when there is no dash", () => {
+		assert.equal(shortGoalId("nodash"), "nodash");
+	});
+
+	it("returns the LAST segment when multiple dashes present", () => {
+		assert.equal(shortGoalId("a-b-c"), "c");
+	});
+
+	it("empty input returns empty string", () => {
+		assert.equal(shortGoalId(""), "");
+	});
+
+	it("does not strip a trailing dash (suffix is empty string)", () => {
+		// 'id-' → lastIndexOf('-') points at the trailing dash → slice after it = ''
+		assert.equal(shortGoalId("id-"), "");
+	});
+});
+
+describe("shortSessionId", () => {
+	it("returns last 6 chars when longer than 6", () => {
+		// 'ses_abcdef12345' (len 14) → last 6 = 'f12345'
+		assert.equal(shortSessionId("ses_abcdef12345"), "f12345");
+	});
+
+	it("returns whole id when length <= 6", () => {
+		assert.equal(shortSessionId("abc"), "abc");
+		assert.equal(shortSessionId("abcdef"), "abcdef");
+		assert.equal(shortSessionId(""), "");
+	});
+});
+
+describe("formatRelativeTime", () => {
+	// Use a fixed 'now' so assertions are deterministic.
+	const NOW = Date.parse("2026-07-04T15:00:00Z");
+
+	it("30 seconds ago → 'just now'", () => {
+		const iso = new Date(NOW - 30_000).toISOString();
+		assert.equal(formatRelativeTime(iso, NOW), "just now");
+	});
+
+	it("59 seconds ago → 'just now' (boundary just below 1 minute)", () => {
+		const iso = new Date(NOW - 59_000).toISOString();
+		assert.equal(formatRelativeTime(iso, NOW), "just now");
+	});
+
+	it("5 minutes ago → '5m ago'", () => {
+		const iso = new Date(NOW - 5 * 60_000).toISOString();
+		assert.equal(formatRelativeTime(iso, NOW), "5m ago");
+	});
+
+	it("2 hours ago → '2h ago'", () => {
+		const iso = new Date(NOW - 2 * 3_600_000).toISOString();
+		assert.equal(formatRelativeTime(iso, NOW), "2h ago");
+	});
+
+	it("3 days ago → '3d ago'", () => {
+		const iso = new Date(NOW - 3 * 86_400_000).toISOString();
+		assert.equal(formatRelativeTime(iso, NOW), "3d ago");
+	});
+
+	it("future timestamp clamps to 'just now' (clock skew tolerance)", () => {
+		const iso = new Date(NOW + 10 * 60_000).toISOString();
+		assert.equal(formatRelativeTime(iso, NOW), "just now");
+	});
+
+	it("empty string → '—'", () => {
+		assert.equal(formatRelativeTime("", NOW), "—");
+	});
+
+	it("invalid ISO → '—'", () => {
+		assert.equal(formatRelativeTime("not-a-date", NOW), "—");
+		assert.equal(formatRelativeTime("2026-13-99", NOW), "—");
+	});
+});
+
+describe("formatAbsoluteShort", () => {
+	it("formats a valid ISO as 'MM-DD HH:mm'", () => {
+		const iso = "2026-07-04T14:50:00"; // local time, no Z
+		assert.match(formatAbsoluteShort(iso), /^\d{2}-\d{2} \d{2}:\d{2}$/);
+	});
+
+	it("produces the expected month/day/hour/minute components", () => {
+		const iso = "2026-07-04T14:50:00";
+		const out = formatAbsoluteShort(iso);
+		// Local tz-independent: month=07, day=04, hour=14, minute=50
+		assert.ok(out.startsWith("07-04 "), `expected '07-04 ...' got '${out}'`);
+		assert.ok(out.endsWith(" 14:50"), `expected '... 14:50' got '${out}'`);
+	});
+
+	it("empty string → '—'", () => {
+		assert.equal(formatAbsoluteShort(""), "—");
+	});
+
+	it("invalid ISO → '—'", () => {
+		assert.equal(formatAbsoluteShort("not-a-date"), "—");
+	});
+});
+
+describe("compactStatusLabel", () => {
+	it("active + autoContinue → 'running'", () => {
+		assert.equal(compactStatusLabel({ status: "active", autoContinue: true }), "running");
+	});
+
+	it("active WITHOUT autoContinue → 'active'", () => {
+		assert.equal(compactStatusLabel({ status: "active", autoContinue: false }), "active");
+	});
+
+	it("paused + stopReason agent → 'paused·agent'", () => {
+		assert.equal(compactStatusLabel({ status: "paused", autoContinue: false, stopReason: "agent" }), "paused·agent");
+	});
+
+	it("paused + stopReason user → 'paused'", () => {
+		assert.equal(compactStatusLabel({ status: "paused", autoContinue: false, stopReason: "user" }), "paused");
+	});
+
+	it("paused without stopReason → 'paused'", () => {
+		assert.equal(compactStatusLabel({ status: "paused", autoContinue: false }), "paused");
+	});
+
+	it("does NOT prepend 'sisyphus ' (the whole point — no duplication)", () => {
+		// sisyphus mode is surfaced as a leading glyph on the row, not in the status pill.
+		const out = compactStatusLabel({ status: "active", autoContinue: true });
+		assert.ok(!out.startsWith("sisyphus"), `must not start with 'sisyphus', got '${out}'`);
+		assert.ok(!out.includes("sisyphus"), `must not contain 'sisyphus', got '${out}'`);
+	});
+});
+
+describe("displayObjectiveTitle — sanitization (goal-focus-picker-ux)", () => {
+	it("strips a leading code fence with a language tag", () => {
+		// '```ts do the thing' → strips fence + lang tag 'ts' → 'do the thing'.
+		// (Note: bare fence + prose on same line like '```do the thing' is NOT
+		// supported — the word after the fence is parsed as a lang tag. See report.)
+		assert.equal(displayObjectiveTitle("```ts do the thing"), "do the thing");
+	});
+
+	it("strips a leading blockquote marker", () => {
+		assert.equal(displayObjectiveTitle("> do the thing"), "do the thing");
+	});
+
+	it("strips surrounding double quotes", () => {
+		assert.equal(displayObjectiveTitle('"quoted"'), "quoted");
+	});
+
+	it("strips surrounding single quotes", () => {
+		assert.equal(displayObjectiveTitle("'single'"), "single");
+	});
+
+	it("strips a combined prefix '> ``` \"x\"'", () => {
+		// Repeated stripping collapses nested prefixes.
+		assert.equal(displayObjectiveTitle('> ``` "x"'), "x");
+	});
+
+	it("normal prose is unchanged", () => {
+		assert.equal(displayObjectiveTitle("just plain text"), "just plain text");
+	});
+
+	it("'Objective: ...' label is still extracted AND sanitized", () => {
+		assert.equal(displayObjectiveTitle('Objective: "ship it"'), "ship it");
+	});
+
+	it("four-backtick fence with lang tag is stripped", () => {
+		// '````ts real title' → strips 4 backticks + lang 'ts' → 'real title'.
+		assert.equal(displayObjectiveTitle("````ts real title"), "real title");
 	});
 });

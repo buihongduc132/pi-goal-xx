@@ -1,8 +1,12 @@
 import {
+	compactStatusLabel,
 	displayObjectiveTitle,
+	formatAbsoluteShort,
+	formatRelativeTime,
 	formatDuration,
 	formatTokenValue,
-	statusLabel,
+	shortGoalId,
+	shortSessionId,
 	truncateText,
 } from "./goal-core.ts";
 import { cloneGoal, type GoalFocusEntry, type GoalRecord } from "./goal-record.ts";
@@ -89,25 +93,88 @@ export function resolveSessionFocus(args: {
 	return candidate;
 }
 
-export function goalSelectorLabel(goal: GoalRecord, focusedGoalId: string | null): string {
-	const marker = goal.id === focusedGoalId ? "*" : " ";
-	const mode = goal.sisyphus ? "sisyphus" : "goal";
-	const path = goal.activePath ? ` ${goal.activePath}` : "";
-	return `${marker} ${goal.id} | ${statusLabel(goal)} | ${mode} | ${truncateText(displayObjectiveTitle(goal.objective), 72)}${path}`;
+export interface GoalSelectorLabelOptions {
+	/** Pre-resolved display id (short or full on collision). Defaults to shortGoalId(goal.id). */
+	shortId?: string;
+	/** Holding session id if another live session holds the focus lock; surfaces a lock pill. */
+	heldByOtherSession?: string | null;
 }
 
-export function buildGoalListText(pool: Map<string, GoalRecord>, focusedGoalId: string | null): string {
+/**
+ * Resolve a stable display id for each goal in the pool. When two+ goals
+ * collide on the short suffix (after the final '-'), all colliding entries
+ * fall back to their full id so selection remains unambiguous.
+ */
+export function resolveShortIdsForPool(goals: GoalRecord[]): Map<string, string> {
+	const shortById = new Map<string, string>();
+	const collisionSuffixes = new Set<string>();
+	for (const g of goals) {
+		const short = shortGoalId(g.id);
+		if (shortById.has(short)) collisionSuffixes.add(short);
+		shortById.set(short, g.id);
+	}
+	const out = new Map<string, string>();
+	for (const g of goals) {
+		const short = shortGoalId(g.id);
+		out.set(g.id, collisionSuffixes.has(short) ? g.id : short);
+	}
+	return out;
+}
+
+export function goalSelectorLabel(goal: GoalRecord, focusedGoalId: string | null, opts?: GoalSelectorLabelOptions): string {
+	const marker = goal.id === focusedGoalId ? "*" : " ";
+	const glyph = goal.sisyphus ? "✊ " : "";
+	const shortId = opts?.shortId ?? shortGoalId(goal.id);
+	const status = compactStatusLabel(goal);
+	const abs = formatAbsoluteShort(goal.updatedAt);
+	const rel = formatRelativeTime(goal.updatedAt);
+	const title = truncateText(displayObjectiveTitle(goal.objective), 72);
+	const lockPill = opts?.heldByOtherSession ? ` 🔒 ${shortSessionId(opts.heldByOtherSession)}` : "";
+	return `${marker} ${glyph}${shortId} · ${status} · ${abs} ${rel} · ${title}${lockPill}`;
+}
+
+export interface BuildGoalListTextOptions {
+	/** Map of goalId → holding session id for goals held by OTHER live sessions. */
+	heldByOther?: Map<string, string> | null;
+}
+
+/**
+ * Stable ordering for the picker: running goals (active + autoContinue) first,
+ * then everything else by updatedAt descending. Does not mutate the input.
+ */
+export function sortGoalsForPicker(goals: GoalRecord[]): GoalRecord[] {
+	const rank = (g: GoalRecord): number => (g.status === "active" && g.autoContinue ? 0 : 1);
+	return goals.slice().sort((a, b) => {
+		const ra = rank(a);
+		const rb = rank(b);
+		if (ra !== rb) return ra - rb;
+		// updatedAt desc; fall back to id for stable tiebreak.
+		const byUpdated = (b.updatedAt || "").localeCompare(a.updatedAt || "");
+		return byUpdated !== 0 ? byUpdated : a.id.localeCompare(b.id);
+	});
+}
+
+export function buildGoalListText(pool: Map<string, GoalRecord>, focusedGoalId: string | null, opts?: BuildGoalListTextOptions): string {
 	const open = openGoalsFromPool(pool);
 	if (open.length === 0) return "No open goals. Use /goals <topic> or /sisyphus <topic> to discuss, or /goals-set <objective> / /sisyphus-set <objective> to start immediately.";
-	const lines = [`Open goals: ${open.length}`, ""];
-	for (const goal of open) {
-		const focused = goal.id === focusedGoalId ? "*" : " ";
-		const mode = goal.sisyphus ? "sisyphus" : "goal";
+	const shortIds = resolveShortIdsForPool(open);
+	const sorted = sortGoalsForPicker(open);
+	const heldByOther = opts?.heldByOther ?? null;
+	const lines = [
+		`Open goals: ${open.length}`,
+		"Columns: · short-id · status · updated · objective",
+		"",
+	];
+	for (const goal of sorted) {
+		lines.push(goalSelectorLabel(goal, focusedGoalId, {
+			shortId: shortIds.get(goal.id),
+			heldByOtherSession: heldByOther?.get(goal.id) ?? null,
+		}));
+		lines.push(`  ${displayObjectiveTitle(goal.objective)}`);
 		const usage = goal.usage.tokensUsed > 0 || goal.usage.activeSeconds > 0
 			? ` · ${formatDuration(goal.usage.activeSeconds)} · ${formatTokenValue(goal.usage.tokensUsed).split(" ")[0]}`
 			: "";
-		lines.push(`${focused} ${goal.id} — ${statusLabel(goal)} · ${mode}${usage}`);
-		lines.push(`  ${displayObjectiveTitle(goal.objective)}`);
+		if (usage) lines.push(`  usage${usage}`);
 		if (goal.activePath) lines.push(`  ${goal.activePath}`);
 	}
 	return lines.join("\n");

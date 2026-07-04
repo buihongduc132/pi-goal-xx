@@ -578,8 +578,22 @@ export async function runGoalCompletionAuditor(args: {
 				} else if (event.type === "message_update") {
 					const se = (event as any).assistantMessageEvent;
 					summary.subType = se?.type;
+					if (se?.type === "text_end") {
+						const textContent = se.content ?? se?.partial?.content?.[0]?.text;
+						if (typeof textContent === "string") {
+							summary.textPreview = previewBytes(textContent, TRACE_EVENT_PREVIEW_BYTES);
+						}
+					}
 				} else if (event.type === "message_end") {
-					summary.role = (event as any).message?.role;
+					const msg = (event as any).message;
+					summary.role = msg?.role;
+					if (msg?.content && Array.isArray(msg.content)) {
+						summary.contentTypes = msg.content.map((p: any) => p?.type);
+						const textParts = msg.content.filter((p: any) => p?.type === "text" && typeof p?.text === "string");
+						if (textParts.length > 0) {
+							summary.textPreview = previewBytes(textParts.map((p: any) => p.text).join("\n"), TRACE_EVENT_PREVIEW_BYTES);
+						}
+					}
 				}
 				logAuditorTrace(args.ctx.cwd, buildEventEntry(event.type, summary));
 			} catch {
@@ -616,6 +630,15 @@ export async function runGoalCompletionAuditor(args: {
 					progress.phase = "running";
 					emitProgress();
 					return;
+				}
+				// Capture text from text_end stream events — the verdict text lives
+				// here, not in message_end's finalMessage (pi-core can drop text
+				// content from the finalized message at message_end).
+				if (streamEvent?.type === "text_end") {
+					const textContent = streamEvent.content ?? streamEvent?.partial?.content?.[0]?.text;
+					if (typeof textContent === "string" && textContent.trim()) {
+						outputParts.push(textContent);
+					}
 				}
 				// For text content, show producing_report phase
 				progress.phase = "producing_report";

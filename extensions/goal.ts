@@ -104,6 +104,8 @@ import {
 	openGoalsFromPool,
 	otherOpenGoalCount,
 	resolveSessionFocus,
+	resolveShortIdsForPool,
+	sortGoalsForPicker,
 } from "./goal-pool.ts";
 import {
 	acquireLock,
@@ -1721,8 +1723,14 @@ Verification contract:
 			ctx.ui.notify(buildUnfocusedOpenGoalsSummary(open.length), "warning");
 			return null;
 		}
-		const labels = open.map((item) => goalSelectorLabel(item, focusedGoalId));
-		const byLabel = new Map(labels.map((label, index) => [label, open[index]?.id]));
+		const shortIds = resolveShortIdsForPool(open);
+		const heldByOther = computeHeldByOther(open, ctx.cwd);
+		const sorted = sortGoalsForPicker(open);
+		const labels = sorted.map((item) => goalSelectorLabel(item, focusedGoalId, {
+			shortId: shortIds.get(item.id),
+			heldByOtherSession: heldByOther.get(item.id) ?? null,
+		}));
+		const byLabel = new Map(labels.map((label, index) => [label, sorted[index]?.id]));
 		const selected = await ctx.ui.select(title, labels);
 		const selectedId = selected ? byLabel.get(selected) : undefined;
 		if (!selectedId) {
@@ -1744,6 +1752,22 @@ Verification contract:
 	 *   release + proceed; on decline, abort.
 	 * - Headless (!ctx.hasUI) → refuse with a warning (cannot prompt).
 	 */
+	/**
+	 * Compute the set of open goals held by OTHER live sessions, for surfacing
+	 * a lock-owner pill in the picker/list. Pure read; does not reap or release.
+	 */
+	function computeHeldByOther(goals: GoalRecord[], cwd: string): Map<string, string> {
+		const out = new Map<string, string>();
+		for (const g of goals) {
+			const lock = readLock(cwd, g.id);
+			if (!lock) continue;
+			if (lock.owner.sessionId === SELF_SESSION_ID) continue;
+			if (!isLockHeld(lock)) continue;
+			out.set(g.id, lock.owner.sessionId);
+		}
+		return out;
+	}
+
 	async function confirmFocusOverride(ctx: ExtensionContext, goalId: string): Promise<boolean> {
 		const lock = readLock(ctx.cwd, goalId);
 		if (!lock) return true;
@@ -1794,12 +1818,18 @@ Verification contract:
 			return;
 		}
 		if (!ctx.hasUI) {
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId), "info");
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(open, ctx.cwd) }), "info");
 			return;
 		}
-		const labels = open.map((item) => goalSelectorLabel(item, focusedGoalId));
-		const byLabel = new Map(labels.map((label, index) => [label, open[index]?.id]));
-		const selected = await ctx.ui.select("Focus open goal", labels);
+		const shortIds = resolveShortIdsForPool(open);
+		const heldByOther = computeHeldByOther(open, ctx.cwd);
+		const sorted = sortGoalsForPicker(open);
+		const labels = sorted.map((item) => goalSelectorLabel(item, focusedGoalId, {
+			shortId: shortIds.get(item.id),
+			heldByOtherSession: heldByOther.get(item.id) ?? null,
+		}));
+		const byLabel = new Map(labels.map((label, index) => [label, sorted[index]?.id]));
+		const selected = await ctx.ui.select(`Focus open goal · ${open.length} open`, labels);
 		const selectedId = selected ? byLabel.get(selected) : undefined;
 		if (!selectedId) {
 			ctx.ui.notify("Goal focus unchanged.", "info");
@@ -2109,7 +2139,7 @@ Verification contract:
 		description: "List all open pi goals and show which one this session is focused on.",
 		handler: async (_rawArgs, ctx) => {
 			reconcileFocusedGoalFromDisk(ctx);
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId), "info");
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(openGoals(), ctx.cwd) }), "info");
 			updateUI(ctx);
 		},
 	});

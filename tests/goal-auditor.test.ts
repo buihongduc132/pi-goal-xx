@@ -642,3 +642,76 @@ describe("runGoalCompletionAuditor — B6: onProgress guarded after abort", () =
 		assert.match(res.error!, /Auditor aborted/);
 	});
 });
+
+describe("runGoalCompletionAuditor — output capture from text_end stream events", () => {
+	it("captures text from text_end events (real pi streaming behavior)", async () => {
+		// Bug found in dev verification: the auditor's verdict text is streamed
+		// via text_end events in message_update, NOT in message_end's finalMessage.
+		// pi-core drops text content from the finalized message at message_end.
+		// Without capturing from text_end, the auditor produces empty output
+		// even though the LLM wrote a full report with <approved/>.
+		const cwd = makeTmpCwd();
+		const auditText = "## Audit Report\n\nObjective satisfied.\n\n<approved/>";
+		const res = await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd), goal: makeGoal(), detailedSummary: "d",
+			createSession: makeMockCreateSession({
+				finalOutput: "<approved/>",
+				events: [
+					// Simulate: assistant streams text via text_end, then the
+					// message_end fires but the finalMessage has NO text content
+					// (only thinking + toolCall — this is the real pi-core behavior).
+					{
+						type: "message_update",
+						assistantMessageEvent: {
+							type: "text_end",
+							contentIndex: 0,
+							content: auditText,
+							partial: {
+								role: "assistant",
+								content: [{ type: "text", text: auditText }],
+							},
+						},
+					},
+					{
+						type: "message_end",
+						message: {
+							role: "assistant",
+							// finalMessage drops text — only has thinking + toolCall
+							content: [{ type: "thinking", thinking: "thoughts" }],
+						},
+					},
+				],
+			}),
+		});
+		assert.equal(res.approved, true, "should approve — text_end had <approved/>");
+		assert.ok(res.output.length > 0, "output should not be empty");
+		assert.match(res.output, /<approved\/>/);
+	});
+
+	it("captures text from partial.content when content field is absent", async () => {
+		const cwd = makeTmpCwd();
+		const auditText = "Not satisfied. <disapproved/>";
+		const res = await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd), goal: makeGoal(), detailedSummary: "d",
+			createSession: makeMockCreateSession({
+				finalOutput: "<disapproved/>",
+				events: [
+					{
+						type: "message_update",
+						assistantMessageEvent: {
+							type: "text_end",
+							contentIndex: 0,
+							// No content field — text only in partial
+							partial: {
+								role: "assistant",
+								content: [{ type: "text", text: auditText }],
+							},
+						},
+					},
+				],
+			}),
+		});
+		assert.equal(res.disapproved, true);
+		assert.match(res.output, /<disapproved\/>/);
+	});
+});
