@@ -393,6 +393,8 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `auditorInclude` | `{}` | Resources to add in `minimal` mode. Same shape as `auditorExclude`; matched against the main session's resources. |
 | `auditorPromptMode` | `"global-local"` | Prompt resolution: `"global-local"` (local overrides global), `"local"` (local only, global ignored), `"global-local-merge"` (global + `\n\n` + local). |
 | `auditorPrompt` | unset | Inline auditor prompt string; takes precedence over all file-based prompts and modes. |
+| `goalPromptMode` | `"global-local"` | Goal custom-prompt resolution (injected into runtime goal/continuation prompts): `"global-local"` (local overrides global), `"local"` (local only, global ignored), `"global-local-merge"` (global + `\n\n` + local). Mirrors `auditorPromptMode`. |
+| `goalPrompt` | unset | Inline goal custom-prompt string; takes precedence over all file-based prompts and modes. |
 | `leaseMs` | `180000` | Lease window (ms) for the multi-session focus lock. A lock is stale once `now > expiresAt`. See [Multi-session goal focus](#multi-session-goal-focus). |
 | `heartbeatMs` | `60000` | Interval (ms) for the timer that refreshes the focused goal's lease while active. |
 
@@ -443,6 +445,21 @@ Auditor prompts resolve in this order (first non-empty wins):
 3. Hardcoded default prompt (built into the extension)
 
 Global prompt file: `~/.pi/auditor-prompt.md`  •  Local prompt file: `<cwd>/.pi/auditor-prompt.md`
+
+## Configurable goal prompt
+
+The runtime goal/continuation system prompts that drive the **active goal agent** (not the auditor) can also be customized. This is the channel for project-specific execution rules (delegation policy, TDD discipline, blocker handling, verifier-loop requirement). Resolution mirrors the auditor prompt exactly:
+
+1. Inline `settings.goalPrompt` (always wins)
+2. File-based, combined per `goalPromptMode`:
+   - `global-local` (default): `.pi/goal-prompt.md` overrides `~/.pi/goal-prompt.md`
+   - `local`: only `.pi/goal-prompt.md` (global never checked)
+   - `global-local-merge`: `~/.pi/goal-prompt.md` + `\n\n` + `.pi/goal-prompt.md`
+3. Nothing injected when unset (fully additive — zero behavior change by default)
+
+Global prompt file: `~/.pi/goal-prompt.md`  •  Local prompt file: `<cwd>/.pi/goal-prompt.md`
+
+The resolved block is appended to both `goalPrompt()` (agent start) and `continuationPrompt()` (checkpoint resume), after the Sisyphus discipline block when present. The `/goal` and `/sisyphus` **drafting** instructions live in pi-core's tool schema and are not reachable from this package.
 
 ### Examples
 

@@ -363,6 +363,23 @@ describe("parseGoalSettings — auditor config fields", () => {
 	it("rejects unknown settings keys still", () => {
 		assert.throws(() => parseGoalSettings({ bogus: 1 }), /Unknown/);
 	});
+	it("parses goalPromptMode valid values", () => {
+		for (const m of ["global-local", "local", "global-local-merge"] as const) {
+			assert.equal(parseGoalSettings({ goalPromptMode: m }).goalPromptMode, m);
+		}
+	});
+	it("rejects invalid goalPromptMode", () => {
+		assert.equal(parseGoalSettings({ goalPromptMode: "nope" }).goalPromptMode, undefined);
+	});
+	it("parses goalPrompt inline string", () => {
+		assert.equal(parseGoalSettings({ goalPrompt: "  rules here  " }).goalPrompt, "rules here");
+		assert.equal(parseGoalSettings({ goalPrompt: "   " }).goalPrompt, undefined);
+	});
+	it("accepts both goal keys without throwing", () => {
+		const s = parseGoalSettings({ goalPrompt: "X", goalPromptMode: "local" });
+		assert.equal(s.goalPrompt, "X");
+		assert.equal(s.goalPromptMode, "local");
+	});
 });
 
 describe("loadGoalSettings / saveGoalSettingsFileConfig — auditor round trip", () => {
@@ -391,6 +408,12 @@ describe("loadGoalSettings / saveGoalSettingsFileConfig — auditor round trip",
 		assert.deepEqual(loaded.auditorExclude?.tools, ["write"]);
 		assert.deepEqual(loaded.auditorExclude?.extensions, ["cc*"]);
 		assert.deepEqual(loaded.auditorInclude?.mcp, ["gitnexus"]);
+		// goal prompt round trip
+		const tmpGP = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-set-gp-"));
+		saveGoalSettingsFileConfig(tmpGP, { goalPrompt: "RULES", goalPromptMode: "local" });
+		const loadedGP = loadGoalSettingsFileConfig(tmpGP, {});
+		assert.equal(loadedGP.goalPrompt, "RULES");
+		assert.equal(loadedGP.goalPromptMode, "local");
 	});
 	it("loadGoalSettings defaults auditorMode to undefined and auditorPromptMode to undefined when absent", () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-set2-"));
