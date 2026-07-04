@@ -1537,7 +1537,7 @@ Verification contract:
 		pi.sendMessage<GoalEventDetails>(
 			{
 				customType: GOAL_EVENT_ENTRY,
-				content: continuationPrompt(goal, settings),
+				content: continuationPrompt(goal, settings, ctx.cwd),
 				display: false,
 				details: {
 					kind: "checkpoint",
@@ -4073,7 +4073,7 @@ promptGuidelines: [
 		}
 		const activeGoal = state.goal;
 		const settings = loadGoalSettings(ctx.cwd);
-		let prompt = goalPrompt(activeGoal, settings);
+		let prompt = goalPrompt(activeGoal, settings, ctx.cwd);
 		// Inject durable auditor feedback if the latest result was a rejection
 		try {
 			const ledger = readGoalLedger(ctx);

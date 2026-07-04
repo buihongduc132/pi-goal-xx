@@ -14,7 +14,9 @@
  *   auditorMode ("inherit" | "minimal"), auditorExclude (AuditorResourceFilter),
  *   auditorInclude (AuditorResourceFilter),
  *   auditorPromptMode ("global-local" | "local" | "global-local-merge"),
- *   auditorPrompt (inline string override)
+ *   auditorPrompt (inline string override),
+ *   goalPromptMode ("global-local" | "local" | "global-local-merge"),
+ *   goalPrompt (inline string override — injected into runtime goal/continuation prompts)
  *
  * additionalProperties: false — unknown keys are rejected.
  */
@@ -70,6 +72,10 @@ export interface GoalSettings {
 	auditorPromptMode?: AuditorPromptMode;
 	/** Inline auditor prompt override; takes precedence over file-based prompts. */
 	auditorPrompt?: string;
+	/** Goal custom prompt resolution mode. Defaults to "global-local". */
+	goalPromptMode?: AuditorPromptMode;
+	/** Inline goal custom prompt override; injected into runtime goal/continuation prompts. */
+	goalPrompt?: string;
 	/** Goal focus lock lease duration in ms. Default 180000 (3 min). */
 	leaseMs?: number;
 	/** Heartbeat refresh interval in ms. Default 60000 (60s). */
@@ -96,6 +102,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"auditorInclude",
 	"auditorPromptMode",
 	"auditorPrompt",
+	"goalPromptMode",
+	"goalPrompt",
 	"leaseMs",
 	"heartbeatMs",
 ]);
@@ -259,6 +267,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (auditorPromptMode) settings.auditorPromptMode = auditorPromptMode;
 	const auditorPrompt = asNonEmptyString(record.auditorPrompt);
 	if (auditorPrompt) settings.auditorPrompt = auditorPrompt;
+	const goalPromptMode = asAuditorPromptMode(record.goalPromptMode);
+	if (goalPromptMode) settings.goalPromptMode = goalPromptMode;
+	const goalPrompt = asNonEmptyString(record.goalPrompt);
+	if (goalPrompt) settings.goalPrompt = goalPrompt;
 	const leaseMs = asPositiveInt(record.leaseMs) ?? 180_000;
 	settings.leaseMs = leaseMs;
 	const heartbeatMs = asPositiveInt(record.heartbeatMs) ?? 60_000;
@@ -301,6 +313,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		auditorInclude: fileConfig.auditorInclude,
 		auditorPromptMode: fileConfig.auditorPromptMode,
 		auditorPrompt: fileConfig.auditorPrompt,
+		goalPromptMode: fileConfig.goalPromptMode,
+		goalPrompt: fileConfig.goalPrompt,
 		leaseMs: fileConfig.leaseMs ?? 180_000,
 		heartbeatMs: fileConfig.heartbeatMs ?? 60_000,
 	};
@@ -333,6 +347,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const auditorInclude = asAuditorResourceFilter(settings.auditorInclude);
 	const auditorPromptMode = asAuditorPromptMode(settings.auditorPromptMode);
 	const auditorPrompt = asNonEmptyString(settings.auditorPrompt);
+	const goalPromptMode = asAuditorPromptMode(settings.goalPromptMode);
+	const goalPrompt = asNonEmptyString(settings.goalPrompt);
 	const leaseMs = asPositiveInt(settings.leaseMs);
 	const heartbeatMs = asPositiveInt(settings.heartbeatMs);
 	if (provider) clean.provider = provider;
@@ -349,6 +365,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (auditorInclude) clean.auditorInclude = auditorInclude;
 	if (auditorPromptMode) clean.auditorPromptMode = auditorPromptMode;
 	if (auditorPrompt) clean.auditorPrompt = auditorPrompt;
+	if (goalPromptMode) clean.goalPromptMode = goalPromptMode;
+	if (goalPrompt) clean.goalPrompt = goalPrompt;
 	if (leaseMs !== undefined && leaseMs !== 180_000) clean.leaseMs = leaseMs;
 	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
 	const configPath = goalSettingsPath(cwd);
@@ -368,6 +386,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.auditorInclude) persisted.auditorInclude = clean.auditorInclude;
 	if (clean.auditorPromptMode) persisted.auditorPromptMode = clean.auditorPromptMode;
 	if (clean.auditorPrompt) persisted.auditorPrompt = clean.auditorPrompt;
+	if (clean.goalPromptMode) persisted.goalPromptMode = clean.goalPromptMode;
+	if (clean.goalPrompt) persisted.goalPrompt = clean.goalPrompt;
 	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");

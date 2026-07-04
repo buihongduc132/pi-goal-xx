@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import {
 	taskListBlock,
 	verificationContractBlock,
@@ -199,8 +202,53 @@ describe("goalPrompt", () => {
 		assert.doesNotMatch(out, /TASK LIST/);
 		assert.doesNotMatch(out, /VERIFICATION CONTRACT/);
 		assert.doesNotMatch(out, /SISYPHUS STYLE/);
+		assert.doesNotMatch(out, /PI GOAL CUSTOM PROMPT/);
 	});
 });
+
+describe("goalPrompt — custom prompt injection", () => {
+		it("does NOT inject custom block when cwd omitted", () => {
+			const out = goalPrompt(makeGoal({ id: "gNoCwd" }));
+			assert.doesNotMatch(out, /PI GOAL CUSTOM PROMPT/);
+		});
+		it("does NOT inject when nothing configured (cwd given)", () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-noconf-"));
+			try {
+				// local mode → global never consulted, so real ~/.pi/goal-prompt.md is ignored
+				const out = goalPrompt(makeGoal({ id: "gNoConf" }), { goalPromptMode: "local" }, cwd);
+				assert.doesNotMatch(out, /PI GOAL CUSTOM PROMPT/);
+			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+		});
+		it("injects inline custom block when cwd given", () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-inline-"));
+			try {
+				const out = goalPrompt(makeGoal({ id: "gInl" }), { goalPrompt: "RULES" }, cwd);
+				assert.match(out, /\[PI GOAL CUSTOM PROMPT source=inline\]/);
+				assert.match(out, /<goal_custom_prompt>[\s\S]*RULES[\s\S]*<\/goal_custom_prompt>/);
+			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+		});
+		it("injects local-file custom block", () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-localfile-"));
+			try {
+				fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+				fs.writeFileSync(path.join(cwd, ".pi", "goal-prompt.md"), "FILE-RULES", "utf8");
+				const out = goalPrompt(makeGoal({ id: "gLocal" }), undefined, cwd);
+				assert.match(out, /source=local/);
+				assert.match(out, /FILE-RULES/);
+			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+		});
+		it("appends custom block AFTER sisyphus discipline", () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-sisorder-"));
+			try {
+				const out = goalPrompt(makeGoal({ id: "gSis", sisyphus: true }), { goalPrompt: "CUSTOM" }, cwd);
+				const sisIdx = out.indexOf("SISYPHUS STYLE");
+				const customIdx = out.indexOf("PI GOAL CUSTOM PROMPT");
+				assert.ok(sisIdx > -1 && customIdx > -1, "both blocks present");
+				assert.ok(sisIdx < customIdx, "sisyphus before custom");
+			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+		});
+	});
+
 
 describe("continuationPrompt", () => {
 	it("contains checkpoint marker and continuation framing", () => {
@@ -225,6 +273,22 @@ describe("continuationPrompt", () => {
 	it("injects sisyphus discipline block when sisyphus", () => {
 		const out = continuationPrompt(makeGoal({ id: "gK3", sisyphus: true }));
 		assert.match(out, /SISYPHUS STYLE goalId=gK3/);
+	});
+
+	describe("continuationPrompt — custom prompt injection", () => {
+		it("does NOT inject when cwd omitted", () => {
+			assert.doesNotMatch(continuationPrompt(makeGoal({ id: "gKNC" })), /PI GOAL CUSTOM PROMPT/);
+		});
+		it("injects and orders after sisyphus", () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-cont-sis-"));
+			try {
+				const out = continuationPrompt(makeGoal({ id: "gKCS", sisyphus: true }), { goalPrompt: "CUSTOM" }, cwd);
+				const sisIdx = out.indexOf("SISYPHUS STYLE");
+				const customIdx = out.indexOf("PI GOAL CUSTOM PROMPT");
+				assert.ok(sisIdx > -1 && customIdx > -1);
+				assert.ok(sisIdx < customIdx, "sisyphus before custom in continuation");
+			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+		});
 	});
 });
 

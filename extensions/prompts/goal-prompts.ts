@@ -3,6 +3,7 @@ import {
 	truncateText,
 } from "../goal-core.ts";
 import { promptSafeObjective } from "../goal-draft.ts";
+import { customGoalPromptBlock } from "../goal-prompt-resolver.ts";
 import type { GoalRecord, GoalTask, TaskStatus } from "../goal-record.ts";
 import type { GoalSettings } from "../goal-settings.ts";
 
@@ -118,7 +119,7 @@ export function sisyphusDisciplineBlock(goal: GoalRecord): string {
 	].join("\n");
 }
 
-export function goalPrompt(goal: GoalRecord, settings?: GoalSettings): string {
+export function goalPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
 	const taskBlock = taskListBlock(goal, settings);
 	const taskInjection = taskBlock ? `\n${taskBlock}` : "";
 	const contractBlock = verificationContractBlock(goal, settings);
@@ -157,10 +158,10 @@ If the user explicitly asks to abandon/cancel this goal, or the objective is obs
 
 Do NOT silently invent workarounds, fake completion, or quietly redefine the objective. Do NOT call complete_goal=complete to escape a blocker.
 
-Goal evolution: if the user gives requirements, feedback, or corrections that differ from the goal objective, the goal is stale. The goal objective is immutable — the agent must NOT modify it autonomously. Propose the updated objective concisely and ask the user to run /goal-tweak to revise it. Do NOT mark the goal complete with a stale objective.${sisyphusDisciplineBlock(goal) ? `\n${sisyphusDisciplineBlock(goal)}` : ""}`;
+Goal evolution: if the user gives requirements, feedback, or corrections that differ from the goal objective, the goal is stale. The goal objective is immutable — the agent must NOT modify it autonomously. Propose the updated objective concisely and ask the user to run /goal-tweak to revise it. Do NOT mark the goal complete with a stale objective.${sisyphusDisciplineBlock(goal) ? `\n${sisyphusDisciplineBlock(goal)}` : ""}${cwd ? customGoalPromptBlock(settings, cwd) : ""}`;
 }
 
-export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings): string {
+export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
 	const taskBlock = taskListBlock(goal, settings);
 	const contractBlock = verificationContractBlock(goal, settings);
 	return [
@@ -207,6 +208,7 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings): s
 		"",
 		"If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), call pause_goal({reason, suggestedAction?}) and stop. If the user explicitly asks to abandon/cancel, or the objective is obsolete, impossible, or unsafe to continue, call abort_goal({reason}) and stop. Do not silently invent workarounds. Do not fake completion. pause_goal and abort_goal are structured lifecycle exits; complete_goal=complete is not an escape hatch for blockers.",
 		...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal)] : []),
+		...(cwd ? [customGoalPromptBlock(settings, cwd)] : []),
 	].join("\n");
 }
 
