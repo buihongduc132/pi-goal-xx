@@ -3880,6 +3880,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_start", async (event, ctx) => {
+		cachedCwd = ctx.cwd;
 		loadState(ctx, event.reason);
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
@@ -3932,6 +3933,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
+		cachedCwd = ctx.cwd;
 		loadState(ctx, null);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
