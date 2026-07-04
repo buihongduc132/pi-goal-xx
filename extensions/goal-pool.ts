@@ -82,7 +82,7 @@ export function resolveSessionFocus(args: {
 		const lock = readLock(args.cwd, candidate);
 		if (lock && lock.owner.sessionId !== args.selfSessionId && isLockHeld(lock)) {
 			return null;
-	}
+			}
 	}
 	return candidate;
 }
