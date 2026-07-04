@@ -64,6 +64,18 @@ describe("loadGoalPrompt — inline override", () => {
 		assert.equal(r.source, "none");
 		assert.equal(r.prompt, "");
 	});
+	it("inline resolves even when cwd is undefined (no fs context)", () => {
+		const r = loadGoalPrompt({ goalPrompt: "INLINE-NO-CWD" }, undefined, sb.home);
+		assert.equal(r.source, "inline");
+		assert.equal(r.prompt, "INLINE-NO-CWD");
+	});
+	it("returns none when cwd undefined AND no inline override", () => {
+		sb.writeGlobal("GLOBAL");
+		sb.writeLocal("LOCAL");
+		const r = loadGoalPrompt(undefined, undefined, sb.home);
+		assert.equal(r.source, "none");
+		assert.equal(r.prompt, "");
+	});
 });
 
 describe("loadGoalPrompt — local mode", () => {

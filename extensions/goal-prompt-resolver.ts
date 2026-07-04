@@ -72,14 +72,17 @@ export function localGoalPromptPath(cwd: string): string {
  */
 export function loadGoalPrompt(
 	settings: GoalSettings | undefined,
-	cwd: string,
+	cwd?: string,
 	home?: string,
 ): ResolvedGoalPrompt {
-	// 1. Inline override always wins.
+	// 1. Inline override always wins and never needs filesystem context.
 	const inline = settings?.goalPrompt?.trim();
 	if (inline && inline.length > 0) {
 		return { prompt: inline, source: "inline" };
 	}
+
+	// No cwd → cannot resolve file-based prompts; inline was the only option.
+	if (!cwd) return { prompt: "", source: "none" };
 
 	const mode = resolveGoalPromptMode(settings);
 	const globalPath = globalGoalPromptPath(home);
@@ -114,7 +117,7 @@ export function loadGoalPrompt(
  * Wrap the resolved custom prompt in a tagged block. Empty when nothing
  * configured, so callers can unconditionally append without conditional noise.
  */
-export function customGoalPromptBlock(settings: GoalSettings | undefined, cwd: string, home?: string): string {
+export function customGoalPromptBlock(settings: GoalSettings | undefined, cwd?: string, home?: string): string {
 	const resolved = loadGoalPrompt(settings, cwd, home);
 	if (!resolved.prompt) return "";
 	return [

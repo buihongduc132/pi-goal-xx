@@ -207,9 +207,14 @@ describe("goalPrompt", () => {
 });
 
 describe("goalPrompt — custom prompt injection", () => {
-		it("does NOT inject custom block when cwd omitted", () => {
+		it("does NOT inject file-based block when cwd omitted", () => {
 			const out = goalPrompt(makeGoal({ id: "gNoCwd" }));
 			assert.doesNotMatch(out, /PI GOAL CUSTOM PROMPT/);
+		});
+		it("STILL injects INLINE override when cwd omitted", () => {
+			const out = goalPrompt(makeGoal({ id: "gInlNoCwd" }), { goalPrompt: "INLINE-RULES" });
+			assert.match(out, /\[PI GOAL CUSTOM PROMPT source=inline\]/);
+			assert.match(out, /INLINE-RULES/);
 		});
 		it("does NOT inject when nothing configured (cwd given)", () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-noconf-"));
@@ -276,8 +281,13 @@ describe("continuationPrompt", () => {
 	});
 
 	describe("continuationPrompt — custom prompt injection", () => {
-		it("does NOT inject when cwd omitted", () => {
+		it("does NOT inject file-based block when cwd omitted", () => {
 			assert.doesNotMatch(continuationPrompt(makeGoal({ id: "gKNC" })), /PI GOAL CUSTOM PROMPT/);
+		});
+		it("STILL injects INLINE override when cwd omitted", () => {
+			const out = continuationPrompt(makeGoal({ id: "gKNCInl" }), { goalPrompt: "INLINE-RULES" });
+			assert.match(out, /\[PI GOAL CUSTOM PROMPT source=inline\]/);
+			assert.match(out, /INLINE-RULES/);
 		});
 		it("does NOT leave trailing newline when cwd given but nothing configured", () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-cont-trail-"));
