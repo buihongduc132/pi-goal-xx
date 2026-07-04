@@ -12,6 +12,8 @@
  *  - NO network / NO real model / NO TUI rendering.
  */
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export interface CapturedTool {
 	name: string;
@@ -306,3 +308,123 @@ export async function cleanupTimers(
 		// best-effort
 	}
 }
+
+/**
+ * Write an active goal .md file under <cwd>/.pi/goals in the format
+ * readActiveGoalPool / normalizeGoalRecord expects (JSON header + markdown).
+ * Mirrors the on-disk layout the goal extension reads at session_start.
+ */
+export interface WriteGoalOpts {
+	id: string;
+	objective?: string;
+	status?: string;
+	autoContinue?: boolean;
+	sisyphus?: boolean;
+}
+export function writeGoalFile(cwd: string, opts: WriteGoalOpts): string {
+	const id = opts.id;
+	const objective = opts.objective ?? `Objective: ${id}. Success criteria: done.`;
+	const status = opts.status ?? "active";
+	const autoContinue = opts.autoContinue ?? true;
+	const sisyphus = opts.sisyphus ?? false;
+	const record = {
+		version: 3,
+		id,
+		status,
+		sisyphus,
+		autoContinue,
+		createdAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:00:00.000Z",
+		objective,
+		usage: { tokensUsed: 0, activeSeconds: 0 },
+		activePath: `.pi/goals/active_goal_20260101_${id}.md`,
+	};
+	const content = `${JSON.stringify(record, null, 2)}\n\n# Goal Prompt\n\n${objective}\n\n## Progress\n\n- Status: ${status}\n- Auto-continue: ${autoContinue ? "on" : "off"}\n- Sisyphus mode: ${sisyphus ? "yes" : "no"}\n`;
+	fs.mkdirSync(path.join(cwd, ".pi", "goals"), { recursive: true });
+	const filePath = path.join(cwd, ".pi", "goals", `active_goal_20260101_${id}.md`);
+	fs.writeFileSync(filePath, content);
+	return filePath;
+}
+
+/**
+ * Await macrotasks so any unref'd continuation timers (setTimeout(...,0) in
+ * queueContinuation/sendQueuedContinuation) have a chance to fire before the
+ * test asserts on sentMessages.
+ */
+export async function flushContinuation(ms = 25): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Count continuation messages the extension emitted. A queued+-fired
+ * continuation calls pi.sendMessage with customType "pi-goal-event"
+ * (GOAL_EVENT_ENTRY) and triggerTurn:true. Returns the number observed.
+ */
+export function countContinuations(pi: ReturnType<typeof createMockPi>): number {
+	return pi.sentMessages.filter((m) => m.customType === "pi-goal-event").length;
+}
+
+/**
+ * True iff at least one continuation message fired (auto-run was NOT blocked
+ * by the queueContinuation chokepoint).
+ */
+export function continuationFired(pi: ReturnType<typeof createMockPi>): boolean {
+	return countContinuations(pi) > 0;
+}
+
+/**
+ * Resolve the focused-goal id the extension currently holds, by invoking the
+ * get_goal tool and parsing the returned text. Returns null when no goal is
+ * focused (text indicates unfocused).
+ */
+export async function focusedGoalIdViaTool(
+	pi: ReturnType<typeof createMockPi>,
+	ctx: ExtensionContext,
+): Promise<string | null> {
+	const result = await invokeTool(pi, ctx, "get_goal", {});
+	const text = (result as any)?.content?.[0]?.text ?? "";
+	if (!text || text.includes("No goal") || text.includes("No active goal") || text.includes("unfocused")) return null;
+	// Goal records contain their id; match the first 8+ char alphanumeric token.
+	const match = text.match(/\b([a-z0-9][a-z0-9-]{6,})\b/i);
+	return match ? match[1] : null;
+}
+
+/**
+ * Env vars that affect goal-focus resolution and MUST be controlled in tests.
+ * Tests run inside environments where PI_TEAMS_WORKER may be set (e.g. when the
+ * suite is executed by a team-worker agent). The production code's
+ * isWorkerSession() / autoFocus gates read these, so each test must pin them.
+ */
+export const GOAL_ENV_KEYS = ["PI_TEAMS_WORKER", "PI_GOAL_AUTO_FOCUS"] as const;
+
+export interface EnvSnapshot {
+	[key: string]: string | undefined;
+}
+
+/** Snapshot the current values of GOAL_ENV_KEYS for later restore. */
+export function snapshotGoalEnv(): EnvSnapshot {
+	const snap: EnvSnapshot = {};
+	for (const key of GOAL_ENV_KEYS) snap[key] = process.env[key];
+	return snap;
+}
+
+/**
+ * Force the process to look like a NON-worker, single-session pi for the
+ * duration of a test: PI_TEAMS_WORKER deleted and PI_GOAL_AUTO_FOCUS deleted
+ * (so the LD3 default 'resume' applies). Returns the prior snapshot.
+ */
+export function forceNonWorkerEnv(): EnvSnapshot {
+	const snap = snapshotGoalEnv();
+	delete process.env.PI_TEAMS_WORKER;
+	delete process.env.PI_GOAL_AUTO_FOCUS;
+	return snap;
+}
+
+/** Restore a snapshot produced by snapshotGoalEnv / forceNonWorkerEnv. */
+export function restoreGoalEnv(snap: EnvSnapshot): void {
+	for (const key of GOAL_ENV_KEYS) {
+		if (snap[key] === undefined) delete process.env[key];
+		else process.env[key] = snap[key];
+	}
+}
+
