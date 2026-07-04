@@ -79,7 +79,7 @@ describe("resolveSessionFocus — locked by other blocks auto-focus", () => {
 		const pool = goalPoolFromGoals([mkGoal({ id: "solo", status: "active" })]);
 		const cwd = tmpCwd();
 		// another session holds the lock
-		acquireLock(cwd, "solo", { sessionId: "other", pid: process.pid }, 180_000);
+		assert.ok(acquireLock(cwd, "solo", { sessionId: "other", pid: process.pid }, 180_000).ok, "other session must acquire lock");
 		const result = resolveSessionFocus({ pool, autoFocusReason: "resume", cwd, selfSessionId: SELF.sessionId });
 		assert.equal(result, null, "must not auto-focus a goal locked by another live session");
 	});
@@ -89,7 +89,7 @@ describe("resolveSessionFocus — explicit branch entry wins at resolution", () 
 	it("branch focus entry + locked by other → STILL focuses (explicit intent)", () => {
 		const pool = goalPoolFromGoals([mkGoal({ id: "a", status: "active" })]);
 		const cwd = tmpCwd();
-		acquireLock(cwd, "a", { sessionId: "other", pid: process.pid }, 180_000);
+		assert.ok(acquireLock(cwd, "a", { sessionId: "other", pid: process.pid }, 180_000).ok, "other session must acquire lock");
 		const result = resolveSessionFocus({
 			pool,
 			autoFocusReason: "resume",

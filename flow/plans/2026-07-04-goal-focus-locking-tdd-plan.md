@@ -132,6 +132,6 @@ Confirm: `npm test` green + `npm run check` clean.
 
 - Code style: tabs (existing), `node:test`/`assert/strict`, no semicolons (check existing files).
 - `resolveSessionFocus` signature change (Unit D) is the riskiest edit — many callers. Test coverage must catch all.
-- EPRM handling (Unit A3) is the gemini fix — must be in RED.
+- EPERM handling (Unit A3) is the gemini fix — must be in RED.
 - abort=explicit-release / pause=lazy-reap distinction (Unit E10) is the gemini+cubic fix.
 - RED is a HARD GATE. Do not write impl in the RED commit.
