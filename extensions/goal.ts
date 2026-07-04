@@ -1,6 +1,7 @@
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
+import * as crypto from "node:crypto";
 import {
 	footerStatus,
 	formatDuration,
@@ -104,6 +105,14 @@ import {
 	resolveSessionFocus,
 } from "./goal-pool.ts";
 import {
+	acquireLock,
+	isLockHeld,
+	readLock,
+	refreshLease,
+	releaseLock,
+	type LockOwner,
+} from "./goal-lock.ts";
+import {
 	continuationPrompt,
 	goalPrompt,
 	goalTweakDraftingPrompt,
@@ -196,6 +205,19 @@ let confirmationIntent: GoalConfirmationIntent | null = null;
 function isWorkerSession(): boolean {
 	return process.env.PI_TEAMS_WORKER === "1";
 }
+
+/**
+ * Stable per-process session id used as the lock owner identity (Unit C task 2.2).
+ * Generated once at module load. PID comes from process.pid.
+ */
+const SELF_SESSION_ID = crypto.randomUUID();
+
+/**
+ * Lease window defaults (Unit C task 2.1 lives in goal-settings.ts).
+ * Used when settings don't override.
+ */
+const DEFAULT_LEASE_MS = 180_000;
+const DEFAULT_HEARTBEAT_MS = 60_000;
 
 /**
  * Safely fetch the main session's active tool list for auditor inheritance.
@@ -426,6 +448,23 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			return focusedGoalFromPool(goalsById, focusedGoalId);
 		},
 		set goal(next: GoalRecord | null) {
+			// Unit E task 4.8b: when focus is cleared (null) or changes to a
+			// different goal id, release the previous goal's focus lock BEFORE
+			// reassignment. This single chokepoint covers ALL setGoal(null)
+			// paths (clear, replace-topic, aborted) automatically — abort is
+			// terminal so it releases explicitly (honors the "MUST NOT hold
+			// locks" invariant); pause relies on lazy reap-on-acquire (see
+			// pause_goal comment).
+			const prevId = focusedGoalId;
+			const changing = prevId !== null && (next === null || next.id !== prevId);
+			if (changing && cachedCwd) {
+				try {
+					releaseLock(cachedCwd, prevId, { sessionId: SELF_SESSION_ID, pid: process.pid });
+				} catch (err) {
+					console.warn(`[goal] failed to release lock on goal clear/change ${prevId}:`, err);
+				}
+				stopHeartbeatTimer();
+			}
 			if (next) {
 				goalsById.set(next.id, next);
 				focusedGoalId = next.id;
@@ -442,6 +481,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let terminalInputUnsubscribe: (() => void) | null = null;
 	let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let statusRefreshCtx: ExtensionContext | null = null;
+	let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	let auditProgress: AuditorWidgetProgress | null = null;
 	let auditAnimationTimer: ReturnType<typeof setInterval> | null = null;
 	let auditAbortController: AbortController | null = null;
@@ -649,6 +689,83 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	function clearStoppedRuntimeState(): void {
 		clearContinuationState();
 		clearActiveAccounting();
+		stopHeartbeatTimer();
+	}
+
+	// ── Focus lock helpers (add-goal-focus-locking, Unit C/E) ────────────────────
+
+	function selfLockOwner(): LockOwner {
+		return { sessionId: SELF_SESSION_ID, pid: process.pid };
+	}
+
+	function resolveLeaseMs(): number {
+		try {
+			if (cachedCwd) {
+				const s = loadGoalSettings(cachedCwd);
+				if (typeof s.leaseMs === "number" && s.leaseMs > 0) return s.leaseMs;
+			}
+		} catch {}
+		return DEFAULT_LEASE_MS;
+	}
+
+	function resolveHeartbeatMs(): number {
+		try {
+			if (cachedCwd) {
+				const s = loadGoalSettings(cachedCwd);
+				if (typeof s.heartbeatMs === "number" && s.heartbeatMs > 0) return s.heartbeatMs;
+			}
+		} catch {}
+		return DEFAULT_HEARTBEAT_MS;
+	}
+
+	function stopHeartbeatTimer(): void {
+		if (heartbeatTimer) {
+			clearInterval(heartbeatTimer);
+			heartbeatTimer = null;
+		}
+	}
+
+	function startHeartbeatTimer(cwd: string, goalId: string): void {
+		stopHeartbeatTimer();
+		const interval = resolveHeartbeatMs();
+		const leaseMs = resolveLeaseMs();
+		heartbeatTimer = setInterval(() => {
+			try {
+				refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
+			} catch (err) {
+				console.warn(`[goal] heartbeat refresh failed for ${goalId}:`, err);
+			}
+		}, interval);
+		heartbeatTimer.unref?.();
+	}
+
+	/**
+	 * Returns true iff THIS session currently holds a live focus lock for goalId.
+	 * Used by the queueContinuation auto-run chokepoint (D6).
+	 */
+	function isLockHeldBySelf(cwd: string | null, goalId: string | null): boolean {
+		if (!cwd || !goalId) return false;
+		const lock = readLock(cwd, goalId);
+		if (!lock) return false;
+		return lock.owner.sessionId === SELF_SESSION_ID && isLockHeld(lock);
+	}
+
+	/**
+	 * Attempt to acquire the focus lock for goalId. Starts the heartbeat timer on
+	 * success. Logs (does not throw) on failure. Returns the acquire result so
+	 * callers can surface a held-by-other message.
+	 */
+	function acquireFocusedLock(cwd: string, goalId: string): { ok: boolean; heldByOther?: ReturnType<typeof readLock> } {
+		const leaseMs = resolveLeaseMs();
+		const result = acquireLock(cwd, goalId, selfLockOwner(), leaseMs);
+		if (result.ok) {
+			startHeartbeatTimer(cwd, goalId);
+		} else if (result.heldByOther) {
+			console.warn(
+				`[goal] focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
+			);
+		}
+		return result;
 	}
 
 
@@ -707,6 +824,18 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const previousGoalId = focusedGoalId;
 		focusedGoalId = goalId && goalsById.has(goalId) ? goalId : null;
 		if (previousGoalId !== focusedGoalId) {
+			// Unit E task 4.4: release the old goal's lock, acquire the new one.
+			// acquireLock here is SILENT (no prompt) — the override prompt lives in
+			// focusGoalCommand (Unit F). On failure, focus is preserved but the
+			// chokepoint blocks auto-run.
+			if (previousGoalId) {
+				try {
+					releaseLock(ctx.cwd, previousGoalId, selfLockOwner());
+				} catch {}
+			}
+			if (focusedGoalId) {
+				acquireFocusedLock(ctx.cwd, focusedGoalId);
+			}
 			clearContinuationState();
 			clearActiveAccounting();
 			resetGetGoalNudgeState(previousGoalId);
@@ -938,7 +1067,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function loadState(ctx: ExtensionContext): void {
+	function loadState(ctx: ExtensionContext, autoFocusReason?: string | null): void {
 		goalsById = readActiveGoalPool(ctx);
 		focusedGoalId = null;
 
@@ -975,7 +1104,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (legacyGoal && legacyGoal.status !== "complete") {
 			legacyGoal = sanitizeGoalPaths(ctx, mergeGoalPromptFromDisk(ctx, legacyGoal));
 		}
-		focusedGoalId = resolveSessionFocus({ pool: goalsById, focusEntry, legacyGoal });
+		focusedGoalId = resolveSessionFocus({
+			pool: goalsById,
+			focusEntry,
+			legacyGoal,
+			autoFocusReason: autoFocusReason ?? null,
+			cwd: ctx.cwd,
+			selfSessionId: SELF_SESSION_ID,
+		});
 		if (!focusEntry && focusedGoalId) {
 			try {
 				appendFocusEntry(focusedGoalId, legacyGoal?.id === focusedGoalId ? "migrated" : "selected");
@@ -1007,6 +1143,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		if (!state.goal || state.goal.status === "paused" || state.goal.status === "complete") {
 			clearActiveAccounting();
+			// Stop the heartbeat when the goal is no longer active — the lease
+			// will lapse and the lock becomes reapable. Pause = lazy reap.
+			stopHeartbeatTimer();
 		}
 		if (!state.goal || state.goal.id !== previousGoalId) {
 			// Drop any stale tweak-edit-gate that didn't belong to this goal.
@@ -1418,6 +1557,13 @@ Verification contract:
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		const goalId = state.goal.id;
+		// Unit E task 4.1 — auto-run chokepoint (D6): auto-continuation requires
+		// THIS session to hold a live focus lock for the focused goal. Manual
+		// continuations (force=true) bypass the check. No lock → no auto-run.
+		if (!force && !isLockHeldBySelf(ctx.cwd, goalId)) {
+			console.warn(`[goal] auto-run blocked: focus ${goalId} not locked by self`);
+			return;
+		}
 		if (!force && (continuationQueuedFor === goalId || continuationScheduledFor === goalId)) return;
 		clearContinuationTimer();
 		let delay = CONTINUATION_IDLE_RETRY_MS;
@@ -1441,6 +1587,20 @@ Verification contract:
 		// A goal was committed — clear pending confirmation intent if any.
 		confirmationIntent = null;
 		ctx.ui.notify(buildGoalRunningNotification(config), "info");
+		// Unit E task 4.5: acquire the lock for the freshly created goal before
+		// queueContinuation, so the heartbeat timer refreshes a lock that exists.
+		if (state.goal?.id) {
+			const acquireResult = acquireFocusedLock(ctx.cwd, state.goal.id);
+			if (!acquireResult.ok && startNow && state.goal?.autoContinue) {
+				if (acquireResult.heldByOther) {
+					ctx.ui.notify(
+						`Goal created but not running — held by session ${acquireResult.heldByOther.owner.sessionId}. Use /goal-focus to take over.`,
+						"warning",
+					);
+				}
+				return;
+			}
+		}
 		if (startNow && state.goal?.autoContinue) queueContinuation(ctx, true);
 		// Append ledger event for durable history
 		const created = state.goal;
@@ -1570,6 +1730,50 @@ Verification contract:
 		return state.goal;
 	}
 
+	/**
+	 * Unit F — /goal-focus override flow (D5, LD2). Checks the focus lock on a
+	 * goal BEFORE setFocusedGoalId is called. Returns true if focus may proceed,
+	 * false if it should be aborted (declined or headless-refused).
+	 *
+	 * - No lock / stale lock → silent proceed (setFocusedGoalId reaps+acquires).
+	 * - Held by self → proceed.
+	 * - Held by another LIVE session → confirm dialog; on confirm, forcibly
+	 *   release + proceed; on decline, abort.
+	 * - Headless (!ctx.hasUI) → refuse with a warning (cannot prompt).
+	 */
+	async function confirmFocusOverride(ctx: ExtensionContext, goalId: string): Promise<boolean> {
+		const lock = readLock(ctx.cwd, goalId);
+		if (!lock) return true;
+		if (lock.owner.sessionId === SELF_SESSION_ID) return true;
+		if (!isLockHeld(lock)) {
+			// Stale (PID dead or lease lapsed) — silent reap, proceed.
+			try {
+				releaseLock(ctx.cwd, goalId);
+			} catch {}
+			return true;
+		}
+		// Held by another LIVE session.
+		if (!ctx.hasUI) {
+			ctx.ui.notify(
+				`Goal ${goalId} is held by session ${lock.owner.sessionId} (pid ${lock.owner.pid}). Cannot prompt for takeover in headless mode.`,
+				"warning",
+			);
+			return false;
+		}
+		const takeOver = await ctx.ui.confirm(
+			`Goal ${goalId} is held by session ${lock.owner.sessionId} (pid ${lock.owner.pid}). Take over?`,
+			"This will steal the focus lock from the other session.",
+		);
+		if (!takeOver) {
+			ctx.ui.notify("Goal focus unchanged.", "info");
+			return false;
+		}
+		try {
+			releaseLock(ctx.cwd, goalId);
+		} catch {}
+		return true;
+	}
+
 	async function focusGoalCommand(ctx: ExtensionContext): Promise<void> {
 		const open = openGoals();
 		if (open.length === 0) {
@@ -1579,6 +1783,8 @@ Verification contract:
 		if (open.length === 1) {
 			const only = open[0];
 			if (!only) return;
+			// Unit F: override check on the single-open fast-path too.
+			if (!(await confirmFocusOverride(ctx, only.id))) return;
 			setFocusedGoalId(only.id, ctx, "selected");
 			armFocusedContinuation(ctx);
 			ctx.ui.notify(`Focused goal: ${oneLineSummary(only)}`, "info");
@@ -1596,6 +1802,8 @@ Verification contract:
 			ctx.ui.notify("Goal focus unchanged.", "info");
 			return;
 		}
+		// Unit F: override check after selection, before setFocusedGoalId.
+		if (!(await confirmFocusOverride(ctx, selectedId))) return;
 		setFocusedGoalId(selectedId, ctx, "selected");
 		armFocusedContinuation(ctx);
 		ctx.ui.notify(`Focused goal: ${oneLineSummary(state.goal)}`, "info");
@@ -1693,6 +1901,20 @@ Verification contract:
 		);
 		beginAccounting();
 		resetGetGoalNudgeState(state.goal.id);
+		// Unit E task 4.3: acquire the lock before queueContinuation. Reaps
+		// own-stale lock (pause+lapse self-heal). Fails if another live session
+		// holds it → auto-run blocked by the chokepoint.
+		const acquireResult = acquireFocusedLock(ctx.cwd, state.goal.id);
+		if (!acquireResult.ok) {
+			if (acquireResult.heldByOther) {
+				ctx.ui.notify(
+					`Goal resumed but not running — held by session ${acquireResult.heldByOther.owner.sessionId} (pid ${acquireResult.heldByOther.owner.pid}). Use /goal-focus to take over.`,
+					"warning",
+				);
+			}
+			ctx.ui.notify("Goal resumed.", "info");
+			return;
+		}
 		ctx.ui.notify("Goal resumed.", "info");
 		queueContinuation(ctx, true);
 		// Append ledger event for resumption
@@ -2960,6 +3182,14 @@ ${objective}` : objective,
 
 			// Account for any remaining elapsed time before stopping the run.
 			accountProgress(ctx);
+			// Unit E task 4.7: pause does NOT explicitly release the focus lock.
+			// The heartbeat timer stops (no active continuation → no auto-refresh,
+			// and clearStoppedRuntimeState is not called here, so the timer keeps
+			// running until setGoal→status!=active clears it below). Lazy
+			// reap-on-acquire: when this or another session later calls
+			// acquireLock (e.g. /goal-resume), a lapsed/stale lock is reaped.
+			// This mirrors the pause-vs-abort split: pause = lazy reap,
+			// abort = explicit release via the state.goal setter (task 4.8b).
 			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
 			const next = buildPausedByAgentGoal(state.goal, { reason, suggestedAction: suggested, updatedAt: nowIso() });
 			setGoal(next, ctx);
@@ -3605,6 +3835,11 @@ promptGuidelines: [
 		if (state.goal?.status === "complete" && !state.goal?.archivedPath) {
 			const completedGoal = state.goal;
 			const archived = archiveGoalFile(ctx, completedGoal);
+			// Unit E task 4.6: release the focus lock (co-located with turn_end archival).
+			try {
+				releaseLock(ctx.cwd, completedGoal.id, selfLockOwner());
+			} catch {}
+			stopHeartbeatTimer();
 			resetGetGoalNudgeState(completedGoal.id);
 			goalsById.delete(completedGoal.id);
 			focusedGoalId = null;
@@ -3645,7 +3880,8 @@ promptGuidelines: [
 	});
 
 	pi.on("session_start", async (event, ctx) => {
-		loadState(ctx);
+		cachedCwd = ctx.cwd;
+		loadState(ctx, event.reason);
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
 		if (event.reason === "resume" && !state.goal && openGoals().length > 1 && ctx.hasUI) {
@@ -3659,8 +3895,25 @@ promptGuidelines: [
 				setGoal({ ...current, status: "active", autoContinue: true, stopReason: undefined, pauseReason: undefined, pauseSuggestedAction: undefined }, ctx);
 			}
 		}
+		// Unit E task 4.2: acquire the focus lock AFTER loadState resolves focus
+		// and BEFORE queueContinuation. On success → chokepoint passes →
+		// resume-and-continue works. On failure (held by other live session) →
+		// focus preserved but auto-run blocked; surface held-by message.
+		let mayAutoRun = true;
+		if (focusedGoalId) {
+			const result = acquireFocusedLock(ctx.cwd, focusedGoalId);
+			if (!result.ok) {
+				mayAutoRun = false;
+				if (result.heldByOther) {
+					ctx.ui.notify(
+						`Focused on goal ${focusedGoalId} but not running — held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid}). Use /goal-focus to take over.`,
+						"warning",
+					);
+				}
+			}
+		}
 		beginAccounting();
-		queueContinuation(ctx, true);
+		if (mayAutoRun) queueContinuation(ctx, true);
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
@@ -3680,7 +3933,8 @@ promptGuidelines: [
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		loadState(ctx);
+		cachedCwd = ctx.cwd;
+		loadState(ctx, null);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
 		queueContinuation(ctx, true);
@@ -3832,6 +4086,13 @@ promptGuidelines: [
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		accountProgress(ctx);
+		// Unit E task 4.8: release the focus lock + clear heartbeat timer.
+		if (focusedGoalId) {
+			try {
+				releaseLock(ctx.cwd, focusedGoalId, selfLockOwner());
+			} catch {}
+		}
+		stopHeartbeatTimer();
 		clearContinuationTimer();
 		stopStatusRefresh();
 		stopAuditAnimation();

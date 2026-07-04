@@ -6,6 +6,7 @@ import {
 	truncateText,
 } from "./goal-core.ts";
 import { cloneGoal, type GoalFocusEntry, type GoalRecord } from "./goal-record.ts";
+import { isLockHeld, readLock } from "./goal-lock.ts";
 
 export function goalPoolFromGoals(goals: Iterable<GoalRecord>): Map<string, GoalRecord> {
 	const pool = new Map<string, GoalRecord>();
@@ -34,10 +35,21 @@ export function otherOpenGoalCount(pool: Map<string, GoalRecord>, focusedGoalId:
 	return openGoalsFromPool(pool).filter((goal) => goal.id !== focusedGoalId).length;
 }
 
+/**
+ * Resolve which goal (if any) this session should auto-focus on startup/tree-nav.
+ *
+ * Explicit intent paths (focusEntry, legacyGoal) ALWAYS win — they are
+ * user/branch choices and are NOT gated by reason or by lock state. Only the
+ * single-open-goal AUTO-FOCUS fallback at the end is gated, per LD3 (resume
+ * only) and the advisory lock (don't steal from another live session).
+ */
 export function resolveSessionFocus(args: {
 	pool: Map<string, GoalRecord>;
 	focusEntry?: GoalFocusEntry | null;
 	legacyGoal?: GoalRecord | null;
+	autoFocusReason?: string | null;
+	cwd?: string;
+	selfSessionId?: string;
 }): string | null {
 	const focusedGoalId = args.focusEntry?.focusedGoalId ?? null;
 	const focused = focusedGoalId ? focusedGoalFromPool(args.pool, focusedGoalId) : null;
@@ -53,7 +65,26 @@ export function resolveSessionFocus(args: {
 		return args.legacyGoal.id;
 	}
 	const open = openGoalsFromPool(args.pool);
-	return open.length === 1 ? open[0]?.id ?? null : null;
+	if (open.length !== 1) return null;
+	const candidate = open[0]?.id ?? null;
+	if (!candidate) return null;
+	// --- auto-focus gate (LD3 + advisory lock) ---
+	// Legacy caller (autoFocusReason undefined): preserve old behavior.
+	if (args.autoFocusReason === undefined) return candidate;
+	// PI_GOAL_AUTO_FOCUS=all opts back into legacy auto-focus on any reason.
+	const autoFocusMode = (typeof process !== "undefined" && process.env?.PI_GOAL_AUTO_FOCUS) || "resume";
+	if (autoFocusMode !== "all" && args.autoFocusReason !== "resume") {
+		// Non-resume reasons (new/startup/fork/reload/null) do NOT auto-focus.
+		return null;
+	}
+	// Don't auto-focus a goal another live session is actively working on.
+	if (args.cwd && args.selfSessionId) {
+		const lock = readLock(args.cwd, candidate);
+		if (lock && lock.owner.sessionId !== args.selfSessionId && isLockHeld(lock)) {
+			return null;
+			}
+	}
+	return candidate;
 }
 
 export function goalSelectorLabel(goal: GoalRecord, focusedGoalId: string | null): string {
