@@ -18,6 +18,7 @@ The extension is designed around one rule: **the user owns intent; the agent exe
 - [Auditor Subscriptions](#auditor-subscriptions) — Async event forwarding to auditor
 - [Configuration](#configuration) — Settings file and environment variables
 - [Configurable Auditor](#configurable-auditor) — Modes, wildcard filters, prompt files
+- [Multi-session Goal Focus](#multi-session-goal-focus) — Lease-based advisory lock for concurrent sessions
 - [Worker Session Isolation](#worker-session-isolation) — Prevent goal inheritance in teams
 - [Advanced Features](#advanced-features) — Verification contracts, task lists, schema gates
 - [Development](#development) — Build, test, and package
@@ -128,6 +129,31 @@ Pressing `Esc` or aborting an active run pauses the goal so it does not remain f
 - **One continuation chain**: auto-continue only schedules work for the focused goal in the current session.
 
 Creating a goal with `/goals`, `/sisyphus`, `/goals-set`, or `/sisyphus-set` no longer clears other open goals. It creates a new active goal file and focuses it. Use `/goal-list` to inspect open goals and `/goal-focus` to switch the session focus. If the latest focus entry explicitly clears focus, or points at a missing/stale goal, a remaining single open goal is not auto-focused; single-open auto-focus only happens when no focus entry exists at all. If multiple open goals exist and the session has no valid focus, `/goal-resume`, `/goal-clear`, `/goal-abort`, `/goal-pause`, and `/goal-tweak` ask the user to choose a goal instead of acting on all of them.
+
+## Multi-session goal focus
+
+When multiple pi sessions run in the same cwd (worktree-per-feature, parallel verification, an ad-hoc second session), a fresh session previously auto-focused the only open goal and started running it — stealing the goal from the session that was actively working on it. pi-goal now coordinates concurrent sessions with a lease-based advisory lock.
+
+- **Per-goal lock sidecar**: when a session focuses an active goal, it writes `<cwd>/.pi/goals/.locks/<goalId>.lock` (JSON). The file records `owner.sessionId`, `owner.pid`, `acquiredAt`, `expiresAt`, and `heartbeatAt`. The `.locks/` subdir keeps these out of the active-goal pool scan.
+- **Two-signal liveness**: a lock is HELD iff BOTH the owning PID is alive AND the lease has not lapsed. Either signal going stale makes the lock reapable. PID-alive correctly treats `EPERM` (cross-user process) as alive — only `ESRCH` (no such process) counts as dead. This catches crashes near-instantly (PID dead) and hangs within the lease window (lease lapses while the PID still looks alive).
+- **Auto-run chokepoint**: `queueContinuation` (the auto-run trigger) only fires when THIS session holds the focused goal's lock. No lock, no lock file, or a lock held by another live session → no auto-run.
+- **Auto-focus restricted to `reason: "resume"` by default** (LD3): a brand-new session, a hot-reload, a fork, or `/tree` navigation does NOT auto-focus the only open goal. Only a resumed session (the user coming back to their own session) auto-focuses. This eliminates the "I opened pi for an unrelated task and it stole my goal" case.
+- **`/goal-focus` override is advisory**: running `/goal-focus <id>` on a goal locked by another LIVE session prompts "Session <sessionId> (pid <pid>) looks alive — take over anyway?". On a STALE lock (PID dead or lease lapsed), the lock is silently reaped and acquired with no prompt. In headless contexts (`!ctx.hasUI`), override is refused with a warning.
+- **Heartbeat refresh**: the lock owner extends its lease via a single 60-second backstop `setInterval` timer while focused and active. The timer refreshes the 3-minute lease ~3× within its window, covering both idle presence and long tool executions. No event-driven refresh on `turn_end` or `tool_execution_end` (timer-only — the least-resistant path).
+- **Fail-open on fs errors**: a permissions misconfig on `.locks/` does not crash the session, and manual/explicit goal work proceeds. Auto-run is NOT fail-open — if the session cannot prove it holds the lock, the chokepoint still blocks `queueContinuation`.
+
+### Recovering a stuck lock
+
+Locks are reaped lazily by the next acquirer, so a crashed session's lock clears automatically the next time any session tries to focus that goal. To clear manually:
+
+- Delete the sidecar: `rm <cwd>/.pi/goals/.locks/<goalId>.lock`, or
+- Wait for lease expiry (~3 minutes from the last heartbeat) — the lock becomes stale and the next focus reaps it.
+
+The `.locks/` directory is a cache; `rm -rf <cwd>/.pi/goals/.locks` is safe.
+
+### Migration note
+
+Default behavior changed: fresh sessions (`reason: "new"`/`"startup"`/`"fork"`/`"reload"`) and `/tree` navigation no longer auto-focus the only open goal. Users who relied on the prior auto-focus-anywhere behavior set `PI_GOAL_AUTO_FOCUS=all`.
 
 ## Agent tools
 
@@ -367,6 +393,8 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `auditorInclude` | `{}` | Resources to add in `minimal` mode. Same shape as `auditorExclude`; matched against the main session's resources. |
 | `auditorPromptMode` | `"global-local"` | Prompt resolution: `"global-local"` (local overrides global), `"local"` (local only, global ignored), `"global-local-merge"` (global + `\n\n` + local). |
 | `auditorPrompt` | unset | Inline auditor prompt string; takes precedence over all file-based prompts and modes. |
+| `leaseMs` | `180000` | Lease window (ms) for the multi-session focus lock. A lock is stale once `now > expiresAt`. See [Multi-session goal focus](#multi-session-goal-focus). |
+| `heartbeatMs` | `60000` | Interval (ms) for the timer that refreshes the focused goal's lease while active. |
 
 **Env var overrides:**
 - `PI_GOAL_DISABLE_TASKS=1` — disable task features (takes precedence over file)
@@ -384,6 +412,7 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `PI_GOAL_DISABLED_TOOLS` | — | Comma/whitespace-separated tool names to hide (overrides settings file) |
 | `PI_GOAL_SETTINGS_FILE` | `.pi/pi-goal-xx-settings.json` | Alternative settings file path (relative to cwd or absolute) |
 | `PI_TEAMS_WORKER` | unset | When `1`, worker session mode: skips goal focus inheritance from leader's branch context. Workers start goal-unfocused but can still read goal files from disk. Set automatically by pi-agent-teams when spawning worker sessions. |
+| `PI_GOAL_AUTO_FOCUS` | `resume` | Multi-session auto-focus policy. `resume` (default): only a session with `reason: "resume"` auto-focuses the single open goal. `all`: restore legacy behavior — auto-focus on any session reason (including `new`/`startup`/`fork`/`reload`). See [Multi-session goal focus](#multi-session-goal-focus). |
 
 ## Configurable auditor
 

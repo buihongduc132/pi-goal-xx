@@ -70,6 +70,10 @@ export interface GoalSettings {
 	auditorPromptMode?: AuditorPromptMode;
 	/** Inline auditor prompt override; takes precedence over file-based prompts. */
 	auditorPrompt?: string;
+	/** Goal focus lock lease duration in ms. Default 180000 (3 min). */
+	leaseMs?: number;
+	/** Heartbeat refresh interval in ms. Default 60000 (60s). */
+	heartbeatMs?: number;
 }
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
@@ -92,6 +96,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"auditorInclude",
 	"auditorPromptMode",
 	"auditorPrompt",
+	"leaseMs",
+	"heartbeatMs",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -253,6 +259,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (auditorPromptMode) settings.auditorPromptMode = auditorPromptMode;
 	const auditorPrompt = asNonEmptyString(record.auditorPrompt);
 	if (auditorPrompt) settings.auditorPrompt = auditorPrompt;
+	const leaseMs = asPositiveInt(record.leaseMs) ?? 180_000;
+	settings.leaseMs = leaseMs;
+	const heartbeatMs = asPositiveInt(record.heartbeatMs) ?? 60_000;
+	settings.heartbeatMs = heartbeatMs;
 	return settings;
 }
 
@@ -291,6 +301,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		auditorInclude: fileConfig.auditorInclude,
 		auditorPromptMode: fileConfig.auditorPromptMode,
 		auditorPrompt: fileConfig.auditorPrompt,
+		leaseMs: fileConfig.leaseMs ?? 180_000,
+		heartbeatMs: fileConfig.heartbeatMs ?? 60_000,
 	};
 }
 
@@ -321,6 +333,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const auditorInclude = asAuditorResourceFilter(settings.auditorInclude);
 	const auditorPromptMode = asAuditorPromptMode(settings.auditorPromptMode);
 	const auditorPrompt = asNonEmptyString(settings.auditorPrompt);
+	const leaseMs = asPositiveInt(settings.leaseMs);
+	const heartbeatMs = asPositiveInt(settings.heartbeatMs);
 	if (provider) clean.provider = provider;
 	if (model) clean.model = model;
 	if (thinkingLevel) clean.thinkingLevel = thinkingLevel;
@@ -335,6 +349,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (auditorInclude) clean.auditorInclude = auditorInclude;
 	if (auditorPromptMode) clean.auditorPromptMode = auditorPromptMode;
 	if (auditorPrompt) clean.auditorPrompt = auditorPrompt;
+	if (leaseMs !== undefined && leaseMs !== 180_000) clean.leaseMs = leaseMs;
+	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -352,6 +368,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.auditorInclude) persisted.auditorInclude = clean.auditorInclude;
 	if (clean.auditorPromptMode) persisted.auditorPromptMode = clean.auditorPromptMode;
 	if (clean.auditorPrompt) persisted.auditorPrompt = clean.auditorPrompt;
+	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
+	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }

@@ -134,7 +134,7 @@ ${objective}
 		goalExtension(pi);
 
 		const branchEntries = [
-			{ type: "custom", customType: "pi-goal-focus", data: { focusedGoalId: goalId, reason: "selected" } },
+			{ type: "custom", customType: "pi-goal-focus", data: { version: 1, focusedGoalId: goalId, reason: "selected" } },
 		];
 
 		const ctx = createMockCtx(pi, {
@@ -150,6 +150,11 @@ ${objective}
 		await emit(pi, ctx, "session_start", { reason: "new" });
 
 		// Leader should inherit the focus — get_goal returns the goal
+		// NOTE (add-goal-focus-locking, LD3): this test now exercises TRUE focus-entry
+		// inheritance (branch entry carries version:1 so normalizeGoalFocusEntry
+		// accepts it). Explicit focus entries always win regardless of session
+		// reason / lock state. The prior data lacked `version` and was silently
+		// passing via the old auto-focus-on-any-reason path, which LD3 removes.
 		const result = await invokeTool(pi, ctx, "get_goal", {});
 		const text = (result as any)?.content?.[0]?.text ?? "";
 		assert.ok(

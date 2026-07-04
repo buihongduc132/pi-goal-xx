@@ -23,8 +23,8 @@ describe("parseGoalSettings — basic keys", () => {
 		assert.deepEqual(parseGoalSettings(42), {});
 	});
 
-	it("returns empty for empty object", () => {
-		assert.deepEqual(parseGoalSettings({}), {});
+	it("returns defaults for empty object", () => {
+		assert.deepEqual(parseGoalSettings({}), { leaseMs: 180_000, heartbeatMs: 60_000 });
 	});
 
 	it("parses booleans", () => {
