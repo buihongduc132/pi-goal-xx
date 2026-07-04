@@ -12,11 +12,7 @@ import {
 	mergeFocusedGoalWithDisk,
 } from "../extensions/goal-pool.ts";
 import { createGoal, cloneGoal, type GoalRecord } from "../extensions/goal-record.ts";
-
-function mkGoal(over: Partial<GoalRecord> = {}): GoalRecord {
-	const base = createGoal({ objective: "do stuff", autoContinue: false, sisyphus: false }, 1_700_000_000_000);
-	return { ...base, ...over };
-}
+import { mkGoal } from "./_test-helpers.ts";
 
 describe("goalPoolFromGoals", () => {
 	it("includes non-complete goals", () => {
@@ -118,7 +114,7 @@ describe("resolveSessionFocus", () => {
 	it("returns focusedGoalId when focus entry points at a non-complete goal", () => {
 		const pool = goalPoolFromGoals([mkGoal({ id: "a", status: "active" })]);
 		assert.equal(
-			resolveSessionFocus({ pool, focusEntry: { version: 1, focusedGoalId: "a", reason: "selected" } }),
+			resolveSessionFocus({ pool, autoFocusReason: null, focusEntry: { version: 1, focusedGoalId: "a", reason: "selected" } }),
 			"a",
 		);
 	});
@@ -126,7 +122,7 @@ describe("resolveSessionFocus", () => {
 	it("returns null when focused goal is complete (but focusEntry present)", () => {
 		const pool = goalPoolFromGoals([mkGoal({ id: "a", status: "complete" })]);
 		assert.equal(
-			resolveSessionFocus({ pool, focusEntry: { version: 1, focusedGoalId: "a", reason: "completed" } }),
+			resolveSessionFocus({ pool, autoFocusReason: null, focusEntry: { version: 1, focusedGoalId: "a", reason: "completed" } }),
 			null,
 		);
 	});
@@ -134,13 +130,13 @@ describe("resolveSessionFocus", () => {
 	it("falls back to legacyGoal when no focus entry and legacy goal open and already in pool", () => {
 		const legacy = mkGoal({ id: "legacy", status: "active" });
 		const pool = goalPoolFromGoals([legacy]);
-		assert.equal(resolveSessionFocus({ pool, legacyGoal: legacy }), "legacy");
+		assert.equal(resolveSessionFocus({ pool, autoFocusReason: null, legacyGoal: legacy }), "legacy");
 	});
 
 	it("adds legacy goal to pool when open but not present, returns its id", () => {
 		const pool = new Map<string, GoalRecord>();
 		const legacy = mkGoal({ id: "legacy", status: "active" });
-		const result = resolveSessionFocus({ pool, legacyGoal: legacy });
+		const result = resolveSessionFocus({ pool, autoFocusReason: null, legacyGoal: legacy });
 		assert.equal(result, "legacy");
 		assert.ok(pool.has("legacy"));
 	});
@@ -148,13 +144,13 @@ describe("resolveSessionFocus", () => {
 	it("returns null when no focus entry, legacy complete", () => {
 		const pool = new Map<string, GoalRecord>();
 		const legacy = mkGoal({ id: "legacy", status: "complete" });
-		assert.equal(resolveSessionFocus({ pool, legacyGoal: legacy }), null);
+		assert.equal(resolveSessionFocus({ pool, autoFocusReason: null, legacyGoal: legacy }), null);
 		assert.ok(!pool.has("legacy"));
 	});
 
 	it("auto-selects single open goal when no focus/legacy", () => {
 		const pool = goalPoolFromGoals([mkGoal({ id: "solo", status: "active" })]);
-		assert.equal(resolveSessionFocus({ pool }), "solo");
+		assert.equal(resolveSessionFocus({ pool, autoFocusReason: "resume" }), "solo");
 	});
 
 	it("returns null when multiple open goals and no focus/legacy (ambiguous)", () => {
@@ -162,17 +158,17 @@ describe("resolveSessionFocus", () => {
 			mkGoal({ id: "a", status: "active" }),
 			mkGoal({ id: "b", status: "active" }),
 		]);
-		assert.equal(resolveSessionFocus({ pool }), null);
+		assert.equal(resolveSessionFocus({ pool, autoFocusReason: "resume" }), null);
 	});
 
 	it("returns null when zero open goals and no focus/legacy", () => {
-		assert.equal(resolveSessionFocus({ pool: new Map() }), null);
+		assert.equal(resolveSessionFocus({ pool: new Map(), autoFocusReason: "resume" }), null);
 	});
 
 	it("focusEntry present but null focusedGoalId returns null (no legacy fallback)", () => {
 		const pool = goalPoolFromGoals([mkGoal({ id: "a", status: "active" })]);
 		assert.equal(
-			resolveSessionFocus({ pool, focusEntry: { version: 1, focusedGoalId: null, reason: "cleared" } }),
+			resolveSessionFocus({ pool, autoFocusReason: null, focusEntry: { version: 1, focusedGoalId: null, reason: "cleared" } }),
 			null,
 		);
 	});

@@ -872,7 +872,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 	function armFocusedContinuation(ctx: ExtensionContext): void {
 		beginAccounting();
-		if (state.goal?.status === "active" && state.goal.autoContinue) queueContinuation(ctx, true);
+		if (state.goal?.status === "active" && state.goal.autoContinue) queueContinuation(ctx);
 	}
 
 	function removeFocusedGoal(ctx: ExtensionContext, reason: GoalFocusReason): void {
@@ -1067,7 +1067,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function loadState(ctx: ExtensionContext, autoFocusReason?: string | null): void {
+	function loadState(ctx: ExtensionContext, autoFocusReason: string | null): void {
 		goalsById = readActiveGoalPool(ctx);
 		focusedGoalId = null;
 
@@ -1108,7 +1108,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			pool: goalsById,
 			focusEntry,
 			legacyGoal,
-			autoFocusReason: autoFocusReason ?? null,
+			autoFocusReason,
 			cwd: ctx.cwd,
 			selfSessionId: SELF_SESSION_ID,
 		});
@@ -1553,18 +1553,24 @@ Verification contract:
 	}
 
 
-	function queueContinuation(ctx: ExtensionContext, force = false): void {
+	function queueContinuation(ctx: ExtensionContext): void {
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		const goalId = state.goal.id;
-		// Unit E task 4.1 — auto-run chokepoint (D6): auto-continuation requires
-		// THIS session to hold a live focus lock for the focused goal. Manual
-		// continuations (force=true) bypass the check. No lock → no auto-run.
-		if (!force && !isLockHeldBySelf(ctx.cwd, goalId)) {
+		// Unit E task 4.1 — auto-run chokepoint (D6, single uniform guard): ALL
+		// auto-continuation requires THIS session to hold a live focus lock for
+		// the focused goal. No `force`/per-call-site bypass — D6 explicitly
+		// rejects per-call-site gating as over-engineering + leaky. Callers that
+		// need the chokepoint to pass MUST have called acquireLock immediately
+		// before (session_start, handleGoalResume, replaceGoal, setFocusedGoalId)
+		// — in which case isLockHeldBySelf returns true for free. Paths that rely
+		// on a previously-held lock (session_compact, session_tree) correctly
+		// block when the lease lapsed — auto-run is NOT fail-open (D7).
+		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
 			console.warn(`[goal] auto-run blocked: focus ${goalId} not locked by self`);
 			return;
 		}
-		if (!force && (continuationQueuedFor === goalId || continuationScheduledFor === goalId)) return;
+		if (continuationQueuedFor === goalId || continuationScheduledFor === goalId) return;
 		clearContinuationTimer();
 		let delay = CONTINUATION_IDLE_RETRY_MS;
 		try {
@@ -1601,7 +1607,7 @@ Verification contract:
 				return;
 			}
 		}
-		if (startNow && state.goal?.autoContinue) queueContinuation(ctx, true);
+		if (startNow && state.goal?.autoContinue) queueContinuation(ctx);
 		// Append ledger event for durable history
 		const created = state.goal;
 		if (created) {
@@ -1916,7 +1922,7 @@ Verification contract:
 			return;
 		}
 		ctx.ui.notify("Goal resumed.", "info");
-		queueContinuation(ctx, true);
+		queueContinuation(ctx);
 		// Append ledger event for resumption
 		try {
 			appendGoalEvent(ctx, {
@@ -3913,7 +3919,7 @@ promptGuidelines: [
 			}
 		}
 		beginAccounting();
-		if (mayAutoRun) queueContinuation(ctx, true);
+		if (mayAutoRun) queueContinuation(ctx);
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
@@ -3929,7 +3935,7 @@ promptGuidelines: [
 		if (shouldArmPostCompactReminder(state.goal)) {
 			postCompactReminderPending = true;
 		}
-		queueContinuation(ctx, true);
+		queueContinuation(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
@@ -3937,7 +3943,7 @@ promptGuidelines: [
 		loadState(ctx, null);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
-		queueContinuation(ctx, true);
+		queueContinuation(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {

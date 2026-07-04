@@ -47,7 +47,7 @@ export function resolveSessionFocus(args: {
 	pool: Map<string, GoalRecord>;
 	focusEntry?: GoalFocusEntry | null;
 	legacyGoal?: GoalRecord | null;
-	autoFocusReason?: string | null;
+	autoFocusReason: string | null;
 	cwd?: string;
 	selfSessionId?: string;
 }): string | null {
@@ -69,9 +69,11 @@ export function resolveSessionFocus(args: {
 	const candidate = open[0]?.id ?? null;
 	if (!candidate) return null;
 	// --- auto-focus gate (LD3 + advisory lock) ---
-	// Legacy caller (autoFocusReason undefined): preserve old behavior.
-	if (args.autoFocusReason === undefined) return candidate;
-	// PI_GOAL_AUTO_FOCUS=all opts back into legacy auto-focus on any reason.
+	// Every caller MUST pass autoFocusReason explicitly (string or null). There
+	// is NO `undefined` legacy-bypass: omitting the reason silently re-enabling
+	// auto-focus on any reason would violate LD3 ("resume only") and re-open
+	// the goal-stealing bug (F5). The only opt-out is PI_GOAL_AUTO_FOCUS=all.
+	// PI_GOAL_AUTO_FOCUS=all opts into legacy auto-focus on any reason.
 	const autoFocusMode = (typeof process !== "undefined" && process.env?.PI_GOAL_AUTO_FOCUS) || "resume";
 	if (autoFocusMode !== "all" && args.autoFocusReason !== "resume") {
 		// Non-resume reasons (new/startup/fork/reload/null) do NOT auto-focus.
