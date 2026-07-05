@@ -471,8 +471,12 @@ describe("resolvePrompt — all six modes", () => {
 	});
 
 	it("mode 'off' with both files present → final = hardcodedDefault, no injection", () => {
-		sb.writeGlobal("G");
-		sb.writeLocal("L");
+		// Distinctive multi-char markers — single-letter markers like "G"/"L"
+		// collide with letters inside DEFAULT_PROMPT (="HARDCODED-DEFAULT-BODY",
+		// which contains "L" inside "DEFAULT"), making substring assertions
+		// pass/fail for the wrong reason.
+		sb.writeGlobal("GLOBAL-MARKER-X9");
+		sb.writeLocal("LOCAL-MARKER-X9");
 		const r = resolvePrompt(
 			KEY,
 			{ mode: "off" },
@@ -482,8 +486,8 @@ describe("resolvePrompt — all six modes", () => {
 		);
 		assert.equal(r.final, DEFAULT_PROMPT);
 		assert.equal(r.injected, undefined);
-		assert.ok(!r.final.includes("G"));
-		assert.ok(!r.final.includes("L"));
+		assert.ok(!r.final.includes("GLOBAL-MARKER-X9"));
+		assert.ok(!r.final.includes("LOCAL-MARKER-X9"));
 	});
 });
 
