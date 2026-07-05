@@ -51,6 +51,17 @@ export function localAuditorPromptPath(cwd: string): string {
 	return path.join(cwd, ".pi", LEGACY_FILENAME);
 }
 
+export interface LoadAuditorPromptOptions {
+	/**
+	 * The auditor's fact layer (objective + summaries + contract + checklist).
+	 * When provided, override mode REPLACES only the persona preamble but
+	 * ALWAYS concatenates this fact layer — the auditor must be able to
+	 * identify the goal under audit in every mode. (Spec: "Goal data always
+	 * injected".) Omit for non-auditor callers that have no fact layer.
+	 */
+	factLayer?: string;
+}
+
 /** Result of resolving the auditor prompt. */
 export interface ResolvedAuditorPrompt {
 	/** The final prompt text to hand to the auditor. */
@@ -146,6 +157,7 @@ export function loadAuditorPrompt(
 	cwd: string,
 	defaultPrompt: string,
 	home?: string,
+	opts?: LoadAuditorPromptOptions,
 ): ResolvedAuditorPrompt {
 	const h = home ?? os.homedir();
 	const promptsDir = settings?.promptsDir ?? DEFAULT_PROMPTS_DIR;
@@ -164,8 +176,14 @@ export function loadAuditorPrompt(
 	// Inline check (both unified and legacy inline) — must short-circuit before
 	// any file read so an empty cwd doesn't matter. resolvePrompt handles this
 	// internally, but we surface it here for clarity + the "off" override.
+	// NOTE: in override mode the inline body REPLACES the persona only; the
+	// fact layer (if provided) is always concatenated.
 	const inline = (unifiedCfg?.inline ?? legacyInline)?.trim();
 	if (inline && inline.length > 0) {
+		const factLayer = opts?.factLayer;
+		if (cfg.mode === "override" && factLayer) {
+			return { prompt: `${inline}\n\n${factLayer}`, source: "inline" };
+		}
 		return { prompt: inline, source: "inline" };
 	}
 
@@ -175,18 +193,31 @@ export function loadAuditorPrompt(
 	if (mode !== "off") {
 		// 1. Unified resolution via resolvePrompt('auditor', ...). We pass an
 		//    empty hardcodedDefault because the auditor NEVER prepends the
-		//    default to a resolved body — default is a pure fallback.
+		//    default to a resolved body — the fact layer (if any) is concatenated
+		//    explicitly below to guarantee goal-identification in every mode.
 		const resolved = resolvePrompt("auditor", cfg, cwd, "", {
 			promptsDir,
 			home: h,
 		});
 		if (resolved.source !== "none" && resolved.injected) {
+			const factLayer = opts?.factLayer;
+			if (mode === "override" && factLayer) {
+				// Override replaces the persona ONLY; the fact layer is structurally
+				// guaranteed present so the auditor can identify the goal.
+				return { prompt: `${resolved.injected}\n\n${factLayer}`, source: mapSource(resolved.source) };
+			}
 			return { prompt: resolved.injected, source: mapSource(resolved.source) };
 		}
 
 		// 2. Legacy fallback (.pi/auditor-prompt.md) — backward compat.
 		const legacy = readLegacyBlock(mode, cwd, h);
-		if (legacy) return { prompt: legacy.body, source: legacy.source };
+		if (legacy) {
+			const factLayer = opts?.factLayer;
+			if (mode === "override" && factLayer) {
+				return { prompt: `${legacy.body}\n\n${factLayer}`, source: legacy.source };
+			}
+			return { prompt: legacy.body, source: legacy.source };
+		}
 	}
 
 	// 3. Nothing resolved — hardcoded fallback.

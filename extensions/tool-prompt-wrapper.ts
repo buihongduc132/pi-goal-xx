@@ -18,7 +18,6 @@ export interface ToolDefinitionLike {
 	name: string;
 	promptSnippet?: string;
 	promptGuidelines?: string[];
-	[key: string]: unknown;
 }
 
 /**

@@ -199,16 +199,15 @@ describe("loadAuditorPrompt — behavioral parity (preserved by migration)", () 
 });
 
 // ===========================================================================
-// 2. OVERRIDE MODE (pass today by fall-through; lock expected result)
+// 2. OVERRIDE MODE (drives GREEN: fact-layer preservation)
 // ===========================================================================
 describe("loadAuditorPrompt — override mode (new capability)", () => {
-	// Auditor never prepends defaultPrompt in ANY mode — the default is a pure
-	// fallback. Therefore override mode is behaviorally equivalent to
-	// global-local for the auditor surface. These tests lock in the expected
-	// post-migration result: override returns the resolved block (or default)
-	// with NO defaultPrompt prepended, and correct source labeling.
+	// CRITICAL SPEC INVARIANT (prompt-config-resolution "Goal data always
+	// injected"): override mode replaces ONLY the persona preamble. The
+	// fact-layer (objective, verification_summary, contract, checklist) MUST
+	// always be present so the auditor can identify the goal under audit.
 
-	it("override + inline → inline wins, source 'inline'", () => {
+	it("override + inline → inline wins, fact-layer preserved", () => {
 		sb.writeLegacyGlobal("GLOBAL");
 		sb.writeLegacyLocal("LOCAL");
 		const r = loadAuditorPrompt(
@@ -216,41 +215,31 @@ describe("loadAuditorPrompt — override mode (new capability)", () => {
 			sb.cwd,
 			DEFAULT_PROMPT,
 			sb.home,
+			{ factLayer: "FACT: <objective>goal-x</objective>" },
 		);
 		assert.equal(r.source, "inline");
-		assert.equal(r.prompt, "OVR-INLINE");
-		// defaultPrompt MUST NOT be prepended in override mode.
-		assert.ok(!r.prompt.includes(DEFAULT_PROMPT));
+		assert.equal(r.prompt, "OVR-INLINE\n\nFACT: <objective>goal-x</objective>");
+		assert.ok(r.prompt.includes("<objective>"), "fact-layer objective preserved under override");
 	});
 
-	it("override + local file (no inline) → file body, source 'local', no default prepend", () => {
+	it("override + file body (no inline) → file body + fact-layer, NO persona prepend", () => {
 		sb.writeLegacyLocal("LOCAL-OVR-BODY");
 		const r = loadAuditorPrompt(
 			settings({ auditorPromptMode: "override" }),
 			sb.cwd,
 			DEFAULT_PROMPT,
 			sb.home,
+			{ factLayer: "<objective>G</objective><verification_summary>V</verification_summary>" },
 		);
 		assert.equal(r.source, "local");
-		assert.equal(r.prompt, "LOCAL-OVR-BODY");
-		// Critical override-mode invariant: defaultPrompt is NOT prepended.
-		// (If migration accidentally uses append-style, this fails.)
-		assert.equal(r.prompt.includes(DEFAULT_PROMPT), false);
+		assert.ok(r.prompt.startsWith("LOCAL-OVR-BODY"), "persona replaced by file body");
+		assert.ok(r.prompt.includes("<objective>"), "objective preserved");
+		assert.ok(r.prompt.includes("<verification_summary>"), "verification summary preserved");
+		// Hardcoded default persona MUST NOT leak when a body resolves.
+		assert.ok(!r.prompt.includes(DEFAULT_PROMPT));
 	});
 
-	it("override + global file (no inline, no local) → global body, source 'global'", () => {
-		sb.writeLegacyGlobal("GLOBAL-OVR-BODY");
-		const r = loadAuditorPrompt(
-			settings({ auditorPromptMode: "override" }),
-			sb.cwd,
-			DEFAULT_PROMPT,
-			sb.home,
-		);
-		assert.equal(r.source, "global");
-		assert.equal(r.prompt, "GLOBAL-OVR-BODY");
-	});
-
-	it("override + nothing → defaultPrompt, source 'default'", () => {
+	it("override + nothing → defaultPrompt (persona+fact), source 'default'", () => {
 		const r = loadAuditorPrompt(
 			settings({ auditorPromptMode: "override" }),
 			sb.cwd,
@@ -259,28 +248,6 @@ describe("loadAuditorPrompt — override mode (new capability)", () => {
 		);
 		assert.equal(r.source, "default");
 		assert.equal(r.prompt, DEFAULT_PROMPT);
-	});
-
-	it("override produces same prompt body as global-local for auditor (equivalence)", () => {
-		// Documents the design fact: because auditor never prepends default,
-		// override and global-local yield identical `prompt` for the same
-		// file setup. Only the source labeling / future persona-vs-fact
-		// layering differs.
-		sb.writeLegacyLocal("SHARED-BODY");
-		const legacy = loadAuditorPrompt(
-			settings({ auditorPromptMode: "global-local" }),
-			sb.cwd,
-			DEFAULT_PROMPT,
-			sb.home,
-		);
-		const override = loadAuditorPrompt(
-			settings({ auditorPromptMode: "override" }),
-			sb.cwd,
-			DEFAULT_PROMPT,
-			sb.home,
-		);
-		assert.equal(legacy.prompt, override.prompt);
-		assert.equal(legacy.source, override.source);
 	});
 });
 
