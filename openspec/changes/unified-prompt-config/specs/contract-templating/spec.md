@@ -57,7 +57,7 @@ The system SHALL honor `settings.contractsDir` overriding the default `.pi/pi-go
 
 - **WHEN** `settings.contractsDir = "./legal/contracts"`
 - **THEN** local snippets resolve from `<cwd>/legal/contracts/`
-- **AND** global snippets resolve from `~/.pi/pi-goal-xx/legal/contracts/` (or as documented)
+- **AND** global snippets resolve from `<home>/legal/contracts/` (the contractsDir is treated as a path relative to cwd/home directly, mirroring promptsDir/hooksDir behavior)
 
 ### Requirement: Templates disabled switch
 

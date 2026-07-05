@@ -82,8 +82,8 @@ export function expandContractTemplates(
 			}
 			return cached;
 		}
-		const localPath = cwd ? path.join(cwd, contractsDir, `${name}.md`) : "";
-		const globalPath = home ? path.join(home, contractsDir, `${name}.md`) : "";
+		const localPath = cwd ? (path.isAbsolute(contractsDir) ? path.join(contractsDir, `${name}.md`) : path.join(cwd, contractsDir, `${name}.md`)) : "";
+		const globalPath = home ? (path.isAbsolute(contractsDir) ? path.join(contractsDir, `${name}.md`) : path.join(home, contractsDir, `${name}.md`)) : "";
 		const localText = localPath ? readFileIfExists(localPath) : undefined;
 		const resolved = localText ?? (globalPath ? readFileIfExists(globalPath) : undefined);
 		seen[name] = resolved;

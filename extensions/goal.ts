@@ -1863,7 +1863,10 @@ Verification contract:
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
-		const { objective, verificationContract } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+		const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+		if (missingSnippets && missingSnippets.length > 0) {
+			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+		}
 		clearContinuationState();
 		clearActiveAccounting();
 		confirmationIntent = null;
@@ -2487,7 +2490,10 @@ ${objective}` : objective,
 
 			if (decision.decision === "confirm") {
 				// Extract verification contract from objective before creation
-				const { objective: cleanedObjective, verificationContract } = extractVerificationContract(objective, ctx.cwd, loadGoalSettings(ctx.cwd));
+				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(objective, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
 				const config: GoalCreationConfig = {
 					objective: cleanedObjective,
 					autoContinue: autoContinueFlag,
@@ -2690,7 +2696,10 @@ ${objective}` : objective,
 					state.goal = { ...state.goal, skipAuditor: !decision.auditorEnabled };
 				}
 				// Extract verification contract from revised objective
-				const { objective: cleanedObjective, verificationContract } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
+				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
 				// Apply the tweak: write the new objective to disk authoritatively.
 				const next: GoalRecord = {
 					...state.goal,

@@ -54,8 +54,10 @@ export interface LoadHookOptions {
  *   - no config exists for this command
  *   - the dynamic import fails (error isolated → undefined + ui.notify)
  *
- * Resolution: local (`<cwd>/<hooksDir>/<name>.ts`) wins over global
- * (`<home>/<hooksDir>/<name>.ts`).
+ * Resolution per spec `command-hooks` Requirement "Hook precedence global
+ * then local": when BOTH global and local hook files exist, they are chained
+ * (append mode) as global-pre → local-pre → builtin → local-post →
+ * global-post. In override mode local wins and global is ignored.
  */
 export async function loadHook(
 	name: string,
@@ -97,11 +99,78 @@ export async function loadHook(
 		}
 	};
 
-	// Local wins over global.
+	// Spec (command-hooks "Hook precedence global then local"): when both
+	// global and local hook files exist in append mode, chain them as
+	// global-pre → local-pre → builtin → local-post → global-post. In
+	// override mode local wins and global is silently ignored.
 	const local = localPath ? await tryImport(localPath) : undefined;
-	if (local) return local;
 	const globalHook = globalPath ? await tryImport(globalPath) : undefined;
-	return globalHook;
+	if (!local && !globalHook) return undefined;
+	if (local && globalHook) {
+		return chainHooks(globalHook, local);
+	}
+	return local ?? globalHook;
+}
+
+/**
+ * Chain two hook modules (global, local) into a single LoadedHook per the
+ * append-mode precedence: global-pre → local-pre → builtin → local-post →
+ * global-post. If either defines a full `handler` (override semantics), the
+ * local handler wins and the global one is dropped (override = local wins).
+ */
+function chainHooks(globalHook: LoadedHook, localHook: LoadedHook): LoadedHook {
+	// Override handlers: local wins, global dropped.
+	if (localHook.handler) return localHook;
+	if (globalHook.handler && !localHook.handler) {
+		// global override + local append hooks: chain pre/post around the
+		// global handler.
+		return {
+			pre: chainPre(globalHook.pre, localHook.pre),
+			handler: globalHook.handler,
+			post: chainPost(localHook.post, globalHook.post),
+		};
+	}
+	return {
+		pre: chainPre(globalHook.pre, localHook.pre),
+		post: chainPost(localHook.post, globalHook.post),
+	};
+}
+
+/** Compose two pre hooks: g first, then l. Each may transform args. */
+function chainPre(
+	g: LoadedHook["pre"],
+	l: LoadedHook["pre"],
+): LoadedHook["pre"] {
+	if (!g) return l;
+	if (!l) return g;
+	return async (args, ctx) => {
+		const gr = await g(args, ctx);
+		const nextArgs = transformFrom(gr) ?? args;
+		const lr = await l(nextArgs, ctx);
+		return lr ?? undefined;
+	};
+}
+
+/** Compose two post hooks: l first, then g (reverse of pre). */
+function chainPost(
+	l: LoadedHook["post"],
+	g: LoadedHook["post"],
+): LoadedHook["post"] {
+	if (!l) return g;
+	if (!g) return l;
+	return async (args, ctx, result) => {
+		await l(args, ctx, result);
+		await g(args, ctx, result);
+	};
+}
+
+/** Extract transformArgs from a pre-hook result, if any. */
+function transformFrom(result: unknown): string | undefined {
+	if (result && typeof result === "object" && "transformArgs" in result) {
+		const t = (result as { transformArgs?: string }).transformArgs;
+		return typeof t === "string" ? t : undefined;
+	}
+	return undefined;
 }
 
 /**
@@ -161,7 +230,7 @@ export function wrapHandler(
 		const result = await original(effectiveArgs, ctx);
 		if (hook.post) {
 			try {
-				await hook.post(args, ctx, result);
+				await hook.post(effectiveArgs, ctx, result);
 			} catch (err) {
 				notify(ctx, `Post-hook for /${name} failed: ${(err as Error).message}`);
 			}

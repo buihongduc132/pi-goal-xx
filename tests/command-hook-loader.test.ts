@@ -48,7 +48,9 @@ describe("wrapHandler — append mode", () => {
 		const settings = { commandHooks: { enabled: true, goals: { mode: "append" } } } as unknown as GoalSettings;
 		const wrapped = wrapHandler("goals", fakeHandler("goals", log), settings, "/cwd", hook);
 		await wrapped("ARG", {} as never);
-		assert.deepEqual(log, ["pre(ARG)", "builtin:goals(ARG-pre)", "post(ARG)"]);
+		// post receives EFFECTIVE args (post-pre-transform) per spec
+		// audit/logging requirement — what actually ran, not what user typed.
+		assert.deepEqual(log, ["pre(ARG)", "builtin:goals(ARG-pre)", "post(ARG-pre)"]);
 	});
 
 	it("builtin receives transformed args from pre", async () => {
@@ -153,5 +155,67 @@ describe("loadHook — enabled gate", () => {
 		const h = await loadHook("goals", "/cwd", settings, { importer: async () => fakeModule });
 		assert.ok(h);
 		assert.equal(typeof h.pre, "function");
+	});
+});
+
+// Spec (command-hooks "Hook precedence global then local"): when both global
+// and local hook files exist in append mode, chain them as
+// global-pre → local-pre → builtin → local-post → global-post.
+describe("loadHook — global+local chaining (spec precedence)", () => {
+	it("chains global+local pre hooks in order: global → local", async () => {
+		const log: string[] = [];
+		const settings = { commandHooks: { enabled: true, goals: { mode: "append" } } } as GoalSettings;
+		const h = await loadHook("goals", "/cwd", settings, {
+			home: "/home",
+			importer: async (p: string) => {
+				if (p.includes("/home/")) return { pre: async (a: string) => { log.push(`global-pre(${a})`); return { transformArgs: a + "-G" }; } };
+				return { pre: async (a: string) => { log.push(`local-pre(${a})`); return { transformArgs: a + "-L" }; } };
+			},
+		});
+		assert.ok(h?.pre);
+		await h!.pre!("ARG", {});
+		assert.deepEqual(log, ["global-pre(ARG)", "local-pre(ARG-G)"]);
+	});
+
+	it("chains local+global post hooks in order: local → global", async () => {
+		const log: string[] = [];
+		const settings = { commandHooks: { enabled: true, goals: { mode: "append" } } } as GoalSettings;
+		const h = await loadHook("goals", "/cwd", settings, {
+			home: "/home",
+			importer: async (p: string) => {
+				if (p.includes("/home/")) return { post: async (a: string) => { log.push(`global-post(${a})`); } };
+				return { post: async (a: string) => { log.push(`local-post(${a})`); } };
+			},
+		});
+		assert.ok(h?.post);
+		await h!.post!("ARG", {}, "RESULT");
+		assert.deepEqual(log, ["local-post(ARG)", "global-post(ARG)"]);
+	});
+
+	it("override handler in local wins; global dropped", async () => {
+		const settings = { commandHooks: { enabled: true, goals: { mode: "override" } } } as GoalSettings;
+		const h = await loadHook("goals", "/cwd", settings, {
+			home: "/home",
+			importer: async (p: string) => {
+				if (p.includes("/home/")) return { handler: async () => "GLOBAL-HANDLER" };
+				return { handler: async () => "LOCAL-HANDLER" };
+			},
+		});
+		assert.ok(h?.handler);
+		const r = await h!.handler!("ARG", {}, async () => "BUILTIN");
+		assert.equal(r, "LOCAL-HANDLER");
+	});
+
+	it("only-local loads when global module is empty", async () => {
+		const settings = { commandHooks: { enabled: true, goals: { mode: "append" } } } as GoalSettings;
+		const h = await loadHook("goals", "/cwd", settings, {
+			home: "/home",
+			importer: async (p: string) => {
+				if (p.includes("/home/")) return {};
+				return { pre: async () => {} };
+			},
+		});
+		assert.ok(h?.pre, "local-only loads when global empty");
+		assert.ok(!h?.handler);
 	});
 });

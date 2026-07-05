@@ -243,9 +243,12 @@ export function resolvePrompt(
 	}
 
 	// Override mode REPLACES the hardcodedDefault entirely (persona-only
-	// prompts). Nothing is "injected" — the block IS the final.
+	// prompts). Nothing is "injected" on top of the default — the block IS
+	// the final. We ALSO surface `injected` so callers that need just the
+	// resolved body (e.g. the auditor, which applies its own fact layer) can
+	// read it uniformly across modes.
 	if (mode === "override") {
-		return { final: block.body, source: block.source };
+		return { final: block.body, injected: block.body, source: block.source };
 	}
 
 	// All other modes (append, global-local, local, global-local-merge, off

@@ -103,7 +103,7 @@ export function extractVerificationContract(
 	objective: string,
 	cwd?: string,
 	settings?: GoalSettings,
-): { objective: string; verificationContract?: string } {
+): { objective: string; verificationContract?: string; missingSnippets?: string[] } {
 	const lines = objective.replace(/\r/g, "").split("\n");
 	let contract: string | undefined;
 	const filtered: string[] = [];
@@ -121,15 +121,20 @@ export function extractVerificationContract(
 
 	// Expand {{snippet}} placeholders at write time (group 7, D6). Only the
 	// extracted contract is expanded; the objective body is left untouched.
+	// Uses `cwd ?? "."` so globally configured contract templates still
+	// resolve when the caller has no cwd (e.g. headless/test paths).
 	let expandedContract = contract;
-	if (contract && cwd) {
-		const { expanded } = expandContractTemplates(contract, cwd, settings);
+	let missingSnippets: string[] = [];
+	if (contract) {
+		const { expanded, warnings } = expandContractTemplates(contract, cwd ?? ".", settings);
 		expandedContract = expanded || contract;
+		missingSnippets = warnings;
 	}
 
 	return {
 		objective: filtered.join("\n"),
 		verificationContract: expandedContract || undefined,
+		missingSnippets: missingSnippets.length > 0 ? missingSnippets : undefined,
 	};
 }
 

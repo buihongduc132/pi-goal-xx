@@ -19,7 +19,7 @@ Every prompt surface in this repo is hardcoded except the auditor (`auditor-prom
 
 ### New Capabilities
 
-- `prompt-config-resolution`: Unified resolution of override/append prompt blocks across all runtime prompts (goal-running, goal-continuation, goal-drafting, goal-tweak, goal-stale, goal-unfocused, auditor) and tool prompt fields, with global/local/inline sources and three modes (override / append / global-local-merge).
+- `prompt-config-resolution`: Unified resolution of override/append prompt blocks across all runtime prompts (goal-running, goal-continuation, goal-drafting, goal-tweak, goal-stale, goal-unfocused, auditor) and tool prompt fields, with global/local/inline sources and six modes (override / append / global-local / local / global-local-merge / off).
 - `command-hooks`: Per-command pre/post hook chain with append (wrap built-in) and override (replace built-in) modes, loaded from `.pi/pi-goal-xx/hooks/<cmd>.ts`, gated behind explicit settings flag.
 - `contract-templating`: Reusable contract snippets under `.pi/pi-goal-xx/contracts/`, expanded via `{{name}}` syntax at goal-create and goal-tweak time, stored expanded in goal file.
 
