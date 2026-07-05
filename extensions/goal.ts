@@ -84,6 +84,7 @@ import {
 } from "./goal-ledger.ts";
 import { buildCompactionSummary } from "./goal-compaction.ts";
 import { lazyWrapCommand } from "./command-hook-loader.ts";
+import { wrapToolDefinition } from "./tool-prompt-wrapper.ts";
 import {
 	archiveGoalFile,
 	atomicWriteGoalFile,
@@ -2131,6 +2132,11 @@ Verification contract:
 			await showGoalStatus(ctx);
 		},
 	};
+// Tool-prompt wrapping (group 4, D3). Resolves tool-<name> prompts at load.
+function regTool<T extends { name: string; promptSnippet?: string; promptGuidelines?: string[] }>(def: T): T {
+	return wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+}
+
 // Command-hook wrapping (group 6). Wraps each /goal-* command handler so
 // user hooks (default off) can pre/post/override when enabled in settings.
 function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: string, def: T): T {
@@ -2236,7 +2242,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 
 	registerQuestionnaireTools(pi);
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "get_goal",
 		label: "Get Goal",
 		description: "Get the current pi goal for this session: objective, status, auto-continue, usage, and local file paths.",
@@ -2279,9 +2285,9 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "create_goal",
 		label: "Create Goal",
 		description: "Create a new active pi goal and focus it. Hidden outside drafting flows; propose_goal_draft is the normal commit path.",
@@ -2310,7 +2316,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// Agent's goal-confirmation entry point. Shows the user a full plain-text
 	// draft report with two choices: [Confirm] (creates the goal) or
@@ -2318,7 +2324,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 	// Schema gates enforce focus-vs-sisyphus consistency; draftId is ignored for
 	// one-release compatibility with older prompt residue.
 	// In headless mode (no UI), auto-confirms — harness-friendly.
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_DRAFT_TOOL_NAME,
 		label: "Propose Goal Draft",
 		description: "During /goals or /sisyphus intent discussion, propose the goal draft to the user. The user sees a full plain-text confirmation report and chooses Confirm (creates the goal) or Continue Chatting (returns control to you to refine). REPLACES create_goal during discussion-based creation.",
@@ -2504,9 +2510,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_TWEAK_TOOL_NAME,
 		label: "Propose Goal Tweak",
 		description: "Propose a goal tweak or auto-start the /goal-tweak drafting flow. When a goal is active or paused and no /goal-tweak flow is active, calling this auto-starts the drafting interview; inside an active flow it presents the revised goal for confirmation.",
@@ -2725,9 +2731,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "complete_goal",
 		label: "Complete Goal",
 		description: "Mark the current active or paused pi goal complete. Only call this when the goal objective is actually achieved — no required work remains.",
@@ -3194,9 +3200,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "pause_goal",
 		label: "Pause Goal",
 		description: "Pause the active pi goal and report a blocker to the user. The user must /goal-resume, /goal-tweak, or /goal-clear before work continues.",
@@ -3275,9 +3281,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: ABORT_GOAL_TOOL_NAME,
 		label: "Abort Goal",
 		description: "Abort the current active or paused pi goal and archive it without marking it complete.",
@@ -3356,9 +3362,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: SISYPHUS_STEP_TOOL_NAME,
 		label: "Sisyphus Step Complete (Legacy)",
 		description: "Legacy compatibility tool. Current Sisyphus mode is a prompt/criteria style and no longer uses schema-tracked step completion.",
@@ -3385,10 +3391,10 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// ── propose_task_list ──────────────────────────────────────────────────
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_TASK_LIST_TOOL_NAME,
 		label: "Propose Task List",
 		description: "Propose a structured task list for the current goal. Mirrors the propose_goal_tweak pattern: shows a confirmation dialog and stops the turn.",
@@ -3542,10 +3548,10 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// ── complete_task ─────────────────────────────────────────────────────
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: COMPLETE_TASK_TOOL_NAME,
 		label: "Complete Task",
 		description: "Mark a task as complete within the current goal's task list. Does NOT stop the turn — the agent can continue working.",
@@ -3658,10 +3664,10 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// ── skip_task ─────────────────────────────────────────────────────────
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: SKIP_TASK_TOOL_NAME,
 		label: "Skip Task",
 		description: "Skip a pending task in the current goal's task list. Does NOT stop the turn — the agent can continue working.",
@@ -3769,7 +3775,7 @@ promptGuidelines: [
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	pi.on("context", async (event): Promise<{ messages: typeof event.messages } | undefined> => {
 		let changed = false;
