@@ -1663,7 +1663,7 @@ Verification contract:
 			pi.sendMessage<GoalEventDetails>(
 				{
 					customType: GOAL_EVENT_ENTRY,
-					content: goalTweakDraftingPrompt(focused, trimmed),
+					content: goalTweakDraftingPrompt(focused, trimmed, loadGoalSettings(ctx.cwd), ctx.cwd),
 					display: false,
 					details: {
 						kind: "drafting",
@@ -1702,7 +1702,7 @@ Verification contract:
 		};
 		syncGoalTools();
 		try {
-			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus, loadGoalSettings(ctx.cwd), ctx.cwd), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
 		} catch (err) {
 			ctx.ui.notify(`Could not start ${label.toLowerCase()}: ${(err as Error).message}`, "error");
 		}
@@ -3786,7 +3786,7 @@ promptGuidelines: [
 			const details = asRecord(candidate.details) ?? {};
 			return {
 				...message,
-				content: staleContinuationPrompt(queuedGoalId, state.goal),
+				content: staleContinuationPrompt(queuedGoalId, state.goal, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined),
 				display: false,
 				details: {
 					...details,
@@ -4018,7 +4018,7 @@ promptGuidelines: [
 				} catch {}
 				updateUI(ctx);
 				return {
-					systemPrompt: `${currentSystemPrompt()}\n\n${staleContinuationPrompt(incomingGoalId, state.goal)}`,
+					systemPrompt: `${currentSystemPrompt()}\n\n${staleContinuationPrompt(incomingGoalId, state.goal, loadGoalSettings(ctx.cwd), ctx.cwd)}`,
 				};
 			}
 			checkpointGoalId = null;
@@ -4035,7 +4035,7 @@ promptGuidelines: [
 			runningGoalId = null;
 			const openCount = openGoals().length;
 			if (openCount > 0) {
-				return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount)}` };
+				return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount, loadGoalSettings(ctx.cwd), ctx.cwd)}` };
 			}
 			return;
 		}
@@ -4043,7 +4043,7 @@ promptGuidelines: [
 		if (!state.goal) {
 			runningGoalId = null;
 			const openCount = openGoals().length;
-			if (openCount > 0) return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount)}` };
+			if (openCount > 0) return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount, loadGoalSettings(ctx.cwd), ctx.cwd)}` };
 			return;
 		}
 		runningGoalId = state.goal.status === "active" ? state.goal.id : null;
