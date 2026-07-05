@@ -6,7 +6,7 @@ Every prompt surface in this repo is hardcoded except the auditor (`auditor-prom
 
 ## What Changes
 
-- Generalize `auditor-prompt.ts` resolution pattern into a single `prompt-resolver.ts` covering all 7 runtime prompts + auditor + tool prompt fields.
+- Generalize `auditor-prompt.ts` resolution pattern into a single `prompt-resolver.ts` covering all 7 runtime prompts (including auditor) + tool prompt fields.
 - Add `override` mode (current default `global-local` / `local` / `global-local-merge` was append-style only).
 - Add per-command pre/post hooks (`command-hook-loader.ts`) with `append` (pre/post around built-in) and `override` (replace) modes, gated behind settings flag.
 - Add contract templating: `{{snippet-name}}` expansion from `.pi/pi-goal-xx/contracts/` files at write time (goal-create / goal-tweak), stored expanded in goal file.
@@ -31,6 +31,7 @@ Every prompt surface in this repo is hardcoded except the auditor (`auditor-prom
 
 - **Code**:
   - `extensions/prompt-resolver.ts` — NEW generalized module (~120 LOC, mirrors auditor-prompt.ts + adds override mode).
+  - `extensions/tool-prompt-wrapper.ts` — NEW module (wraps tool registrations via `wrapToolDefinition` to merge resolver output).
   - `extensions/command-hook-loader.ts` — NEW module (~150 LOC).
   - `extensions/contract-templating.ts` — NEW module (~80 LOC).
   - `extensions/auditor-prompt.ts` — refactor to delegate to prompt-resolver.ts (preserve public API).

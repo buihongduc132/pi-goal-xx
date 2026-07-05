@@ -2047,7 +2047,7 @@ Verification contract:
 			ctx.ui.notify(`Settings file: ${goalSettingsPath(ctx.cwd)}`, "info");
 			return;
 		}
-		const editorKeys = ["disabled", "provider", "model", "thinking_level", "subtaskDepth", "commandHooks", "contractTemplates"] as const;
+		const editorKeys = ["disabled", "provider", "model", "thinkingLevel", "subtaskDepth", "commandHooks", "contractTemplates"] as const;
 		while (true) {
 			const config = loadGoalSettingsFileConfig(ctx.cwd);
 			const options = settingsLines(config).map((line) => `  ${line}`);

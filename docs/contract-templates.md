@@ -27,7 +27,7 @@ Override the directory via `settings.contractsDir`.
 
 File extension: `.md` only.
 
-Snippet name charset: letters, digits, hyphens, underscores. `{{verifier-loop}}`, `{{e2e_required}}`, `{{check3}}` are valid.
+Snippet name charset: first character must be a letter or digit; subsequent characters may be letters, digits, hyphens, or underscores. `{{verifier-loop}}`, `{{e2e_required}}`, `{{check3}}` are valid; `{{_my_snippet}}` and `{{-fallback}}` are not (invalid first char).
 
 ## Compose patterns
 

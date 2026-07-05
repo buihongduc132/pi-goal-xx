@@ -113,16 +113,16 @@ const fileCache = new Map<string, CacheEntry>();
  * change) invalidates the cached entry automatically.
  */
 function readFileCached(absPath: string): string | undefined {
-	const cachedMiss = fileCache.get(absPath);
-	if (cachedMiss && cachedMiss.mtimeMs === -1) return cachedMiss.body;
+	// Cheap existence probe (no throw) — avoids the throw/catch overhead on
+	// every call for missing files while still re-checking on each invocation
+	// so files created after an initial miss are picked up (hot-reload safe).
+	if (!fs.existsSync(absPath)) return undefined;
 
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(absPath);
 	} catch {
-		// Missing or unreadable — cache the absence so we don't re-stat every
-		// call. Keyed by path alone with a sentinel mtime of -1.
-		fileCache.set(absPath, { mtimeMs: -1, body: undefined });
+		// Race: file vanished between existsSync and statSync. Treat as missing.
 		return undefined;
 	}
 
