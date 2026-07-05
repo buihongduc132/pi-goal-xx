@@ -23,6 +23,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { PromptConfig, PromptMode } from "./prompt-resolver.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -48,6 +49,24 @@ export interface AuditorResourceFilter {
 export interface AuditorSubscription {
 	event: string;
 	mode: "async";
+}
+
+/** Per-command hook configuration. */
+export interface CommandHookConfig {
+	/** "append" wraps built-in with pre/post; "override" replaces it. */
+	mode?: "append" | "override";
+	/** Prompt-only text (never evaluated as JS) appended before the command. */
+	preInline?: string;
+	/** Prompt-only text (never evaluated as JS) appended after the command. */
+	postInline?: string;
+}
+
+/** commandHooks block: gated by `enabled` (default false). */
+export interface CommandHooksConfig {
+	/** MUST be explicitly true to load any hooks. Defaults false. */
+	enabled?: boolean;
+	/** Per-command overrides keyed by command name (e.g. "goals", "goal-abort"). */
+	[command: string]: boolean | CommandHookConfig | undefined;
 }
 
 export interface GoalSettings {
@@ -80,6 +99,18 @@ export interface GoalSettings {
 	leaseMs?: number;
 	/** Heartbeat refresh interval in ms. Default 60000 (60s). */
 	heartbeatMs?: number;
+	/** UNIFIED: per-key prompt config (key → {mode, inline}). */
+	prompts?: Record<string, PromptConfig>;
+	/** UNIFIED: override the prompts directory (default `.pi/pi-goal-xx/prompts/`). */
+	promptsDir?: string;
+	/** UNIFIED: per-command pre/post/override hooks. Default off. */
+	commandHooks?: CommandHooksConfig;
+	/** UNIFIED: override the hooks directory (default `.pi/pi-goal-xx/hooks/`). */
+	hooksDir?: string;
+	/** UNIFIED: enable `{{snippet}}` expansion in verification contracts. Default true. */
+	contractTemplates?: boolean;
+	/** UNIFIED: override the contracts directory (default `.pi/pi-goal-xx/contracts/`). */
+	contractsDir?: string;
 }
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
@@ -106,6 +137,12 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"goalPrompt",
 	"leaseMs",
 	"heartbeatMs",
+	"prompts",
+	"promptsDir",
+	"commandHooks",
+	"hooksDir",
+	"contractTemplates",
+	"contractsDir",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -114,6 +151,113 @@ const AUDITOR_PROMPT_MODES = new Set<AuditorPromptMode>([
 	"local",
 	"global-local-merge",
 ]);
+
+/** All six unified prompt resolution modes. */
+const UNIFIED_PROMPT_MODES = new Set<PromptMode>([
+	"override",
+	"append",
+	"global-local",
+	"local",
+	"global-local-merge",
+	"off",
+]);
+
+/**
+ * Known runtime prompt keys. Tool-prompt overrides use the `tool-<toolName>`
+ * pattern and are matched by prefix rather than enumeration.
+ */
+const KNOWN_PROMPT_KEYS = new Set([
+	"goal-running",
+	"goal-continuation",
+	"goal-drafting",
+	"goal-tweak",
+	"goal-stale",
+	"goal-unfocused",
+	"auditor",
+]);
+
+/** Is `key` a recognized prompt key (enumerated or `tool-*`)? */
+function isKnownPromptKey(key: string): boolean {
+	return KNOWN_PROMPT_KEYS.has(key) || key.startsWith("tool-");
+}
+
+/** Validate + coerce a raw prompt config entry into PromptConfig. Throws on invalid. */
+function asPromptConfig(key: string, raw: unknown): PromptConfig | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const knownNested = new Set(["mode", "inline"]);
+	const unknownNested = Object.keys(rec).filter((k) => !knownNested.has(k));
+	if (unknownNested.length > 0) {
+		throw new Error(
+			`Unknown prompts.${key} nested key(s): ${unknownNested.join(", ")}`,
+		);
+	}
+	const cfg: PromptConfig = {};
+	const inline = asNonEmptyString(rec.inline);
+	if (inline) cfg.inline = inline;
+	if (rec.mode !== undefined) {
+		const mode = asNonEmptyString(rec.mode);
+		if (!mode || !UNIFIED_PROMPT_MODES.has(mode as PromptMode)) {
+			throw new Error(
+				`Invalid prompts.${key}.mode: ${String(rec.mode)} (must be one of ${[...UNIFIED_PROMPT_MODES].join(", ")})`,
+			);
+		}
+		cfg.mode = mode as PromptMode;
+	}
+	return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+/** Validate + coerce the prompts block. Throws on unknown keys / invalid shapes. */
+function asPromptsBlock(raw: unknown): Record<string, PromptConfig> | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const out: Record<string, PromptConfig> = {};
+	for (const [key, val] of Object.entries(rec)) {
+		if (!isKnownPromptKey(key)) {
+			throw new Error(`Unknown prompt key: ${key}`);
+		}
+		const cfg = asPromptConfig(key, val);
+		if (cfg) out[key] = cfg;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Validate + coerce the commandHooks block. */
+function asCommandHooksBlock(raw: unknown): CommandHooksConfig | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const out: CommandHooksConfig = {};
+	if (rec.enabled === true || rec.enabled === "true") out.enabled = true;
+	else out.enabled = false; // default false when block present
+	for (const [cmd, val] of Object.entries(rec)) {
+		if (cmd === "enabled") continue;
+		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
+		const cRec = val as Record<string, unknown>;
+		const knownHookNested = new Set(["mode", "preInline", "postInline"]);
+		const unknownHookNested = Object.keys(cRec).filter((k) => !knownHookNested.has(k));
+		if (unknownHookNested.length > 0) {
+			throw new Error(
+				`Unknown commandHooks.${cmd} nested key(s): ${unknownHookNested.join(", ")}`,
+			);
+		}
+		const cfg: CommandHookConfig = {};
+		const mode = asNonEmptyString(cRec.mode);
+		if (mode) {
+			if (mode !== "append" && mode !== "override") {
+				throw new Error(
+					`Invalid commandHooks.${cmd}.mode: ${mode} (must be append or override)`,
+				);
+			}
+			cfg.mode = mode as CommandHookConfig["mode"];
+		}
+		const preInline = asNonEmptyString(cRec.preInline);
+		if (preInline) cfg.preInline = preInline;
+		const postInline = asNonEmptyString(cRec.postInline);
+		if (postInline) cfg.postInline = postInline;
+		if (Object.keys(cfg).length > 0) out[cmd] = cfg;
+	}
+	return out;
+}
 
 /**
  * Resolve the path to the unified settings file.
@@ -271,10 +415,38 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (goalPromptMode) settings.goalPromptMode = goalPromptMode;
 	const goalPrompt = asNonEmptyString(record.goalPrompt);
 	if (goalPrompt) settings.goalPrompt = goalPrompt;
+	const prompts = asPromptsBlock(record.prompts);
+	if (prompts) settings.prompts = prompts;
+	const promptsDir = asNonEmptyString(record.promptsDir);
+	if (promptsDir) settings.promptsDir = promptsDir;
+	const commandHooks = asCommandHooksBlock(record.commandHooks);
+	if (commandHooks) settings.commandHooks = commandHooks;
+	const hooksDir = asNonEmptyString(record.hooksDir);
+	if (hooksDir) settings.hooksDir = hooksDir;
+	// contractTemplates defaults true (enabled). Explicit false persists.
+	if (record.contractTemplates === false || record.contractTemplates === "false") {
+		settings.contractTemplates = false;
+	} else {
+		settings.contractTemplates = true;
+	}
+	const contractsDir = asNonEmptyString(record.contractsDir);
+	if (contractsDir) settings.contractsDir = contractsDir;
 	const leaseMs = asPositiveInt(record.leaseMs) ?? 180_000;
 	settings.leaseMs = leaseMs;
 	const heartbeatMs = asPositiveInt(record.heartbeatMs) ?? 60_000;
 	settings.heartbeatMs = heartbeatMs;
+	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
+	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
+	if (!settings.prompts?.auditor) {
+		const legacyInline = settings.auditorPrompt;
+		const legacyMode = settings.auditorPromptMode;
+		if (legacyInline || legacyMode) {
+			settings.prompts = {
+				...(settings.prompts ?? {}),
+				auditor: { inline: legacyInline, mode: legacyMode },
+			};
+		}
+	}
 	return settings;
 }
 
@@ -317,6 +489,14 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		goalPrompt: fileConfig.goalPrompt,
 		leaseMs: fileConfig.leaseMs ?? 180_000,
 		heartbeatMs: fileConfig.heartbeatMs ?? 60_000,
+		prompts: fileConfig.prompts,
+		promptsDir: fileConfig.promptsDir,
+		commandHooks: fileConfig.commandHooks,
+		hooksDir: fileConfig.hooksDir,
+		contractTemplates: asBool(env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES) === true
+			? false
+			: (fileConfig.contractTemplates ?? true),
+		contractsDir: fileConfig.contractsDir,
 	};
 }
 
@@ -367,6 +547,12 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (auditorPrompt) clean.auditorPrompt = auditorPrompt;
 	if (goalPromptMode) clean.goalPromptMode = goalPromptMode;
 	if (goalPrompt) clean.goalPrompt = goalPrompt;
+	if (settings.prompts) clean.prompts = settings.prompts;
+	if (settings.promptsDir) clean.promptsDir = settings.promptsDir;
+	if (settings.commandHooks) clean.commandHooks = settings.commandHooks;
+	if (settings.hooksDir) clean.hooksDir = settings.hooksDir;
+	if (settings.contractTemplates === false) clean.contractTemplates = false;
+	if (settings.contractsDir) clean.contractsDir = settings.contractsDir;
 	if (leaseMs !== undefined && leaseMs !== 180_000) clean.leaseMs = leaseMs;
 	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
 	const configPath = goalSettingsPath(cwd);
@@ -388,6 +574,12 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.auditorPrompt) persisted.auditorPrompt = clean.auditorPrompt;
 	if (clean.goalPromptMode) persisted.goalPromptMode = clean.goalPromptMode;
 	if (clean.goalPrompt) persisted.goalPrompt = clean.goalPrompt;
+	if (clean.prompts) persisted.prompts = clean.prompts;
+	if (clean.promptsDir) persisted.promptsDir = clean.promptsDir;
+	if (clean.commandHooks) persisted.commandHooks = clean.commandHooks;
+	if (clean.hooksDir) persisted.hooksDir = clean.hooksDir;
+	if (clean.contractTemplates === false) persisted.contractTemplates = false;
+	if (clean.contractsDir) persisted.contractsDir = clean.contractsDir;
 	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
