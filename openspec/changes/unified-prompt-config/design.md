@@ -41,7 +41,8 @@ interface ResolvedPrompt { body: string; source: "inline" | "global" | "local" |
 function resolvePrompt(key: string, cfg: PromptConfig | undefined, cwd: string, hardcodedDefault: string): { final: string; injected?: string };
 ```
 
-`final` = mode `override` → `cfg.inline ?? file-body` : `hardcodedDefault + (resolved ? "\n\n" + resolved : "")`.
+- `final`: mode `override` → `cfg.inline ?? file-body`; otherwise → `hardcodedDefault + (resolved ? "\n\n" + resolved : "")`.
+- `injected`: the resolved persona/policy block (from file or inline) that was layered on top of (override) or appended to (append) the hardcodedDefault. Present whenever a body resolved; `undefined` when nothing resolved (mode `off` with no inline, or no file found). Callers that need just the resolved body (e.g. the auditor, which applies its own fact layer) read `injected` uniformly across modes.
 
 Caller (each prompt fn) does:
 ```typescript

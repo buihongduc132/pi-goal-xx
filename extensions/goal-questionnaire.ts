@@ -534,6 +534,8 @@ export async function showProposalDialog(
 }
 
 export function registerQuestionnaireTools(pi: ExtensionAPI): void {
+	const settings = loadGoalSettings(process.cwd());
+	const cwd = process.cwd();
 	pi.registerTool(wrapToolDefinition(defineTool({
 		name: QUESTION_TOOL_NAME,
 		label: "goal_question",
@@ -594,7 +596,7 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "", 0, 0);
 		},
-	}), loadGoalSettings(process.cwd()), process.cwd()));
+	}), settings, cwd));
 
 	pi.registerTool(wrapToolDefinition(defineTool({
 		name: QUESTIONNAIRE_TOOL_NAME,
@@ -675,5 +677,5 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 			});
 			return new Text(lines.join("\n"), 0, 0);
 		},
-	}), loadGoalSettings(process.cwd()), process.cwd()));
+	}), settings, cwd));
 }

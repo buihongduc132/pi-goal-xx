@@ -109,7 +109,7 @@ describe("expandContractTemplates — snippet expansion", () => {
 		assert.equal(r.expanded, "AABB");
 	});
 
-	it("no settings → no expansion (returns input verbatim)", () => {
+	it("undefined settings defaults contractTemplates=true → still expands", () => {
 		sb.writeLocal("x", "BODY");
 		const r = expandContractTemplates("{{x}}", sb.cwd, undefined);
 		// When settings undefined, contractTemplates defaults true → still expands.

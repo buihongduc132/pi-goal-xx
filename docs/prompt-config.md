@@ -1,6 +1,6 @@
 # Prompt configuration
 
-Unified resolution of **all 7 runtime prompts + auditor + every tool prompt field** via a single `prompt-resolver.ts`. Users can inject project-specific execution rules (delegation policy, TDD discipline, verifier-loop requirement, persona overrides) without forking.
+Unified resolution of **all 7 runtime prompts (including auditor) + every tool prompt field** via a single `prompt-resolver.ts`. Users can inject project-specific execution rules (delegation policy, TDD discipline, verifier-loop requirement, persona overrides) without forking.
 
 Resolution mirrors the proven auditor-prompt pattern, generalized with two new modes (`override`, `off`).
 
@@ -37,7 +37,7 @@ Tool prompts resolve at **extension load** (design D3). Editing a `tool-<name>.m
 | `global-local-merge` | Global + `\n\n` + local when both present. |
 | `off` | No injection even if files exist. Useful for tool prompts where injection is unwanted. |
 
-**Inline always wins**: if `prompts.<key>.inline` is set, it takes precedence over any file, regardless of mode (except `off` with no inline).
+**Inline always wins**: if `prompts.<key>.inline` is set, it takes precedence over any file, regardless of mode (inline is resolved before the mode check).
 
 ## File paths
 
@@ -66,7 +66,7 @@ Override the directory via `settings.promptsDir`.
 }
 ```
 
-Unknown prompt keys are rejected (`additionalProperties: false` semantics). Valid keys are the 7 runtime keys + `auditor` + any `tool-<name>` pattern.
+Unknown prompt keys are rejected (`additionalProperties: false` semantics). Valid keys are the 7 runtime keys (which include `auditor`) + any `tool-<name>` pattern.
 
 ## Backward compatibility
 
