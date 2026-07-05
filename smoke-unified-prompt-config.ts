@@ -55,7 +55,9 @@ section("(b) /goals hook pre/post with commandHooks.enabled=true");
 	await wrapped("ARG", { ui: { notify: () => {} } });
 	check(log[0] === "pre(ARG)", "pre-hook fired first");
 	check(log[1] === "builtin(ARG-tx)", "builtin received transformed args");
-	check(log[2] === "post(ARG)", "post-hook fired last");
+	// post receives EFFECTIVE args (post-pre-transform) per cubic #15 — what
+	// actually ran, not what user typed. Audit-logging wants the truth.
+	check(log[2] === "post(ARG-tx)", "post-hook fired last (with effective args)");
 
 	// enabled=false → no wrapping
 	const log2: string[] = [];
