@@ -242,18 +242,20 @@ export function resolvePrompt(
 		return { final: hardcodedDefault, source: "none" };
 	}
 
-	// Override mode REPLACES the hardcodedDefault entirely (persona-only
-	// prompts). Nothing is "injected" on top of the default — the block IS
-	// the final. We ALSO surface `injected` so callers that need just the
-	// resolved body (e.g. the auditor, which applies its own fact layer) can
-	// read it uniformly across modes.
-	if (mode === "override") {
+	// UNIFIED INLINE SEMANTICS (closes the off+inline divergence between
+	// the generic resolver and loadAuditorPrompt): inline ALWAYS wins as an
+	// override of the persona layer, regardless of mode. This matches the
+	// auditor's short-circuit and the spec invariant 'Inline always wins
+	// regardless of mode'. File-sourced bodies, by contrast, are mode-
+	// dependent: override replaces the default, append/global-local/local/
+	// global-local-merge prepend the default.
+	const isInline = block.source === "inline";
+	if (mode === "override" || isInline) {
 		return { final: block.body, injected: block.body, source: block.source };
 	}
 
-	// All other modes (append, global-local, local, global-local-merge, off
-	// with inline) are append-style: prepend the hardcodedDefault and inject
-	// the resolved block on top.
+	// File-sourced append-style modes: prepend the hardcodedDefault and
+	// inject the resolved block on top.
 	return {
 		final: `${hardcodedDefault}\n\n${block.body}`,
 		injected: block.body,
