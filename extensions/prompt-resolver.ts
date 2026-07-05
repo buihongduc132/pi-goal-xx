@@ -84,6 +84,12 @@ export interface ResolvedFinal {
 	 * mode replaces rather than injects; off mode with no inline; no config).
 	 */
 	injected?: string;
+	/**
+	 * Provenance of the resolved block: "inline" | "global" | "local" |
+	 * "merged" | "none". Lets callers (e.g. auditor-prompt migration) report
+	 * where the block originated without re-reading files.
+	 */
+	source: PromptSource;
 }
 
 /** Default prompts directory (relative to both home and cwd). */
@@ -232,13 +238,13 @@ export function resolvePrompt(
 	const mode = cfg?.mode ?? "global-local";
 
 	if (!block) {
-		return { final: hardcodedDefault };
+		return { final: hardcodedDefault, source: "none" };
 	}
 
 	// Override mode REPLACES the hardcodedDefault entirely (persona-only
 	// prompts). Nothing is "injected" — the block IS the final.
 	if (mode === "override") {
-		return { final: block.body };
+		return { final: block.body, source: block.source };
 	}
 
 	// All other modes (append, global-local, local, global-local-merge, off
@@ -247,5 +253,6 @@ export function resolvePrompt(
 	return {
 		final: `${hardcodedDefault}\n\n${block.body}`,
 		injected: block.body,
+		source: block.source,
 	};
 }

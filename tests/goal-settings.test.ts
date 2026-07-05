@@ -24,7 +24,7 @@ describe("parseGoalSettings — basic keys", () => {
 	});
 
 	it("returns defaults for empty object", () => {
-		assert.deepEqual(parseGoalSettings({}), { leaseMs: 180_000, heartbeatMs: 60_000 });
+		assert.deepEqual(parseGoalSettings({}), { leaseMs: 180_000, heartbeatMs: 60_000, contractTemplates: true });
 	});
 
 	it("parses booleans", () => {
