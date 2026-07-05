@@ -1,5 +1,8 @@
-## ADDED Requirements
+# command-hooks Specification
 
+## Purpose
+TBD - created by archiving change unified-prompt-config. Update Purpose after archive.
+## Requirements
 ### Requirement: Per-command pre/post hooks with append and override modes
 
 The system SHALL allow registering per-command hooks for any built-in `/goal-*` slash command. Each command key supports `mode: "append"` (default) wrapping the built-in handler with optional pre and post functions, or `mode: "override"` replacing the built-in handler entirely.
@@ -62,9 +65,10 @@ When both global and local hooks exist for the same command, the system SHALL ch
 
 ### Requirement: Override mode precedence
 
-For override mode, local wins over global. The local handler replaces the built-in and the global handler is not invoked.
+In override mode, the local handler SHALL supersede the global handler: the local handler replaces the built-in entirely and the global handler MUST NOT be invoked.
 
 #### Scenario: Local override supersedes global override
 
 - **WHEN** both global and local hooks for `goal-focus` are in override mode
 - **THEN** only the local handler runs; the global override is silently ignored
+
