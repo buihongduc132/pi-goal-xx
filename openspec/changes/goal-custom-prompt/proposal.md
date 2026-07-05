@@ -1,3 +1,12 @@
+## Status: SUPERSEDED by `unified-prompt-config`
+
+This change shipped (PR #8) and is now fully absorbed by `unified-prompt-config`,
+which generalizes the resolver to all 7 runtime prompts + auditor + tool prompts.
+Legacy `goalPrompt`/`goalPromptMode` keys continue to work as backward-compat
+aliases via `prompts.goal-running`. Retained for history.
+
+---
+
 ## Why
 
 pi-goal-xx lets users override the **auditor** prompt via file (`~/.pi/auditor-prompt.md`) or inline setting, but offers **no equivalent channel for the runtime goal/continuation prompts** that drive the active goal agent. Users cannot inject project-specific execution rules (e.g. "delegate implementation to a team", "no pauses during the goal", "verifier-loop required before completion") without forking pi-core or editing hardcoded prompt builders. The auditor pattern already solves this cleanly — we mirror it for the goal prompt.
