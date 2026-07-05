@@ -231,6 +231,11 @@ function asCommandHooksBlock(raw: unknown): CommandHooksConfig | undefined {
 	else out.enabled = false; // default false when block present
 	for (const [cmd, val] of Object.entries(rec)) {
 		if (cmd === "enabled") continue;
+		if (val === true) {
+			out[cmd] = { mode: "append" };
+			continue;
+		}
+		if (val === false) continue;
 		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
 		const cRec = val as Record<string, unknown>;
 		const knownHookNested = new Set(["mode", "preInline", "postInline"]);

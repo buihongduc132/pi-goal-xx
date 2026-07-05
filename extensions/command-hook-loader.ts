@@ -19,6 +19,7 @@
  */
 
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { GoalSettings, CommandHookConfig, CommandHooksConfig } from "./goal-settings.ts";
 
 /** Default hooks directory (relative to cwd). */
@@ -74,7 +75,9 @@ export async function loadHook(
 	const importer = opts.importer ?? (async (p: string) => {
 		// Native dynamic import of a .ts file; Node strips types when run with
 		// --experimental-strip-types (the extension runtime already uses it).
-		const mod = await import(/* @vite-ignore */ p);
+		// Convert to a file:// URL for cross-platform compatibility (Windows
+		// drive-letter paths otherwise throw ERR_UNSUPPORTED_ESM_URL_SCHEME).
+		const mod = await import(/* @vite-ignore */ pathToFileURL(p).href);
 		return mod as Partial<LoadedHook>;
 	});
 

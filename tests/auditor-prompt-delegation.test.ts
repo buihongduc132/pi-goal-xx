@@ -137,6 +137,23 @@ describe("loadAuditorPrompt — behavioral parity (preserved by migration)", () 
 		assert.equal(r.prompt, "INLINE");
 	});
 
+	// Regression (gemini C3): when prompts.auditor block is present (even
+	// without `inline`), legacy auditorPrompt MUST NOT leak through. The
+	// legacy key is an alias ONLY when the unified block is entirely absent.
+	it("unified prompts.auditor (no inline) does NOT fall back to legacy auditorPrompt", () => {
+		sb.writeLegacyLocal("LEGACY-LEAK");
+		const r = loadAuditorPrompt(
+			settings({ auditorPrompt: "LEGACY-INLINE-SHOULD-NOT-WIN", prompts: { auditor: { mode: "global-local" } } }),
+			sb.cwd,
+			DEFAULT_PROMPT,
+			sb.home,
+		);
+		// Unified block present → legacy inline is ignored; resolution falls
+		// through to the unified/legacy FILE path, never to legacy inline.
+		assert.notEqual(r.prompt, "LEGACY-INLINE-SHOULD-NOT-WIN");
+		assert.ok(!r.prompt.includes("LEGACY-INLINE-SHOULD-NOT-WIN"), "legacy inline must not win when unified block present");
+	});
+
 	it("global-local (default): local wins over global", () => {
 		sb.writeLegacyGlobal("GLOBAL");
 		sb.writeLegacyLocal("LOCAL");

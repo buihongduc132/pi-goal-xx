@@ -113,14 +113,15 @@ const fileCache = new Map<string, CacheEntry>();
  * change) invalidates the cached entry automatically.
  */
 function readFileCached(absPath: string): string | undefined {
+	const cachedMiss = fileCache.get(absPath);
+	if (cachedMiss && cachedMiss.mtimeMs === -1) return cachedMiss.body;
+
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(absPath);
 	} catch {
 		// Missing or unreadable — cache the absence so we don't re-stat every
 		// call. Keyed by path alone with a sentinel mtime of -1.
-		const cached = fileCache.get(absPath);
-		if (cached && cached.mtimeMs === -1) return cached.body;
 		fileCache.set(absPath, { mtimeMs: -1, body: undefined });
 		return undefined;
 	}

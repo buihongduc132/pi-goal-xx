@@ -129,6 +129,13 @@ describe("continuationPrompt — unified prompts.goal-continuation", () => {
 		assert.ok(out.includes("OVERRIDE-CONT"));
 		assert.ok(out.includes("pi_goal_continuation"), "outer marker preserved");
 		assert.ok(out.includes("test objective"));
+		// Regression (gemini C2): override branch MUST close the outer marker —
+		// an unclosed <pi_goal_continuation> breaks downstream parsers.
+		assert.ok(out.includes("</pi_goal_continuation>"), "outer marker closed under override");
+		const opens = (out.match(/<pi_goal_continuation/g) || []).length;
+		const closes = (out.match(/<\/pi_goal_continuation>/g) || []).length;
+		assert.equal(opens, 1, "exactly one open marker");
+		assert.equal(closes, 1, "exactly one close marker");
 	});
 });
 

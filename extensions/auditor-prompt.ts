@@ -184,7 +184,7 @@ export function loadAuditorPrompt(
 	const factLayer = opts?.factLayer;
 	const withFact = (body: string): string => (factLayer ? `${body}\n\n${factLayer}` : body);
 
-	const inline = (unifiedCfg?.inline ?? legacyInline)?.trim();
+	const inline = cfg.inline?.trim();
 	if (inline && inline.length > 0) {
 		return { prompt: withFact(inline), source: "inline" };
 	}

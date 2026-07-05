@@ -249,6 +249,7 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 			"</goal_override_instructions>",
 			...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal)] : []),
 			...[customGoalPromptBlock(settings, cwd)].filter((s) => s.length > 0),
+			"</pi_goal_continuation>",
 		].join("\n");
 	}
 	return [

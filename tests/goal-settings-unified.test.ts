@@ -120,6 +120,20 @@ test("commandHooks enabled=true round-trips", () => {
 	assert.equal(rch.enabled, true);
 });
 
+// Regression (gemini C5): boolean shorthand for a command hook MUST expand
+// to { mode: "append" } — the type allows it, the parser must honor it.
+test("commandHooks boolean shorthand `cmd: true` → { mode: 'append' }", () => {
+	const cwd = writeSettings({
+		commandHooks: { enabled: true, goals: true, "goal-tweak": false },
+	});
+	const parsed = loadGoalSettingsFileConfig(cwd);
+	const ch = parsed.commandHooks as { enabled?: boolean; goals?: { mode?: string }; "goal-tweak"?: { mode?: string } | false };
+	assert.equal(ch.enabled, true);
+	assert.deepEqual(ch.goals, { mode: "append" }, "true → append default");
+	assert.ok(!("goal-tweak" in ch) || ch["goal-tweak"] === undefined || ch["goal-tweak"] === false,
+		"false is dropped (no hook loaded)");
+});
+
 // ---------------------------------------------------------------------------
 // 5. contractTemplates boolean
 // ---------------------------------------------------------------------------
