@@ -28,6 +28,7 @@ import {
 	loadGoalSettingsFileConfig,
 	saveGoalSettingsFileConfig,
 	type GoalSettings,
+	type CommandHooksConfig,
 } from "./goal-settings.ts";
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
@@ -1988,12 +1989,28 @@ Verification contract:
 			parts.push(`extensions=[${(filter.extensions ?? []).join(",") || "none"}]`);
 			return parts.join(" ");
 		}
+		if (key === "prompts") {
+			const prompts = config.prompts ?? {};
+			const keys = Object.keys(prompts);
+			if (keys.length === 0) return "(none)";
+			return keys.map((k) => `${k}:${prompts[k]?.mode ?? "global-local"}${prompts[k]?.inline ? "+inline" : ""}`).join(", ");
+		}
+		if (key === "promptsDir") return config.promptsDir ?? ".pi/pi-goal-xx/prompts/";
+		if (key === "commandHooks") {
+			const ch = config.commandHooks;
+			if (!ch) return "disabled (default)";
+			const cmds = Object.keys(ch).filter((k) => k !== "enabled");
+			return `enabled=${ch.enabled === true}, cmds=[${cmds.join(",") || "none"}]`;
+		}
+		if (key === "hooksDir") return config.hooksDir ?? ".pi/pi-goal-xx/hooks/";
+		if (key === "contractTemplates") return config.contractTemplates === false ? "false" : "true";
+		if (key === "contractsDir") return config.contractsDir ?? ".pi/pi-goal-xx/contracts/";
 		const fallback = config[key as keyof GoalSettings];
 		return typeof fallback === "string" ? fallback : "(default)";
 	}
 
 	function settingsLines(config: GoalSettings): string[] {
-		return [
+		const lines = [
 			`disabled: ${settingsValue(config, "disabled")}`,
 			`provider: ${settingsValue(config, "provider")}`,
 			`model: ${settingsValue(config, "model")}`,
@@ -2007,6 +2024,19 @@ Verification contract:
 			`auditorExclude: ${settingsValue(config, "auditorExclude")}`,
 			`auditorInclude: ${settingsValue(config, "auditorInclude")}`,
 		];
+		// Unified prompt config (group 5). Legacy auditor keys are aliases of
+		// prompts.auditor — surface a migration hint when only legacy keys are set.
+		lines.push("─── Unified prompt config ───");
+		lines.push(`prompts: ${settingsValue(config, "prompts")}`);
+		lines.push(`promptsDir: ${settingsValue(config, "promptsDir")}`);
+		lines.push(`commandHooks: ${settingsValue(config, "commandHooks")}`);
+		lines.push(`hooksDir: ${settingsValue(config, "hooksDir")}`);
+		lines.push(`contractTemplates: ${settingsValue(config, "contractTemplates")}`);
+		lines.push(`contractsDir: ${settingsValue(config, "contractsDir")}`);
+		if ((config.auditorPrompt || config.auditorPromptMode) && !config.prompts?.auditor) {
+			lines.push("(hint: legacy auditorPrompt/auditorPromptMode are aliases of prompts.auditor)");
+		}
+		return lines;
 	}
 
 	async function handleSettingsMenu(ctx: ExtensionContext): Promise<void> {
@@ -2014,7 +2044,7 @@ Verification contract:
 			ctx.ui.notify(`Settings file: ${goalSettingsPath(ctx.cwd)}`, "info");
 			return;
 		}
-		const editorKeys = ["disabled", "provider", "model", "thinking_level", "subtaskDepth"] as const;
+		const editorKeys = ["disabled", "provider", "model", "thinking_level", "subtaskDepth", "commandHooks", "contractTemplates"] as const;
 		while (true) {
 			const config = loadGoalSettingsFileConfig(ctx.cwd);
 			const options = settingsLines(config).map((line) => `  ${line}`);
@@ -2034,6 +2064,20 @@ Verification contract:
 				const next = { ...config, disabled: !config.disabled };
 				saveGoalSettingsFileConfig(ctx.cwd, next);
 				ctx.ui.notify(`Settings saved:\n${settingsLines(loadGoalSettingsFileConfig(ctx.cwd)).join("\n")}`, "info");
+				continue;
+			}
+			if (key === "commandHooks") {
+				const cur = config.commandHooks?.enabled === true;
+				const next: GoalSettings = { ...config, commandHooks: { ...config.commandHooks, enabled: !cur } as CommandHooksConfig };
+				saveGoalSettingsFileConfig(ctx.cwd, next);
+				ctx.ui.notify(`commandHooks.enabled = ${!cur}\n${settingsLines(loadGoalSettingsFileConfig(ctx.cwd)).join("\n")}`, "info");
+				continue;
+			}
+			if (key === "contractTemplates") {
+				const cur = config.contractTemplates === false ? false : true;
+				const next: GoalSettings = { ...config, contractTemplates: !cur };
+				saveGoalSettingsFileConfig(ctx.cwd, next);
+				ctx.ui.notify(`contractTemplates = ${!cur}\n${settingsLines(loadGoalSettingsFileConfig(ctx.cwd)).join("\n")}`, "info");
 				continue;
 			}
 			if (key === "subtaskDepth") {
