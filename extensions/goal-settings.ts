@@ -437,13 +437,15 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	settings.heartbeatMs = heartbeatMs;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
 	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
+	// Read the raw mode value (not the legacy-validated one) so unified modes
+	// like "override" pass through when set via the legacy key.
 	if (!settings.prompts?.auditor) {
 		const legacyInline = settings.auditorPrompt;
-		const legacyMode = settings.auditorPromptMode;
-		if (legacyInline || legacyMode) {
+		const legacyModeRaw = asNonEmptyString(record.auditorPromptMode);
+		if (legacyInline || legacyModeRaw) {
 			settings.prompts = {
 				...(settings.prompts ?? {}),
-				auditor: { inline: legacyInline, mode: legacyMode },
+				auditor: { inline: legacyInline, mode: legacyModeRaw as PromptMode | undefined },
 			};
 		}
 	}
