@@ -1,6 +1,7 @@
 import type { GoalTask } from "./goal-record.ts";
 import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
 import type { GoalSettings } from "./goal-settings.ts";
+import { expandContractTemplates } from "./contract-templating.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
 
@@ -98,7 +99,11 @@ const CONVENTIONAL_SECTION_NAMES = [
  *
  * If no contract section is found, `verificationContract` is undefined.
  */
-export function extractVerificationContract(objective: string): { objective: string; verificationContract?: string } {
+export function extractVerificationContract(
+	objective: string,
+	cwd?: string,
+	settings?: GoalSettings,
+): { objective: string; verificationContract?: string } {
 	const lines = objective.replace(/\r/g, "").split("\n");
 	let contract: string | undefined;
 	const filtered: string[] = [];
@@ -114,9 +119,17 @@ export function extractVerificationContract(objective: string): { objective: str
 		}
 	}
 
+	// Expand {{snippet}} placeholders at write time (group 7, D6). Only the
+	// extracted contract is expanded; the objective body is left untouched.
+	let expandedContract = contract;
+	if (contract && cwd) {
+		const { expanded } = expandContractTemplates(contract, cwd, settings);
+		expandedContract = expanded || contract;
+	}
+
 	return {
 		objective: filtered.join("\n"),
-		verificationContract: contract || undefined,
+		verificationContract: expandedContract || undefined,
 	};
 }
 
