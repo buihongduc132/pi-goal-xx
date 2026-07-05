@@ -83,6 +83,7 @@ import {
 	type GoalLedgerEvent,
 } from "./goal-ledger.ts";
 import { buildCompactionSummary } from "./goal-compaction.ts";
+import { lazyWrapCommand } from "./command-hook-loader.ts";
 import {
 	archiveGoalFile,
 	atomicWriteGoalFile,
@@ -2130,101 +2131,107 @@ Verification contract:
 			await showGoalStatus(ctx);
 		},
 	};
-	pi.registerCommand("goal", {
+// Command-hook wrapping (group 6). Wraps each /goal-* command handler so
+// user hooks (default off) can pre/post/override when enabled in settings.
+function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: string, def: T): T {
+	return { ...def, handler: lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd()) as T["handler"] };
+}
+
+	pi.registerCommand("goal", wrapCmdDef("goal", {
 		description: "Show focused goal status. Discuss with /goals or /sisyphus; direct-start with /goals-set or /sisyphus-set; manage with /goal-list, /goal-focus, /goal-settings, /goal-tweak, /goal-clear, /goal-abort, /goal-pause, /goal-resume.",
 		handler: statusCommand.handler,
-	});
-	pi.registerCommand("goal-status", statusCommand);
-	pi.registerCommand("goal-list", {
+	}));
+	pi.registerCommand("goal-status", wrapCmdDef("goal-status", statusCommand));
+	pi.registerCommand("goal-list", wrapCmdDef("goal-list", {
 		description: "List all open pi goals and show which one this session is focused on.",
 		handler: async (_rawArgs, ctx) => {
 			reconcileFocusedGoalFromDisk(ctx);
 			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(openGoals(), ctx.cwd) }), "info");
 			updateUI(ctx);
 		},
-	});
-	pi.registerCommand("goal-focus", {
+	}));
+	pi.registerCommand("goal-focus", wrapCmdDef("goal-focus", {
 		description: "Choose which open goal this session should focus on.",
 		handler: async (_rawArgs, ctx) => {
 			await focusGoalCommand(ctx);
 		},
-	});
-	pi.registerCommand("goal-settings", {
+	}));
+	pi.registerCommand("goal-settings", wrapCmdDef("goal-settings", {
 		description: "Open pi-goal settings, including auditor provider/model/thinking_level.",
 		handler: async (_rawArgs, ctx) => {
 			await handleSettingsMenu(ctx);
 		},
-	});
+	}));
 
 	// /goals <topic>: discussion/research/grilling -> confirmed normal goal draft.
-	pi.registerCommand("goals", {
+	pi.registerCommand("goals", wrapCmdDef("goals", {
 		description: "Discuss a new goal. The agent clarifies, researches, or grills assumptions, then proposes a draft for confirmation.",
 		handler: async (rawArgs, ctx) => {
 			await handleGoalCommandTopic(rawArgs, ctx, "goal", { replace: false });
 		},
-	});
+	}));
 
 	// /sisyphus <topic>: discussion/grilling -> confirmed Sisyphus goal draft.
-	pi.registerCommand("sisyphus", {
+	pi.registerCommand("sisyphus", wrapCmdDef("sisyphus", {
 		description: "Discuss a Sisyphus goal. The agent grills ordered steps, done criteria, blockers, and boundaries before proposing a draft.",
 		handler: async (rawArgs: string, ctx: ExtensionContext) => {
 			await handleGoalCommandTopic(rawArgs, ctx, "sisyphus", { replace: false });
 		},
-	});
+	}));
 
 	// /goals-set <objective> and /sisyphus-set <objective>: direct creation, no drafting discussion.
-	pi.registerCommand("goals-set", {
+	pi.registerCommand("goals-set", wrapCmdDef("goals-set", {
 		description: "Immediately create and start a normal goal from the supplied objective. No draft discussion.",
 		handler: async (rawArgs, ctx) => {
 			handleDirectGoalSet(rawArgs, ctx, "goal");
 		},
-	});
-	pi.registerCommand("sisyphus-set", {
+	}));
+	pi.registerCommand("sisyphus-set", wrapCmdDef("sisyphus-set", {
 		description: "Immediately create and start a Sisyphus goal from the supplied objective. No draft discussion.",
 		handler: async (rawArgs, ctx) => {
 			handleDirectGoalSet(rawArgs, ctx, "sisyphus");
 		},
-	});
+	}));
 
 	// /goal-tweak [hint]: drafting on top of the current goal -> edits the active goal file.
-	pi.registerCommand("goal-tweak", {
+	pi.registerCommand("goal-tweak", wrapCmdDef("goal-tweak", {
 		description: "Refine the current goal via a drafting interview. The agent asks what to change, then edits the active goal file with the revised objective.",
 		handler: async (rawArgs, ctx) => {
 			await startGoalTweakDrafting(rawArgs, ctx);
 		},
-	});
+	}));
 
 	// /goal-clear: archive the current goal.
-	pi.registerCommand("goal-clear", {
+	pi.registerCommand("goal-clear", wrapCmdDef("goal-clear", {
 		description: "Archive the current goal.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalClear(ctx);
 		},
-	});
+	}));
 
 	// /goal-abort: abandon and archive the current goal, or cancel drafting.
-	pi.registerCommand("goal-abort", {
+	pi.registerCommand("goal-abort", wrapCmdDef("goal-abort", {
 		description: "Abort the current goal and archive it, or cancel an in-progress drafting flow.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalAbort(ctx);
 		},
-	});
+	}));
 
 	// /goal-pause: pause the currently running goal.
-	pi.registerCommand("goal-pause", {
+	pi.registerCommand("goal-pause", wrapCmdDef("goal-pause", {
 		description: "Pause the currently running goal. Esc also pauses while a goal is running.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalPause(ctx);
 		},
-	});
+	}));
 
 	// /goal-resume: resume a paused goal.
-	pi.registerCommand("goal-resume", {
+	pi.registerCommand("goal-resume", wrapCmdDef("goal-resume", {
 		description: "Resume a paused goal.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalResume(ctx);
 		},
-	});
+	}));
 
 
 	registerQuestionnaireTools(pi);
