@@ -5,6 +5,8 @@ import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, visib
 import { truncateText } from "./goal-core.ts";
 import { QUESTIONNAIRE_TOOL_NAME, QUESTION_TOOL_NAME } from "./goal-tool-names.ts";
 import type { GoalDraftingFocus } from "./goal-draft.ts";
+import { wrapToolDefinition } from "./tool-prompt-wrapper.ts";
+import { loadGoalSettings } from "./goal-settings.ts";
 
 export interface GoalQuestionnaireQuestion {
 	id: string;
@@ -532,7 +534,9 @@ export async function showProposalDialog(
 }
 
 export function registerQuestionnaireTools(pi: ExtensionAPI): void {
-	pi.registerTool(defineTool({
+	const settings = loadGoalSettings(process.cwd());
+	const cwd = process.cwd();
+	pi.registerTool(wrapToolDefinition(defineTool({
 		name: QUESTION_TOOL_NAME,
 		label: "goal_question",
 		description:
@@ -592,9 +596,9 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "", 0, 0);
 		},
-	}));
+	}), settings, cwd));
 
-	pi.registerTool(defineTool({
+	pi.registerTool(wrapToolDefinition(defineTool({
 		name: QUESTIONNAIRE_TOOL_NAME,
 		label: "goal_questionnaire",
 		description:
@@ -673,5 +677,5 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 			});
 			return new Text(lines.join("\n"), 0, 0);
 		},
-	}));
+	}), settings, cwd));
 }

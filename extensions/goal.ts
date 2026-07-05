@@ -28,6 +28,7 @@ import {
 	loadGoalSettingsFileConfig,
 	saveGoalSettingsFileConfig,
 	type GoalSettings,
+	type CommandHooksConfig,
 } from "./goal-settings.ts";
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
@@ -83,6 +84,8 @@ import {
 	type GoalLedgerEvent,
 } from "./goal-ledger.ts";
 import { buildCompactionSummary } from "./goal-compaction.ts";
+import { lazyWrapCommand } from "./command-hook-loader.ts";
+import { wrapToolDefinition } from "./tool-prompt-wrapper.ts";
 import {
 	archiveGoalFile,
 	atomicWriteGoalFile,
@@ -1663,7 +1666,7 @@ Verification contract:
 			pi.sendMessage<GoalEventDetails>(
 				{
 					customType: GOAL_EVENT_ENTRY,
-					content: goalTweakDraftingPrompt(focused, trimmed),
+					content: goalTweakDraftingPrompt(focused, trimmed, loadGoalSettings(ctx.cwd), ctx.cwd),
 					display: false,
 					details: {
 						kind: "drafting",
@@ -1702,7 +1705,7 @@ Verification contract:
 		};
 		syncGoalTools();
 		try {
-			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus, loadGoalSettings(ctx.cwd), ctx.cwd), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
 		} catch (err) {
 			ctx.ui.notify(`Could not start ${label.toLowerCase()}: ${(err as Error).message}`, "error");
 		}
@@ -1860,7 +1863,10 @@ Verification contract:
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
-		const { objective, verificationContract } = extractVerificationContract(raw);
+		const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+		if (missingSnippets && missingSnippets.length > 0) {
+			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+		}
 		clearContinuationState();
 		clearActiveAccounting();
 		confirmationIntent = null;
@@ -1986,12 +1992,28 @@ Verification contract:
 			parts.push(`extensions=[${(filter.extensions ?? []).join(",") || "none"}]`);
 			return parts.join(" ");
 		}
+		if (key === "prompts") {
+			const prompts = config.prompts ?? {};
+			const keys = Object.keys(prompts);
+			if (keys.length === 0) return "(none)";
+			return keys.map((k) => `${k}:${prompts[k]?.mode ?? "global-local"}${prompts[k]?.inline ? "+inline" : ""}`).join(", ");
+		}
+		if (key === "promptsDir") return config.promptsDir ?? ".pi/pi-goal-xx/prompts/";
+		if (key === "commandHooks") {
+			const ch = config.commandHooks;
+			if (!ch) return "disabled (default)";
+			const cmds = Object.keys(ch).filter((k) => k !== "enabled");
+			return `enabled=${ch.enabled === true}, cmds=[${cmds.join(",") || "none"}]`;
+		}
+		if (key === "hooksDir") return config.hooksDir ?? ".pi/pi-goal-xx/hooks/";
+		if (key === "contractTemplates") return config.contractTemplates === false ? "false" : "true";
+		if (key === "contractsDir") return config.contractsDir ?? ".pi/pi-goal-xx/contracts/";
 		const fallback = config[key as keyof GoalSettings];
 		return typeof fallback === "string" ? fallback : "(default)";
 	}
 
 	function settingsLines(config: GoalSettings): string[] {
-		return [
+		const lines = [
 			`disabled: ${settingsValue(config, "disabled")}`,
 			`provider: ${settingsValue(config, "provider")}`,
 			`model: ${settingsValue(config, "model")}`,
@@ -2005,6 +2027,19 @@ Verification contract:
 			`auditorExclude: ${settingsValue(config, "auditorExclude")}`,
 			`auditorInclude: ${settingsValue(config, "auditorInclude")}`,
 		];
+		// Unified prompt config (group 5). Legacy auditor keys are aliases of
+		// prompts.auditor — surface a migration hint when only legacy keys are set.
+		lines.push("─── Unified prompt config ───");
+		lines.push(`prompts: ${settingsValue(config, "prompts")}`);
+		lines.push(`promptsDir: ${settingsValue(config, "promptsDir")}`);
+		lines.push(`commandHooks: ${settingsValue(config, "commandHooks")}`);
+		lines.push(`hooksDir: ${settingsValue(config, "hooksDir")}`);
+		lines.push(`contractTemplates: ${settingsValue(config, "contractTemplates")}`);
+		lines.push(`contractsDir: ${settingsValue(config, "contractsDir")}`);
+		if ((config.auditorPrompt || config.auditorPromptMode) && !config.prompts?.auditor) {
+			lines.push("(hint: legacy auditorPrompt/auditorPromptMode are aliases of prompts.auditor)");
+		}
+		return lines;
 	}
 
 	async function handleSettingsMenu(ctx: ExtensionContext): Promise<void> {
@@ -2012,7 +2047,7 @@ Verification contract:
 			ctx.ui.notify(`Settings file: ${goalSettingsPath(ctx.cwd)}`, "info");
 			return;
 		}
-		const editorKeys = ["disabled", "provider", "model", "thinking_level", "subtaskDepth"] as const;
+		const editorKeys = ["disabled", "provider", "model", "thinkingLevel", "subtaskDepth", "commandHooks", "contractTemplates"] as const;
 		while (true) {
 			const config = loadGoalSettingsFileConfig(ctx.cwd);
 			const options = settingsLines(config).map((line) => `  ${line}`);
@@ -2032,6 +2067,20 @@ Verification contract:
 				const next = { ...config, disabled: !config.disabled };
 				saveGoalSettingsFileConfig(ctx.cwd, next);
 				ctx.ui.notify(`Settings saved:\n${settingsLines(loadGoalSettingsFileConfig(ctx.cwd)).join("\n")}`, "info");
+				continue;
+			}
+			if (key === "commandHooks") {
+				const cur = config.commandHooks?.enabled === true;
+				const next: GoalSettings = { ...config, commandHooks: { ...config.commandHooks, enabled: !cur } as CommandHooksConfig };
+				saveGoalSettingsFileConfig(ctx.cwd, next);
+				ctx.ui.notify(`commandHooks.enabled = ${!cur}\n${settingsLines(loadGoalSettingsFileConfig(ctx.cwd)).join("\n")}`, "info");
+				continue;
+			}
+			if (key === "contractTemplates") {
+				const cur = config.contractTemplates === false ? false : true;
+				const next: GoalSettings = { ...config, contractTemplates: !cur };
+				saveGoalSettingsFileConfig(ctx.cwd, next);
+				ctx.ui.notify(`contractTemplates = ${!cur}\n${settingsLines(loadGoalSettingsFileConfig(ctx.cwd)).join("\n")}`, "info");
 				continue;
 			}
 			if (key === "subtaskDepth") {
@@ -2130,106 +2179,117 @@ Verification contract:
 			await showGoalStatus(ctx);
 		},
 	};
-	pi.registerCommand("goal", {
+// Tool-prompt wrapping (group 4, D3). Resolves tool-<name> prompts at load.
+function regTool<T extends { name: string; promptSnippet?: string; promptGuidelines?: string[] }>(def: T): T {
+	return wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+}
+
+// Command-hook wrapping (group 6). Wraps each /goal-* command handler so
+// user hooks (default off) can pre/post/override when enabled in settings.
+function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: string, def: T): T {
+	return { ...def, handler: lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd()) as T["handler"] };
+}
+
+	pi.registerCommand("goal", wrapCmdDef("goal", {
 		description: "Show focused goal status. Discuss with /goals or /sisyphus; direct-start with /goals-set or /sisyphus-set; manage with /goal-list, /goal-focus, /goal-settings, /goal-tweak, /goal-clear, /goal-abort, /goal-pause, /goal-resume.",
 		handler: statusCommand.handler,
-	});
-	pi.registerCommand("goal-status", statusCommand);
-	pi.registerCommand("goal-list", {
+	}));
+	pi.registerCommand("goal-status", wrapCmdDef("goal-status", statusCommand));
+	pi.registerCommand("goal-list", wrapCmdDef("goal-list", {
 		description: "List all open pi goals and show which one this session is focused on.",
 		handler: async (_rawArgs, ctx) => {
 			reconcileFocusedGoalFromDisk(ctx);
 			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(openGoals(), ctx.cwd) }), "info");
 			updateUI(ctx);
 		},
-	});
-	pi.registerCommand("goal-focus", {
+	}));
+	pi.registerCommand("goal-focus", wrapCmdDef("goal-focus", {
 		description: "Choose which open goal this session should focus on.",
 		handler: async (_rawArgs, ctx) => {
 			await focusGoalCommand(ctx);
 		},
-	});
-	pi.registerCommand("goal-settings", {
+	}));
+	pi.registerCommand("goal-settings", wrapCmdDef("goal-settings", {
 		description: "Open pi-goal settings, including auditor provider/model/thinking_level.",
 		handler: async (_rawArgs, ctx) => {
 			await handleSettingsMenu(ctx);
 		},
-	});
+	}));
 
 	// /goals <topic>: discussion/research/grilling -> confirmed normal goal draft.
-	pi.registerCommand("goals", {
+	pi.registerCommand("goals", wrapCmdDef("goals", {
 		description: "Discuss a new goal. The agent clarifies, researches, or grills assumptions, then proposes a draft for confirmation.",
 		handler: async (rawArgs, ctx) => {
 			await handleGoalCommandTopic(rawArgs, ctx, "goal", { replace: false });
 		},
-	});
+	}));
 
 	// /sisyphus <topic>: discussion/grilling -> confirmed Sisyphus goal draft.
-	pi.registerCommand("sisyphus", {
+	pi.registerCommand("sisyphus", wrapCmdDef("sisyphus", {
 		description: "Discuss a Sisyphus goal. The agent grills ordered steps, done criteria, blockers, and boundaries before proposing a draft.",
 		handler: async (rawArgs: string, ctx: ExtensionContext) => {
 			await handleGoalCommandTopic(rawArgs, ctx, "sisyphus", { replace: false });
 		},
-	});
+	}));
 
 	// /goals-set <objective> and /sisyphus-set <objective>: direct creation, no drafting discussion.
-	pi.registerCommand("goals-set", {
+	pi.registerCommand("goals-set", wrapCmdDef("goals-set", {
 		description: "Immediately create and start a normal goal from the supplied objective. No draft discussion.",
 		handler: async (rawArgs, ctx) => {
 			handleDirectGoalSet(rawArgs, ctx, "goal");
 		},
-	});
-	pi.registerCommand("sisyphus-set", {
+	}));
+	pi.registerCommand("sisyphus-set", wrapCmdDef("sisyphus-set", {
 		description: "Immediately create and start a Sisyphus goal from the supplied objective. No draft discussion.",
 		handler: async (rawArgs, ctx) => {
 			handleDirectGoalSet(rawArgs, ctx, "sisyphus");
 		},
-	});
+	}));
 
 	// /goal-tweak [hint]: drafting on top of the current goal -> edits the active goal file.
-	pi.registerCommand("goal-tweak", {
+	pi.registerCommand("goal-tweak", wrapCmdDef("goal-tweak", {
 		description: "Refine the current goal via a drafting interview. The agent asks what to change, then edits the active goal file with the revised objective.",
 		handler: async (rawArgs, ctx) => {
 			await startGoalTweakDrafting(rawArgs, ctx);
 		},
-	});
+	}));
 
 	// /goal-clear: archive the current goal.
-	pi.registerCommand("goal-clear", {
+	pi.registerCommand("goal-clear", wrapCmdDef("goal-clear", {
 		description: "Archive the current goal.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalClear(ctx);
 		},
-	});
+	}));
 
 	// /goal-abort: abandon and archive the current goal, or cancel drafting.
-	pi.registerCommand("goal-abort", {
+	pi.registerCommand("goal-abort", wrapCmdDef("goal-abort", {
 		description: "Abort the current goal and archive it, or cancel an in-progress drafting flow.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalAbort(ctx);
 		},
-	});
+	}));
 
 	// /goal-pause: pause the currently running goal.
-	pi.registerCommand("goal-pause", {
+	pi.registerCommand("goal-pause", wrapCmdDef("goal-pause", {
 		description: "Pause the currently running goal. Esc also pauses while a goal is running.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalPause(ctx);
 		},
-	});
+	}));
 
 	// /goal-resume: resume a paused goal.
-	pi.registerCommand("goal-resume", {
+	pi.registerCommand("goal-resume", wrapCmdDef("goal-resume", {
 		description: "Resume a paused goal.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalResume(ctx);
 		},
-	});
+	}));
 
 
 	registerQuestionnaireTools(pi);
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "get_goal",
 		label: "Get Goal",
 		description: "Get the current pi goal for this session: objective, status, auto-continue, usage, and local file paths.",
@@ -2272,9 +2332,9 @@ Verification contract:
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "create_goal",
 		label: "Create Goal",
 		description: "Create a new active pi goal and focus it. Hidden outside drafting flows; propose_goal_draft is the normal commit path.",
@@ -2303,7 +2363,7 @@ Verification contract:
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// Agent's goal-confirmation entry point. Shows the user a full plain-text
 	// draft report with two choices: [Confirm] (creates the goal) or
@@ -2311,7 +2371,7 @@ Verification contract:
 	// Schema gates enforce focus-vs-sisyphus consistency; draftId is ignored for
 	// one-release compatibility with older prompt residue.
 	// In headless mode (no UI), auto-confirms — harness-friendly.
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_DRAFT_TOOL_NAME,
 		label: "Propose Goal Draft",
 		description: "During /goals or /sisyphus intent discussion, propose the goal draft to the user. The user sees a full plain-text confirmation report and chooses Confirm (creates the goal) or Continue Chatting (returns control to you to refine). REPLACES create_goal during discussion-based creation.",
@@ -2430,7 +2490,10 @@ ${objective}` : objective,
 
 			if (decision.decision === "confirm") {
 				// Extract verification contract from objective before creation
-				const { objective: cleanedObjective, verificationContract } = extractVerificationContract(objective);
+				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(objective, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
 				const config: GoalCreationConfig = {
 					objective: cleanedObjective,
 					autoContinue: autoContinueFlag,
@@ -2497,9 +2560,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_TWEAK_TOOL_NAME,
 		label: "Propose Goal Tweak",
 		description: "Propose a goal tweak or auto-start the /goal-tweak drafting flow. When a goal is active or paused and no /goal-tweak flow is active, calling this auto-starts the drafting interview; inside an active flow it presents the revised goal for confirmation.",
@@ -2633,7 +2696,10 @@ ${objective}` : objective,
 					state.goal = { ...state.goal, skipAuditor: !decision.auditorEnabled };
 				}
 				// Extract verification contract from revised objective
-				const { objective: cleanedObjective, verificationContract } = extractVerificationContract(newObjective);
+				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
 				// Apply the tweak: write the new objective to disk authoritatively.
 				const next: GoalRecord = {
 					...state.goal,
@@ -2718,9 +2784,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "complete_goal",
 		label: "Complete Goal",
 		description: "Mark the current active or paused pi goal complete. Only call this when the goal objective is actually achieved — no required work remains.",
@@ -3187,9 +3253,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: "pause_goal",
 		label: "Pause Goal",
 		description: "Pause the active pi goal and report a blocker to the user. The user must /goal-resume, /goal-tweak, or /goal-clear before work continues.",
@@ -3268,9 +3334,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: ABORT_GOAL_TOOL_NAME,
 		label: "Abort Goal",
 		description: "Abort the current active or paused pi goal and archive it without marking it complete.",
@@ -3349,9 +3415,9 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: SISYPHUS_STEP_TOOL_NAME,
 		label: "Sisyphus Step Complete (Legacy)",
 		description: "Legacy compatibility tool. Current Sisyphus mode is a prompt/criteria style and no longer uses schema-tracked step completion.",
@@ -3378,10 +3444,10 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// ── propose_task_list ──────────────────────────────────────────────────
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_TASK_LIST_TOOL_NAME,
 		label: "Propose Task List",
 		description: "Propose a structured task list for the current goal. Mirrors the propose_goal_tweak pattern: shows a confirmation dialog and stops the turn.",
@@ -3535,10 +3601,10 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// ── complete_task ─────────────────────────────────────────────────────
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: COMPLETE_TASK_TOOL_NAME,
 		label: "Complete Task",
 		description: "Mark a task as complete within the current goal's task list. Does NOT stop the turn — the agent can continue working.",
@@ -3651,10 +3717,10 @@ ${objective}` : objective,
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	// ── skip_task ─────────────────────────────────────────────────────────
-	pi.registerTool(defineTool({
+	pi.registerTool(regTool(defineTool({
 		name: SKIP_TASK_TOOL_NAME,
 		label: "Skip Task",
 		description: "Skip a pending task in the current goal's task list. Does NOT stop the turn — the agent can continue working.",
@@ -3762,7 +3828,7 @@ promptGuidelines: [
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
 		},
-	}));
+	})))
 
 	pi.on("context", async (event): Promise<{ messages: typeof event.messages } | undefined> => {
 		let changed = false;
@@ -3786,7 +3852,7 @@ promptGuidelines: [
 			const details = asRecord(candidate.details) ?? {};
 			return {
 				...message,
-				content: staleContinuationPrompt(queuedGoalId, state.goal),
+				content: staleContinuationPrompt(queuedGoalId, state.goal, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined),
 				display: false,
 				details: {
 					...details,
@@ -4018,7 +4084,7 @@ promptGuidelines: [
 				} catch {}
 				updateUI(ctx);
 				return {
-					systemPrompt: `${currentSystemPrompt()}\n\n${staleContinuationPrompt(incomingGoalId, state.goal)}`,
+					systemPrompt: `${currentSystemPrompt()}\n\n${staleContinuationPrompt(incomingGoalId, state.goal, loadGoalSettings(ctx.cwd), ctx.cwd)}`,
 				};
 			}
 			checkpointGoalId = null;
@@ -4035,7 +4101,7 @@ promptGuidelines: [
 			runningGoalId = null;
 			const openCount = openGoals().length;
 			if (openCount > 0) {
-				return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount)}` };
+				return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount, loadGoalSettings(ctx.cwd), ctx.cwd)}` };
 			}
 			return;
 		}
@@ -4043,7 +4109,7 @@ promptGuidelines: [
 		if (!state.goal) {
 			runningGoalId = null;
 			const openCount = openGoals().length;
-			if (openCount > 0) return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount)}` };
+			if (openCount > 0) return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount, loadGoalSettings(ctx.cwd), ctx.cwd)}` };
 			return;
 		}
 		runningGoalId = state.goal.status === "active" ? state.goal.id : null;

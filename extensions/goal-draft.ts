@@ -1,4 +1,7 @@
 import type { GoalTask } from "./goal-record.ts";
+import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
+import type { GoalSettings } from "./goal-settings.ts";
+import { expandContractTemplates } from "./contract-templating.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
 
@@ -96,7 +99,11 @@ const CONVENTIONAL_SECTION_NAMES = [
  *
  * If no contract section is found, `verificationContract` is undefined.
  */
-export function extractVerificationContract(objective: string): { objective: string; verificationContract?: string } {
+export function extractVerificationContract(
+	objective: string,
+	cwd?: string,
+	settings?: GoalSettings,
+): { objective: string; verificationContract?: string; missingSnippets?: string[] } {
 	const lines = objective.replace(/\r/g, "").split("\n");
 	let contract: string | undefined;
 	const filtered: string[] = [];
@@ -112,9 +119,22 @@ export function extractVerificationContract(objective: string): { objective: str
 		}
 	}
 
+	// Expand {{snippet}} placeholders at write time (group 7, D6). Only the
+	// extracted contract is expanded; the objective body is left untouched.
+	// Uses `cwd ?? "."` so globally configured contract templates still
+	// resolve when the caller has no cwd (e.g. headless/test paths).
+	let expandedContract = contract;
+	let missingSnippets: string[] = [];
+	if (contract) {
+		const { expanded, warnings } = expandContractTemplates(contract, cwd ?? ".", settings);
+		expandedContract = expanded || contract;
+		missingSnippets = warnings;
+	}
+
 	return {
 		objective: filtered.join("\n"),
-		verificationContract: contract || undefined,
+		verificationContract: expandedContract || undefined,
+		missingSnippets: missingSnippets.length > 0 ? missingSnippets : undefined,
 	};
 }
 
@@ -200,7 +220,30 @@ export function validateGoalDraftProposal(input: DraftProposalInput): DraftPropo
 	return { ok: true, objective, expectedSisyphus };
 }
 
-export function goalDraftingPrompt(topic: string, focus: GoalDraftingFocus): string {
+export function goalDraftingPrompt(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
+	const overrideBody = resolveGoalDraftingOverride(settings, cwd);
+	if (overrideBody) return overrideBody;
+	return goalDraftingPromptBase(topic, focus) + resolveGoalDraftingBlock(settings, cwd);
+}
+
+function resolveGoalDraftingOverride(settings: GoalSettings | undefined, cwd: string | undefined): string | undefined {
+	if (!settings?.prompts) return undefined;
+	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
+	if (!cfg || cfg.mode !== "override") return undefined;
+	const resolved = resolvePrompt("goal-drafting", cfg, cwd ?? ".", "", { promptsDir: settings.promptsDir });
+	return resolved.source === "none" ? undefined : resolved.final;
+}
+
+function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
+	if (!settings?.prompts) return "";
+	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
+	if (!cfg) return "";
+	const resolved = resolvePrompt("goal-drafting", cfg, cwd ?? ".", "", { promptsDir: settings.promptsDir });
+	if (!resolved.injected) return "";
+	return `\n[PI GOAL CUSTOM PROMPT key=goal-drafting source=${resolved.source}]\n<goal_custom_prompt>\n${resolved.injected}\n</goal_custom_prompt>`;
+}
+
+function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus): string {
 	const safeTopic = promptSafeObjective(topic.trim() || "(no topic provided — ask the user what they want to accomplish)");
 	const header = focus === "sisyphus"
 		? "[GOAL CONFIRMATION focus=sisyphus]\nThe user invoked Sisyphus intent discussion (/sisyphus). Help turn their request into a confirmed goal contract. Do NOT start substantive work yet."

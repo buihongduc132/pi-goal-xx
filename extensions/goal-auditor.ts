@@ -147,7 +147,26 @@ export function buildGoalAuditorPrompt(args: {
 	verificationSummary?: string | null;
 	settings?: GoalSettings;
 }): string {
-	return [
+	const { persona, factLayer } = buildAuditorPromptParts(args);
+	return `${persona}\n\n${factLayer}`;
+}
+
+/**
+ * Build the auditor prompt split into a replaceable PERSONA preamble and an
+ * always-present FACT LAYER (objective, summaries, contract, checklist).
+ *
+ * Override resolution replaces ONLY the persona; the fact layer is structurally
+ * guaranteed present so the auditor can always identify the goal under audit.
+ * (Spec: prompt-config-resolution — "Goal data always injected".)
+ */
+export function buildAuditorPromptParts(args: {
+	goal: GoalRecord;
+	completionSummary?: string | null;
+	detailedSummary: string;
+	verificationSummary?: string | null;
+	settings?: GoalSettings;
+}): { persona: string; factLayer: string } {
+	const persona = [
 		"You are the independent completion auditor for pi-goal.",
 		"The executor claims the goal is complete. Your job is to decide whether the user's objective is actually satisfied.",
 		"Be skeptical and semantic. Do not approve from paperwork, intent, file count, word count, build success, or a plausible summary alone.",
@@ -157,7 +176,8 @@ export function buildGoalAuditorPrompt(args: {
 		"Return a concise audit report. The final line MUST be exactly one of:",
 		"<approved/>",
 		"<disapproved/>",
-		"",
+	].join("\n");
+	const factLayer = [
 		"Goal objective:",
 		"<objective>",
 		capPromptField(args.goal.objective, "objective"),
@@ -212,6 +232,7 @@ export function buildGoalAuditorPrompt(args: {
 		"  - When producing final report: report_auditor_progress(label='Producing report...', percentage=90)",
 		"This is purely for user visibility and does not affect the audit outcome.",
 	].join("\n");
+	return { persona, factLayer };
 }
 
 /** Tool name for auditor progress reporting */
@@ -463,9 +484,14 @@ export async function runGoalCompletionAuditor(args: {
 			patternCache,
 		);
 
-		// Resolve the auditor prompt. Inline override > file-based > hardcoded fallback.
-		const hardcodedDefault = buildGoalAuditorPrompt(args);
-		const resolvedPrompt = loadAuditorPrompt(config, args.ctx.cwd, hardcodedDefault);
+		// Resolve the auditor prompt. The FACT LAYER (objective, summaries,
+		// contract, checklist) is structurally guaranteed present in every mode —
+		// override replaces ONLY the persona preamble. (Spec: "Goal data always
+		// injected".) Legacy modes append/prepend the resolved block onto the
+		// full default (persona+fact).
+		const { persona: defaultPersona, factLayer } = buildAuditorPromptParts(args);
+		const hardcodedDefault = `${defaultPersona}\n\n${factLayer}`;
+		const resolvedPrompt = loadAuditorPrompt(config, args.ctx.cwd, hardcodedDefault, undefined, { factLayer });
 
 		// Forensic trace: log the audit start with a bounded preview of the prompt
 		// and the resolved resource counts. Never throws.

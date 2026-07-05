@@ -221,9 +221,12 @@ describe("runGoalCompletionAuditor — prompt resolution", () => {
 				return { session };
 			},
 		});
-		assert.equal(promptedText, "INLINE-OVERRIDE-PROMPT");
-		// The default prompt with the objective is NOT used.
-		assert.doesNotMatch(promptedText, /UNIQUE-OBJECTIVE-MARKER/);
+		// SPEC (prompt-config-resolution "Goal data always injected"): the fact
+		// layer (objective + summaries + checklist) is ALWAYS concatenated, even
+		// under inline override — the auditor must identify the goal under audit.
+		assert.ok(promptedText.startsWith("INLINE-OVERRIDE-PROMPT"));
+		assert.match(promptedText, /UNIQUE-OBJECTIVE-MARKER/);
+		assert.match(promptedText, /<objective>/);
 	});
 
 	it("uses local file prompt when present (global-local mode default)", async () => {
@@ -247,7 +250,10 @@ describe("runGoalCompletionAuditor — prompt resolution", () => {
 				return { session };
 			},
 		});
-		assert.equal(promptedText, "LOCAL-FILE-PROMPT");
+		// SPEC: fact layer always present (objective etc.) appended after the
+		// resolved local file body.
+		assert.ok(promptedText.startsWith("LOCAL-FILE-PROMPT"));
+		assert.match(promptedText, /<objective>/);
 	});
 });
 

@@ -505,6 +505,37 @@ an idempotency guard.
 { "auditorPrompt": "Reject unless all tests are green and the diff is < 500 lines." }
 ```
 
+## Unified prompt configuration
+
+The `auditorPrompt`/`goalPrompt` channels above are the **legacy** surface for two specific prompts. `unified-prompt-config` generalizes the same resolution pattern to **all 7 runtime prompts + auditor + every tool prompt field**, with two new modes (`override`, `off`) on top of the original three, plus per-command hooks and `{{snippet}}` contract templating.
+
+See the dedicated docs for full detail:
+
+- [docs/prompt-config.md](docs/prompt-config.md) — all 7 runtime prompt keys + tool prompt keys, the 6 modes, file paths.
+- [docs/command-hooks.md](docs/command-hooks.md) — per-command pre/post/override hooks (default **off**, runs user TS — read the security note).
+- [docs/contract-templates.md](docs/contract-templates.md) — `{{snippet}}` expansion in verification contracts at write time.
+
+### Quick reference
+
+```jsonc
+{
+  "prompts": {
+    "goal-running":      { "mode": "append",   "inline": "Delegate implementation to a team." },
+    "goal-continuation": { "mode": "append" },
+    "auditor":           { "mode": "override", "inline": "Reject unless verifier-loop hash present." }
+  },
+  "promptsDir": ".pi/pi-goal-xx/prompts/",
+  "commandHooks": { "enabled": true, "goals": { "mode": "append" } },
+  "hooksDir": ".pi/pi-goal-xx/hooks/",
+  "contractTemplates": true,
+  "contractsDir": ".pi/pi-goal-xx/contracts/"
+}
+```
+
+**Backward compatibility**: legacy `auditorPrompt`/`auditorPromptMode` and `goalPrompt`/`goalPromptMode` continue to work — they are silently mapped to `prompts.auditor` / `prompts.goal-running` when no explicit `prompts.<key>` block is present. Explicit `prompts.<key>` always wins.
+
+**Tool prompts require `/reload`**: tool `promptSnippet`/`promptGuidelines` resolve at extension load (per design D3). Editing a `tool-<name>.md` file requires reloading the session to pick up the change. Runtime prompts (goal-running etc.) and command hooks are similarly load-time resolved.
+
 ## Worker session isolation
 
 When pi-agent-teams spawns a worker session with `contextMode: "branch"`, the worker inherits the leader's session entries including goal focus state. This can cause workers to accidentally work on the leader's goal instead of their assigned task.
