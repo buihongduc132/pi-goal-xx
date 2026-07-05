@@ -14,13 +14,13 @@
  *     the public `loadAuditorPrompt` API. Proves the public contract is
  *     preserved when GREEN refactors internals to delegate.
  *
- *  2. OVERRIDE MODE (pass today by coincidence — override currently falls
- *     through to global-local; document the expected post-migration result):
- *     Because `loadAuditorPrompt` returns ONLY the resolved body in every
- *     legacy mode (the `defaultPrompt` is a pure fallback, never prepended),
- *     override mode is behaviorally equivalent to global-local for the
- *     auditor surface. These tests assert that equivalence + source
- *     correctness, locking in the contract.
+ *  2. FACT-LAYER INVARIANCE (post-fix — drives the unified-prompt-config
+ *     spec invariant 'Goal data always injected'):
+ *     `loadAuditorPrompt` MUST concatenate the supplied fact layer
+ *     (objective/summaries/contract/checklist) in EVERY mode, on top of
+ *     ANY resolved body — inline override, global-local file, legacy
+ *     fallback, merge. Without the fact layer the auditor cannot identify
+ *     the goal under audit. These tests lock that invariant in.
  *
  *  3. DELEGATION OBSERVABILITY (RED today — drives GREEN):
  *     After migration, `loadAuditorPrompt` MUST consult the unified
@@ -248,6 +248,76 @@ describe("loadAuditorPrompt — override mode (new capability)", () => {
 		);
 		assert.equal(r.source, "default");
 		assert.equal(r.prompt, DEFAULT_PROMPT);
+	});
+});
+
+// ===========================================================================
+// 2b. FACT-LAYER INVARIANCE (spec scenario: 'File prompt does not drop goal
+//     data') — default global-local + local file MUST still carry the
+//     objective / verification_summary / contract / checklist. Without this,
+//     the auditor cannot identify the goal under audit in any non-override
+//     mode. Regression guard for the round-2 R1 finding.
+// ===========================================================================
+describe("loadAuditorPrompt — fact-layer preserved across ALL modes (spec scenario)", () => {
+	const FULL_FACT = "<objective>O</objective><completion_summary>C</completion_summary><verification_summary>V</verification_summary><contract>K</contract><checklist>X</checklist>";
+
+	it("global-local (default) + local file → body + fact-layer (spec scenario A)", () => {
+		sb.writeLegacyLocal("LOCAL-FILE-BODY");
+		const r = loadAuditorPrompt(
+			settings({ auditorPromptMode: "global-local" }),
+			sb.cwd,
+			DEFAULT_PROMPT,
+			sb.home,
+			{ factLayer: FULL_FACT },
+		);
+		assert.equal(r.source, "local");
+		assert.ok(r.prompt.startsWith("LOCAL-FILE-BODY"), "persona replaced by file body");
+		assert.ok(r.prompt.includes("<objective>"), "objective preserved in global-local");
+		assert.ok(r.prompt.includes("<verification_summary>"), "verification_summary preserved in global-local");
+		assert.ok(r.prompt.includes("<contract>"), "contract preserved in global-local");
+	});
+
+	it("local mode + local file → body + fact-layer (spec scenario B)", () => {
+		sb.writeLegacyLocal("LOCAL-MODE-BODY");
+		const r = loadAuditorPrompt(
+			settings({ auditorPromptMode: "local" }),
+			sb.cwd,
+			DEFAULT_PROMPT,
+			sb.home,
+			{ factLayer: FULL_FACT },
+		);
+		assert.equal(r.source, "local");
+		assert.ok(r.prompt.includes("<objective>"), "objective preserved in local mode");
+	});
+
+	it("global-local-merge + both files → merged body + fact-layer (spec scenario C)", () => {
+		sb.writeLegacyGlobal("GLOBAL-BODY");
+		sb.writeLegacyLocal("LOCAL-BODY");
+		const r = loadAuditorPrompt(
+			settings({ auditorPromptMode: "global-local-merge" }),
+			sb.cwd,
+			DEFAULT_PROMPT,
+			sb.home,
+			{ factLayer: FULL_FACT },
+		);
+		assert.equal(r.source, "merged");
+		assert.ok(r.prompt.startsWith("GLOBAL-BODY"), "merged body preserved");
+		assert.ok(r.prompt.includes("<objective>"), "objective preserved in merge mode");
+		assert.ok(r.prompt.includes("<verification_summary>"), "verification_summary preserved in merge mode");
+	});
+
+	it("unified global-local + unified local file → body + fact-layer (spec scenario D)", () => {
+		sb.writeUnifiedLocal("UNIFIED-LOCAL-BODY");
+		const r = loadAuditorPrompt(
+			settings({ prompts: { auditor: { mode: "global-local" } } }),
+			sb.cwd,
+			DEFAULT_PROMPT,
+			sb.home,
+			{ factLayer: FULL_FACT },
+		);
+		assert.equal(r.source, "local");
+		assert.ok(r.prompt.startsWith("UNIFIED-LOCAL-BODY"), "unified body used");
+		assert.ok(r.prompt.includes("<objective>"), "objective preserved via unified path");
 	});
 });
 
