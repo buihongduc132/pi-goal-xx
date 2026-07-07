@@ -1504,7 +1504,9 @@ Verification contract:
 				...taskLines,
 			].join("\n");
 
-			showProposalDialog(ctx, confirmationText + taskProposal, "goal", true);
+			if (isInteractiveTui(ctx)) {
+				showProposalDialog(ctx, confirmationText + taskProposal, "goal", true);
+			}
 		}
 	}
 
@@ -3549,7 +3551,10 @@ ${objective}` : objective,
 			const gateLabel = blockCompletion ? " (blockCompletion enabled)" : "";
 			const proposalText = [`Proposed task list${gateLabel}:`, "", ...taskLines].join("\n");
 
-			const dialogResult = await showProposalDialog(ctx, proposalText, "goal", !state.goal?.skipAuditor);
+			const autoConfirmTaskList = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
+			const dialogResult = autoConfirmTaskList
+				? { decision: "confirm" as const, auditorEnabled: !state.goal?.skipAuditor }
+				: await showProposalDialog(ctx, proposalText, "goal", !state.goal?.skipAuditor);
 			if (dialogResult.decision !== "confirm") {
 				return {
 					content: [{ type: "text", text: "Task list proposal declined." }],

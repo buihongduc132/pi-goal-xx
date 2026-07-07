@@ -1,0 +1,17 @@
+# AGENTS.md — pi-goal-xx
+
+pi-goal-xx: goal-mode extension for pi. Fork of pi-goal-x (fork of @capyup/pi-goal).
+Source of truth: `extensions/`. Tests: `tests/`. Config: `.pi/pi-goal-xx-settings.json` (see `extensions/goal-settings.ts`).
+
+## flow/ references
+
+- `flow/intentions/2026-07-06_goal-ceremony-and-hook-routing.md` — verbatim user request: verifier-loop ceremony before completion, interruption policy (block/pause/question) + REST webhook dispatch + auditor gate, TEAMS fork-mode prompt.
+- `flow/requirements/2026-07-06_goal-ceremony-and-hook-routing.md` — derived requirements R1-R7 (settings schema, verifier-loop gate, interruption policy, webhook, auditor gate, teams safety, non-functional). Verifier-loop approved hash `070526-84f5ae38`.
+- `flow/plans/2026-07-06_goal-ceremony-and-hook-routing.md` — implementation plan phases P1-P7 + P1b. Verifier-loop approved (same hash).
+
+## Lesson Learned
+
+1: Never gate `ctx.ui.custom()` calls on `ctx.hasUI` — it lies true in RPC mode where `custom()` is a no-op returning undefined.
+Context: propose_goal_draft and all custom-dialog tools crashed in Web UI/RPC mode with TypeError on `undefined.cancelled`.
+Solutions: Gate on `isInteractiveTui(ctx)` (checks `ctx.mode === "interactive"`), not `ctx.hasUI`. Add safety net for undefined return from `ctx.ui.custom()`.
+Ref: `flow/bugs/2026-07-07_propose-goal-draft-rpc-crash.md`
