@@ -115,6 +115,7 @@ import {
 	acquireLock,
 	isLockHeld,
 	readLock,
+	reapStaleLock,
 	refreshLease,
 	releaseLock,
 	type LockOwner,
@@ -1760,11 +1761,15 @@ Verification contract:
 	 */
 	/**
 	 * Compute the set of open goals held by OTHER live sessions, for surfacing
-	 * a lock-owner pill in the picker/list. Pure read; does not reap or release.
+	 * a lock-owner pill in the picker/list. Read+reap-stale (D5): STALE locks
+	 * observed here are reaped on sight so they don't persist indefinitely until
+	 * another session attempts acquisition. HELD locks are never reaped.
 	 */
 	function computeHeldByOther(goals: GoalRecord[], cwd: string): Map<string, string> {
 		const out = new Map<string, string>();
 		for (const g of goals) {
+			// Bug #2 fix (D5): reap stale locks on the read path.
+			reapStaleLock(cwd, g.id);
 			const lock = readLock(cwd, g.id);
 			if (!lock) continue;
 			if (lock.owner.sessionId === SELF_SESSION_ID) continue;
@@ -1779,9 +1784,9 @@ Verification contract:
 		if (!lock) return true;
 		if (lock.owner.sessionId === SELF_SESSION_ID) return true;
 		if (!isLockHeld(lock)) {
-			// Stale (PID dead or lease lapsed) — silent reap, proceed.
+			// Stale (PID dead/identity-recycled or lease lapsed) — silent reap, proceed.
 			try {
-				releaseLock(ctx.cwd, goalId);
+				reapStaleLock(ctx.cwd, goalId);
 			} catch {}
 			return true;
 		}
