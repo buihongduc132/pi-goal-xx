@@ -188,6 +188,7 @@ export interface MockCtxOptions {
 	idle?: boolean;
 	systemPrompt?: string;
 	sessionManager?: any;
+	mode?: string;
 }
 
 /**
@@ -196,7 +197,7 @@ export interface MockCtxOptions {
  */
 export function createMockCtx(pi: ReturnType<typeof createMockPi>, opts: MockCtxOptions = {}): ExtensionContext {
 	const controller = new AbortController();
-	return {
+	const ctx: any = {
 		ui: pi.ui,
 		hasUI: opts.hasUI ?? true,
 		cwd: opts.cwd ?? pi.getStateDir(),
@@ -211,7 +212,11 @@ export function createMockCtx(pi: ReturnType<typeof createMockPi>, opts: MockCtx
 		getContextUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => opts.systemPrompt ?? "",
-	} as ExtensionContext;
+	};
+	if (opts.mode !== undefined) {
+		ctx.mode = opts.mode;
+	}
+	return ctx as ExtensionContext;
 }
 
 /**

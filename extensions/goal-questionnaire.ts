@@ -58,9 +58,29 @@ export function formatQuestionnaireAnswers(result: GoalQuestionnaireResult): str
 	}).join("\n\n---\n\n");
 }
 
-export function shouldAutoConfirmProposal(args: { hasUI: boolean; autoConfirmEnv?: string }): boolean {
+/**
+ * Check if the extension context is running in interactive TUI mode.
+ * Uses ctx.mode when available (forward-compatible), falls back to ctx.hasUI.
+ * In RPC mode, ctx.hasUI lies true but ctx.ui.custom() is a no-op returning undefined.
+ * Unknown modes fail-safe to non-interactive (never toward ctx.ui.custom).
+ */
+export function isInteractiveTui(ctx: { hasUI: boolean; mode?: string }): boolean {
+	const mode = (ctx as any).mode;
+	if (typeof mode === "string") {
+		return mode === "interactive";
+	}
+	// Fallback: when mode is not available, use hasUI (legacy behavior)
+	return ctx.hasUI;
+}
+
+export function shouldAutoConfirmProposal(args: { hasUI: boolean; autoConfirmEnv?: string; mode?: string }): boolean {
 	if (args.autoConfirmEnv === "0") return false; // explicit opt-out (benchmarking)
-	return !args.hasUI || args.autoConfirmEnv === "1";
+	if (args.autoConfirmEnv === "1") return true;
+	// When mode is known, use it; otherwise fall back to hasUI
+	if (typeof args.mode === "string") {
+		return args.mode !== "interactive";
+	}
+	return !args.hasUI;
 }
 
 export function proposalDecisionFromQuestionnaireResult(args: { cancelled: boolean; answer?: string }): ProposalDecision {
@@ -86,15 +106,15 @@ export function proposalDialogFailureMessage(error: unknown): string {
  * avoids depending on external question/questionnaire packages.
  */
 export async function runGoalQuestionnaire(ctx: ExtensionContext, rawQuestions: GoalQuestionnaireQuestion[], auditorToggleInit?: { defaultEnabled: boolean }): Promise<GoalQuestionnaireResult> {
-	if (!ctx.hasUI) {
-		return { questions: [], answers: [], cancelled: true };
+	if (!isInteractiveTui(ctx)) {
+		return { questions: [], answers: [], cancelled: true, ...(auditorToggleInit ? { auditorEnabled: auditorToggleInit.defaultEnabled } : {}) } as GoalQuestionnaireResult;
 	}
 
 	const questions = normalizeQuestionnaireQuestions(rawQuestions);
 	const isMulti = questions.length > 1;
 	const totalTabs = questions.length + 1;
 
-	return await ctx.ui.custom<GoalQuestionnaireResult>((tui, theme, _kb, done) => {
+	const result = await ctx.ui.custom<GoalQuestionnaireResult>((tui, theme, _kb, done) => {
 		// Suppress hardware cursor during dialog to reduce TUI auto-scroll
 		// (the TUI render loop runs at ~60fps and writes ANSI cursor positioning
 		// sequences every cycle, which can cause terminal viewport snapping).
@@ -505,6 +525,13 @@ export async function runGoalQuestionnaire(ctx: ExtensionContext, rawQuestions: 
 
 		return { render, invalidate: () => { cachedLines = undefined; }, handleInput };
 	});
+
+	// Safety net: in RPC mode ctx.ui.custom() is a no-op returning undefined.
+	// If we get here (e.g. isInteractiveTui fallback to hasUI), handle gracefully.
+	if (result == null) {
+		return { questions: [], answers: [], cancelled: true, ...(auditorToggleInit ? { auditorEnabled: auditorToggleInit.defaultEnabled } : {}) } as GoalQuestionnaireResult;
+	}
+	return result;
 }
 
 /**
@@ -557,7 +584,7 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!ctx.hasUI) {
+			if (!isInteractiveTui(ctx)) {
 				return {
 					content: [{ type: "text", text: "Headless mode: the question was recorded, but no interactive UI answer was collected. If the original request is already fully specified, proceed with the documented/default assumption; otherwise ask the user in final text and stop." }],
 					details: { questions: [], answers: [], cancelled: true, answer: undefined },
@@ -627,7 +654,7 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!ctx.hasUI) {
+			if (!isInteractiveTui(ctx)) {
 				return {
 					content: [{ type: "text", text: "Headless mode: the questions were recorded, but no interactive UI answers were collected. If the original request is already fully specified, proceed with documented/default assumptions; otherwise ask the user in final text and stop." }],
 					details: { questions: [], answers: [], cancelled: true } satisfies GoalQuestionnaireResult,

@@ -2,6 +2,7 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@ea
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { displayObjectiveTitle, statusLabel } from "../goal-core.ts";
+import { isInteractiveTui } from "../goal-questionnaire.ts";
 import { openGoalsFromPool } from "../goal-pool.ts";
 import type { GoalRecord, GoalTask } from "../goal-record.ts";
 
@@ -26,7 +27,7 @@ export async function showTaskListOverlay(
 	goalsById: Map<string, GoalRecord>,
 	focusedGoalId: string | null,
 ): Promise<void> {
-	if (!ctx.hasUI) return;
+	if (!isInteractiveTui(ctx)) return;
 
 	await ctx.ui.custom<void>(
 		(tui: TUI, theme: Theme, _keybindings: unknown, done: () => void): Component => {
