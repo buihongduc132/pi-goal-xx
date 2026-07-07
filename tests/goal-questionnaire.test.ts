@@ -7,9 +7,11 @@ import {
 	proposalDecisionFromQuestionnaireResult,
 	isHeadlessQuestionSufficientForDraft,
 	proposalDialogFailureMessage,
+	runGoalQuestionnaire,
 	type GoalQuestionnaireQuestion,
 	type GoalQuestionnaireResult,
 } from "../extensions/goal-questionnaire.ts";
+import * as questionnaireModule from "../extensions/goal-questionnaire.ts";
 
 describe("normalizeQuestionnaireQuestions", () => {
 	it("assigns sequential id q{n} when id is blank", () => {
@@ -148,6 +150,125 @@ describe("shouldAutoConfirmProposal", () => {
 	it("returns true when autoConfirmEnv is '1' regardless of UI", () => {
 		assert.equal(shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: "1" }), true);
 		assert.equal(shouldAutoConfirmProposal({ hasUI: false, autoConfirmEnv: "1" }), true);
+	});
+
+	// --- RED tests: mode-aware auto-confirm (RPC hasUI lie fix) ---
+
+	it("returns true when mode is 'rpc' even though hasUI is true", () => {
+		assert.equal(
+			shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: undefined, mode: "rpc" }),
+			true,
+		);
+	});
+
+	it("returns false when mode is 'interactive' and hasUI is true", () => {
+		assert.equal(
+			shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: undefined, mode: "interactive" }),
+			false,
+		);
+	});
+
+	it("opt-out preserved: autoConfirmEnv '0' wins over mode 'rpc'", () => {
+		assert.equal(
+			shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: "0", mode: "rpc" }),
+			false,
+		);
+	});
+
+	it("autoConfirmEnv '1' still forces true in interactive mode", () => {
+		assert.equal(
+			shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: "1", mode: "interactive" }),
+			true,
+		);
+	});
+
+	it("mode 'print' (non-interactive, non-rpc) auto-confirms like headless", () => {
+		assert.equal(
+			shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: undefined, mode: "print" }),
+			true,
+		);
+	});
+
+	it("backward compat: existing calls without mode still pass", () => {
+		// These duplicate the original tests but are here to ensure the
+		// mode-optional signature doesn't break existing callers.
+		assert.equal(shouldAutoConfirmProposal({ hasUI: true }), false);
+		assert.equal(shouldAutoConfirmProposal({ hasUI: false }), true);
+		assert.equal(shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: "1" }), true);
+		assert.equal(shouldAutoConfirmProposal({ hasUI: true, autoConfirmEnv: "0" }), false);
+	});
+});
+
+describe("isInteractiveTui", () => {
+	const isInteractiveTui = (questionnaireModule as any).isInteractiveTui as
+		| ((args: { mode?: string; hasUI: boolean }) => boolean)
+		| undefined;
+
+	it("exists as an exported function", () => {
+		assert.equal(typeof isInteractiveTui, "function", "isInteractiveTui must be exported");
+	});
+
+	it("returns true for interactive mode with hasUI", () => {
+		assert.equal(isInteractiveTui!({ mode: "interactive", hasUI: true }), true);
+	});
+
+	it("returns false for rpc mode even when hasUI is true", () => {
+		assert.equal(isInteractiveTui!({ mode: "rpc", hasUI: true }), false);
+	});
+
+	it("returns false for print mode", () => {
+		assert.equal(isInteractiveTui!({ mode: "print", hasUI: false }), false);
+	});
+
+	it("falls back to hasUI when mode is absent (hasUI true)", () => {
+		assert.equal(isInteractiveTui!({ hasUI: true }), true);
+	});
+
+	it("falls back to hasUI when mode is absent (hasUI false)", () => {
+		assert.equal(isInteractiveTui!({ hasUI: false }), false);
+	});
+});
+
+describe("runGoalQuestionnaire — RPC regression", () => {
+	it("does NOT call ctx.ui.custom when mode is 'rpc' (hasUI lies true)", async () => {
+		let customCallCount = 0;
+		const ctx: any = {
+			hasUI: true,
+			mode: "rpc",
+			ui: {
+				custom: () => {
+					customCallCount++;
+					return undefined;
+				},
+			},
+		};
+
+		const result = await runGoalQuestionnaire(ctx, [
+			{ id: "q1", question: "What?", options: ["a", "b"] },
+		]);
+
+		assert.equal(customCallCount, 0, "ctx.ui.custom must NOT be called in RPC mode");
+		assert.equal(result.cancelled, true, "RPC mode should return cancelled result");
+	});
+
+	it("backward compat: undefined mode with hasUI false returns headless result", async () => {
+		let customCallCount = 0;
+		const ctx: any = {
+			hasUI: false,
+			ui: {
+				custom: () => {
+					customCallCount++;
+					return undefined;
+				},
+			},
+		};
+
+		const result = await runGoalQuestionnaire(ctx, [
+			{ id: "q1", question: "What?", options: ["a"] },
+		]);
+
+		assert.equal(customCallCount, 0, "ctx.ui.custom must NOT be called when hasUI is false");
+		assert.equal(result.cancelled, true, "headless should return cancelled");
 	});
 });
 

@@ -1,6 +1,7 @@
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { isInteractiveTui } from "../goal-questionnaire.ts";
 
 /**
  * Result of the Escape dialog during audit.
@@ -20,7 +21,7 @@ export async function showEscapeDialog(
 	ctx: ExtensionContext,
 	goalObjective: string,
 ): Promise<EscapeDialogResult> {
-	if (!ctx.hasUI) {
+	if (!isInteractiveTui(ctx)) {
 		// Fallback for headless/RPC mode — return "continue" as the safe default
 		return "continue_working";
 	}

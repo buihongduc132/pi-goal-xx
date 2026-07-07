@@ -33,6 +33,7 @@ import {
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
 import {
+	isInteractiveTui,
 	proposalDialogFailureMessage,
 	registerQuestionnaireTools,
 	shouldAutoConfirmProposal,
@@ -1504,7 +1505,9 @@ Verification contract:
 				...taskLines,
 			].join("\n");
 
-			showProposalDialog(ctx, confirmationText + taskProposal, "goal", true);
+			if (isInteractiveTui(ctx)) {
+				showProposalDialog(ctx, confirmationText + taskProposal, "goal", true);
+			}
 		}
 	}
 
@@ -2472,7 +2475,7 @@ ${objective}` : objective,
 				autoContinue: autoContinueFlag,
 			});
 
-			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM });
+			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
 
 			let decision: { decision: "confirm" | "continue"; auditorEnabled: boolean };
 			const auditorDefault = isAuditorEnabledByDefault(loadGoalSettings(ctx.cwd));
@@ -2677,7 +2680,7 @@ ${objective}` : objective,
 				tasks: tweakTasks,
 			});
 
-			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM });
+			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
 
 			let decision: { decision: "confirm" | "continue"; auditorEnabled: boolean };
 			if (headless) {
@@ -3553,7 +3556,10 @@ ${objective}` : objective,
 			const gateLabel = blockCompletion ? " (blockCompletion enabled)" : "";
 			const proposalText = [`Proposed task list${gateLabel}:`, "", ...taskLines].join("\n");
 
-			const dialogResult = await showProposalDialog(ctx, proposalText, "goal", !state.goal?.skipAuditor);
+			const autoConfirmTaskList = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
+			const dialogResult = autoConfirmTaskList
+				? { decision: "confirm" as const, auditorEnabled: !state.goal?.skipAuditor }
+				: await showProposalDialog(ctx, proposalText, "goal", !state.goal?.skipAuditor);
 			if (dialogResult.decision !== "confirm") {
 				return {
 					content: [{ type: "text", text: "Task list proposal declined." }],
