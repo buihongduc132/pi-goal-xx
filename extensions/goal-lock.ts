@@ -150,6 +150,30 @@ export function getProcessStartTime(pid: number): number | null {
 }
 
 /**
+ * Lazy module-level cache for the CURRENT process's start time (epoch ms).
+ *
+ * process.pid's start time is CONSTANT for the entire process lifetime, so
+ * calling getProcessStartTime(process.pid) on every acquireLock and every
+ * refreshLease (heartbeat every 60s) is wasted work — it re-reads
+ * /proc/self/stat (Linux) or spawns `ps` (macOS) each time. This cache
+ * computes it once on first use and reuses the value thereafter.
+ *
+ * undefined = not yet computed; null = computed-but-unavailable (fail-open);
+ * number = the cached start time.
+ */
+let cachedSelfStartTimeMs: number | null | undefined;
+function getSelfStartTimeMs(): number | null {
+	if (cachedSelfStartTimeMs === undefined) {
+		try {
+			cachedSelfStartTimeMs = getProcessStartTime(process.pid);
+		} catch {
+			cachedSelfStartTimeMs = null;
+		}
+	}
+	return cachedSelfStartTimeMs;
+}
+
+/**
  * PID liveness check (D2 EPERM correctness + D1 process-identity).
  *
  * `process.kill(pid, 0)` throws:
@@ -241,7 +265,7 @@ export function acquireLock(
 	const now = Date.now();
 	const lock: GoalFocusLock = {
 		goalId,
-		owner: { ...self, startTimeMs: getProcessStartTime(self.pid) },
+		owner: { ...self, startTimeMs: getSelfStartTimeMs() },
 		acquiredAt: new Date(now).toISOString(),
 		expiresAt: new Date(now + leaseMs).toISOString(),
 		heartbeatAt: new Date(now).toISOString(),
@@ -328,7 +352,7 @@ export function refreshLease(
 		const now = Date.now();
 		const updated: GoalFocusLock = {
 			...existing,
-			owner: { ...existing.owner, startTimeMs: getProcessStartTime(self.pid) },
+			owner: { ...existing.owner, startTimeMs: getSelfStartTimeMs() },
 			expiresAt: new Date(now + leaseMs).toISOString(),
 			heartbeatAt: new Date(now).toISOString(),
 		};
