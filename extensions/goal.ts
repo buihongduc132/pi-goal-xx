@@ -33,6 +33,7 @@ import {
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
 import {
+	isInteractiveTui,
 	proposalDialogFailureMessage,
 	registerQuestionnaireTools,
 	shouldAutoConfirmProposal,
@@ -2467,7 +2468,7 @@ ${objective}` : objective,
 				autoContinue: autoContinueFlag,
 			});
 
-			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM });
+			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
 
 			let decision: { decision: "confirm" | "continue"; auditorEnabled: boolean };
 			const auditorDefault = isAuditorEnabledByDefault(loadGoalSettings(ctx.cwd));
@@ -2672,7 +2673,7 @@ ${objective}` : objective,
 				tasks: tweakTasks,
 			});
 
-			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM });
+			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
 
 			let decision: { decision: "confirm" | "continue"; auditorEnabled: boolean };
 			if (headless) {
