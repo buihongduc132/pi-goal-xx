@@ -48,6 +48,8 @@ export interface GoalWidgetOptions {
 	getAuditorProgress?: () => AuditorWidgetProgress | null;
 	getSettings?: () => GoalSettings;
 	getDebugMode?: () => boolean;
+	/** Tri-state liveness signal: true=live holder, false=stale, undefined=legacy. */
+	getLiveLockHolder?: () => boolean | undefined;
 }
 
 function fit(value: string, width: number): string {
@@ -116,6 +118,7 @@ function findFirstPending(tasks: GoalTask[]): GoalTask | undefined {
 
 function headingMeta(goal: GoalWidgetRecord, otherOpenGoalCount = 0, disableTasks = false): string {
 	const bits: string[] = [];
+	if (goal.sisyphus) bits.push("sisyphus");
 	if (goal.status === "active" && goal.autoContinue) bits.push("auto");
 	if (goal.usage.activeSeconds > 0) bits.push(formatDuration(goal.usage.activeSeconds));
 	if (goal.usage.tokensUsed > 0) bits.push(formatTokenValue(goal.usage.tokensUsed));
