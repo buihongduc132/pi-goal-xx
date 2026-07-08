@@ -25,6 +25,8 @@ import {
 	acquireLock,
 	readLockDetailed,
 	isLockHeld,
+	refreshLease,
+	reapOrphanedLocks,
 } from "../extensions/goal-lock.ts";
 import {
 	compactStatusLabel,
@@ -276,11 +278,11 @@ describe("11.6 — heartbeat detects lock stolen (refreshLease lostLock)", () =>
 		// Self acquires lock
 		acquireLock(cwd, "g1", self, LEASE_MS);
 
-		// Other session steals the lock
-		acquireLock(cwd, "g1", other, LEASE_MS);
+		// Another session forcefully takes over (directly overwrites the lock file
+		// — simulating a forced release + re-acquire that bypasses the held-by-other guard)
+		writeLockAtomic(cwd, "g1", mkLock("g1", other));
 
-		// Self tries to refresh → should detect lostLock
-		const { refreshLease } = require("../extensions/goal-lock.ts");
+		// Self tries to refresh → should detect lostLock (owner mismatch)
 		const result = refreshLease(cwd, "g1", self, LEASE_MS);
 		assert.equal(result.refreshed, false);
 		assert.equal(result.lostLock, true, "should detect lock was stolen");
@@ -292,8 +294,6 @@ describe("11.6 — heartbeat detects lock stolen (refreshLease lostLock)", () =>
 describe("11.7 — orphaned lock reaped during pool scan", () => {
 	it("reapOrphanedLocks removes lock for completed goal", () => {
 		const cwd = tmpCwd();
-		const { reapOrphanedLocks } = require("../extensions/goal-lock.ts");
-
 		// Create lock for a "completed" goal
 		const lock = mkLock("completed-goal", { sessionId: "dead-session", pid: 12345 });
 		writeLockAtomic(cwd, "completed-goal", lock);
