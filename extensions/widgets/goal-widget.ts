@@ -297,6 +297,7 @@ export class GoalWidgetComponent implements Component {
 	private getAuditorProgress: () => AuditorWidgetProgress | null;
 	private getSettings: () => GoalSettings;
 	private getDebugMode: () => boolean;
+	private getLiveLockHolder: () => boolean | undefined;
 
 	constructor(options: GoalWidgetOptions) {
 		this.theme = options.theme;
@@ -306,6 +307,7 @@ export class GoalWidgetComponent implements Component {
 		this.getAuditorProgress = options.getAuditorProgress ?? (() => null);
 		this.getSettings = options.getSettings ?? (() => ({}));
 		this.getDebugMode = options.getDebugMode ?? (() => false);
+		this.getLiveLockHolder = options.getLiveLockHolder ?? (() => undefined);
 	}
 
 	update(): void {
@@ -365,7 +367,9 @@ export class GoalWidgetComponent implements Component {
 
 	render(width: number): string[] {
 		const settings = this.getSettings();
-		let lines = renderGoalWidgetLines(this.getGoal(), this.theme, width, {
+		const rawGoal = this.getGoal();
+		const goal = rawGoal ? { ...rawGoal, liveLockHolder: this.getLiveLockHolder() } : null;
+		let lines = renderGoalWidgetLines(goal, this.theme, width, {
 			openGoalCount: this.getOpenGoalCount(),
 			auditorProgress: this.getAuditorProgress(),
 			disableTasks: settings.disableTasks,
