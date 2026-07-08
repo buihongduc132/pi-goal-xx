@@ -61,20 +61,46 @@ function isValidLockShape(parsed: unknown): parsed is GoalFocusLock {
 	);
 }
 
-export function readLock(cwd: string, goalId: string): GoalFocusLock | null {
+/**
+ * Discriminated lock-read result (D2). Distinguishes:
+ * - "found" — valid lock file parsed and shape-verified.
+ * - "missing" — ENOENT (file does not exist). Used by liveness to signal stale.
+ * - "error" — EACCES, corrupt JSON, invalid shape, or other fs error.
+ *   Treated as "unknown" by liveness (legacy fallback, do NOT false-positive stale).
+ */
+export type ReadLockResult =
+	| { status: "found"; lock: GoalFocusLock }
+	| { status: "missing" }
+	| { status: "error" };
+
+export function readLockDetailed(cwd: string, goalId: string): ReadLockResult {
 	try {
 		const data = fs.readFileSync(lockPath(cwd, goalId), "utf8");
-		const parsed: unknown = JSON.parse(data);
-		if (!isValidLockShape(parsed)) return null;
-		// D4: normalize legacy locks — a missing startTimeMs becomes null (not
-		// undefined) so isPidAlive deterministically falls back to PID-existence-only.
-		if (parsed.owner.startTimeMs === undefined) {
-			parsed.owner.startTimeMs = null;
+		try {
+			const parsed: unknown = JSON.parse(data);
+			if (!isValidLockShape(parsed)) return { status: "error" };
+			// D4: normalize legacy locks — a missing startTimeMs becomes null (not
+			// undefined) so isPidAlive deterministically falls back to PID-existence-only.
+			if ((parsed as GoalFocusLock).owner.startTimeMs === undefined) {
+				(parsed as GoalFocusLock).owner.startTimeMs = null;
+			}
+			return { status: "found", lock: parsed as GoalFocusLock };
+		} catch {
+			// Corrupt JSON (valid file, broken content) → error, NOT missing.
+			return { status: "error" };
 		}
-		return parsed;
-	} catch {
-		return null;
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "ENOENT") return { status: "missing" };
+		// EACCES, EMFILE, or any other fs error → error.
+		return { status: "error" };
 	}
+}
+
+export function readLock(cwd: string, goalId: string): GoalFocusLock | null {
+	const result = readLockDetailed(cwd, goalId);
+	if (result.status === "found") return result.lock;
+	return null;
 }
 
 /**
@@ -307,6 +333,37 @@ export function releaseLock(cwd: string, goalId: string, self?: LockOwner): void
 /**
  * Reap a stale lock if one exists. No-op if the lock is held or missing.
  */
+/**
+ * Best-effort cleanup of lock files whose goalId is NOT in the active set.
+ * Reads `.locks/` dir, and for each `*.lock` file (skipping `.tmp`), parses
+ * the goalId from the filename, and if NOT in `activeGoalIds` → unlinks.
+ * Fail-open: fs errors are logged, never thrown.
+ */
+export function reapOrphanedLocks(cwd: string, activeGoalIds: Set<string>): void {
+	const dir = lockDir(cwd);
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(dir);
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "ENOENT") return; // no .locks dir → no-op
+		console.warn(`[goal-lock] failed to read lock dir ${dir}:`, err);
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.endsWith(".lock")) continue; // skip .tmp and other files
+		const goalId = entry.slice(0, -".lock".length);
+		if (activeGoalIds.has(goalId)) continue;
+		try {
+			fs.unlinkSync(path.join(dir, entry));
+		} catch (err: unknown) {
+			const code = (err as NodeJS.ErrnoException | undefined)?.code;
+			if (code === "ENOENT") continue;
+			console.warn(`[goal-lock] failed to reap orphaned lock ${entry}:`, err);
+		}
+	}
+}
+
 export function reapStaleLock(cwd: string, goalId: string): void {
 	try {
 		const existing = readLock(cwd, goalId);
@@ -336,6 +393,11 @@ export function reapStaleLock(cwd: string, goalId: string): void {
 
 /**
  * Refresh the lease on a lock owned by self: re-write expiresAt and heartbeatAt.
+ * Returns `{ refreshed: true }` on success.
+ * Returns `{ refreshed: false, lostLock: true }` when the lock is missing or
+ * owned by another session (caller should stop the heartbeat + notify).
+ * Returns `{ refreshed: false }` (no lostLock) on fs read error — fail-open;
+ * the timer continues because we cannot determine ownership.
  * FAIL-OPEN: fs errors are logged, never thrown (heartbeat must not crash the host).
  */
 export function refreshLease(
@@ -343,12 +405,20 @@ export function refreshLease(
 	goalId: string,
 	self: LockOwner,
 	leaseMs: number,
-): void {
+): { refreshed: boolean; lostLock?: boolean } {
+	const detailed = readLockDetailed(cwd, goalId);
+	if (detailed.status === "missing") {
+		return { refreshed: false, lostLock: true };
+	}
+	if (detailed.status === "error") {
+		// Cannot determine ownership — fail-open, no lostLock.
+		return { refreshed: false };
+	}
+	const existing = detailed.lock;
+	if (existing.owner.sessionId !== self.sessionId) {
+		return { refreshed: false, lostLock: true };
+	}
 	try {
-		const existing = readLock(cwd, goalId);
-		if (!existing || existing.owner.sessionId !== self.sessionId) {
-			return;
-		}
 		const now = Date.now();
 		const updated: GoalFocusLock = {
 			...existing,
@@ -357,7 +427,9 @@ export function refreshLease(
 			heartbeatAt: new Date(now).toISOString(),
 		};
 		writeLockAtomic(cwd, goalId, updated);
+		return { refreshed: true };
 	} catch (err) {
 		console.warn(`[goal-lock] failed to refresh lease ${lockPath(cwd, goalId)}:`, err);
+		return { refreshed: false };
 	}
 }

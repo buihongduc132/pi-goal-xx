@@ -103,8 +103,11 @@ export function formatDuration(seconds: number): string {
  * marker (that is shown as a leading glyph on the row itself). Verbose
  * consumers (footer widget, auditor) keep using statusLabel().
  */
-export function compactStatusLabel(goal: Pick<GoalDisplayRecordLike, "status" | "autoContinue" | "stopReason">): string {
-	if (goal.status === "active" && goal.autoContinue) return "running";
+export function compactStatusLabel(goal: Pick<GoalDisplayRecordLike, "status" | "autoContinue" | "stopReason">, liveLockHolder?: boolean): string {
+	if (goal.status === "active" && goal.autoContinue) {
+		if (liveLockHolder === false) return "stale";
+		return "running";
+	}
 	if (goal.status === "paused" && goal.stopReason === "agent") return "paused·agent";
 	if (goal.status === "paused") return "paused";
 	return goal.status;
@@ -159,18 +162,21 @@ export function formatAbsoluteShort(iso: string): string {
 	return `${mm}-${dd} ${hh}:${mi}`;
 }
 
-export function statusLabel(goal: Pick<GoalDisplayRecordLike, "sisyphus" | "status" | "autoContinue" | "stopReason">): string {
+export function statusLabel(goal: Pick<GoalDisplayRecordLike, "sisyphus" | "status" | "autoContinue" | "stopReason">, liveLockHolder?: boolean): string {
 	const prefix = goal.sisyphus ? "sisyphus " : "";
-	if (goal.status === "active" && goal.autoContinue) return `${prefix}running`;
+	if (goal.status === "active" && goal.autoContinue) {
+		if (liveLockHolder === false) return `${prefix}stale`;
+		return `${prefix}running`;
+	}
 	if (goal.status === "paused" && goal.stopReason === "agent") return `${prefix}paused (agent)`;
 	return `${prefix}${goal.status}`;
 }
 
-export function footerStatus(goal: GoalDisplayRecordLike): string {
+export function footerStatus(goal: GoalDisplayRecordLike, liveLockHolder?: boolean): string {
 	const usageBits: string[] = [];
 	if (goal.usage.activeSeconds > 0) usageBits.push(formatDuration(goal.usage.activeSeconds));
 	if (goal.usage.tokensUsed > 0) usageBits.push(formatTokenValue(goal.usage.tokensUsed).split(" ")[0]);
 	const usage = usageBits.length > 0 ? ` [${usageBits.join(" ")}]` : "";
 	const prefix = goal.sisyphus ? "goal✊" : "goal";
-	return `${prefix}: ${statusLabel(goal)}${usage} - ${truncateText(goal.objective, 60)}`;
+	return `${prefix}: ${statusLabel(goal, liveLockHolder)}${usage} - ${truncateText(goal.objective, 60)}`;
 }

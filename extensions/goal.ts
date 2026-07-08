@@ -2,6 +2,7 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
 import * as crypto from "node:crypto";
+import { existsSync } from "node:fs";
 import {
 	footerStatus,
 	formatDuration,
@@ -115,9 +116,12 @@ import {
 	acquireLock,
 	isLockHeld,
 	readLock,
+	readLockDetailed,
 	reapStaleLock,
 	refreshLease,
 	releaseLock,
+	reapOrphanedLocks,
+	lockDir,
 	type LockOwner,
 } from "./goal-lock.ts";
 import {
@@ -642,7 +646,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const displayGoal = goalForDisplay();
 			if (displayGoal) {
 				const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
-				statusRefreshCtx.ui.setStatus("goal", `${footerStatus(displayGoal)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+				const liveLock = isLockHeldBySelf(statusRefreshCtx.cwd, focusedGoalId);
+				statusRefreshCtx.ui.setStatus("goal", `${footerStatus(displayGoal, liveLock)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
 			}
 			// Live-tick the above-editor widget so duration/tokens update.
 			goalWidgetComponent?.update();
@@ -735,7 +740,15 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const leaseMs = resolveLeaseMs();
 		heartbeatTimer = setInterval(() => {
 			try {
-				refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
+				const result = refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
+				if (result.lostLock) {
+					stopHeartbeatTimer();
+					statusRefreshCtx?.ui.notify(
+						`Goal ${goalId} focus lock lost — another session took over or the lease lapsed. Use /goal-resume to reacquire.`,
+						"warning",
+					);
+					if (statusRefreshCtx) updateUI(statusRefreshCtx);
+				}
 			} catch (err) {
 				console.warn(`[goal] heartbeat refresh failed for ${goalId}:`, err);
 			}
@@ -1025,6 +1038,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 							getAuditorProgress: () => auditProgress,
 							getSettings: () => loadGoalSettings(ctx.cwd),
 							getDebugMode: () => debugMode,
+						getLiveLockHolder: () => isLockHeldBySelf(ctx.cwd, focusedGoalId),
 						});
 						return goalWidgetComponent;
 					},
@@ -1040,7 +1054,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 		const displayGoal = goalForDisplay() ?? state.goal;
 		const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
-		ctx.ui.setStatus("goal", `${footerStatus(displayGoal)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+		const liveLock = isLockHeldBySelf(ctx.cwd, focusedGoalId);
+		ctx.ui.setStatus("goal", `${footerStatus(displayGoal, liveLock)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
 
 		if (!widgetRegistered) {
 			ctx.ui.setWidget(
@@ -1054,6 +1069,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 						getAuditorProgress: () => auditProgress,
 						getSettings: () => loadGoalSettings(ctx.cwd),
 						getDebugMode: () => debugMode,
+						getLiveLockHolder: () => isLockHeldBySelf(ctx.cwd, focusedGoalId),
 					});
 					return goalWidgetComponent;
 				},
@@ -1719,6 +1735,7 @@ Verification contract:
 		reconcileFocusedGoalFromDisk(ctx);
 		if (state.goal && state.goal.status !== "complete") return state.goal;
 		const open = openGoals();
+		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) return null;
 		if (open.length === 1) {
 			const only = open[0];
@@ -1731,11 +1748,12 @@ Verification contract:
 			return null;
 		}
 		const shortIds = resolveShortIdsForPool(open);
-		const heldByOther = computeHeldByOther(open, ctx.cwd);
-		const sorted = sortGoalsForPicker(open);
+		const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+		const sorted = sortGoalsForPicker(open, liveLockHolderSet);
 		const labels = sorted.map((item) => goalSelectorLabel(item, focusedGoalId, {
 			shortId: shortIds.get(item.id),
 			heldByOtherSession: heldByOther.get(item.id) ?? null,
+			liveLockHolder: liveLockHolderSet ? liveLockHolderSet.has(item.id) : undefined,
 		}));
 		const byLabel = new Map(labels.map((label, index) => [label, sorted[index]?.id]));
 		const selected = await ctx.ui.select(title, labels);
@@ -1765,18 +1783,45 @@ Verification contract:
 	 * observed here are reaped on sight so they don't persist indefinitely until
 	 * another session attempts acquisition. HELD locks are never reaped.
 	 */
-	function computeHeldByOther(goals: GoalRecord[], cwd: string): Map<string, string> {
-		const out = new Map<string, string>();
+	/**
+	 * Compute lock info for display: (1) goals held by OTHER live sessions
+	 * (for the lock-owner pill), and (2) the set of goals with ANY live lock
+	 * holder (self or other) for liveness display.
+	 *
+	 * When `.locks/` dir is absent, returns null sets (legacy fallback — all
+	 * active+autoContinue goals show 'running' unchanged).
+	 *
+	 * Uses readLockDetailed to distinguish missing (→ stale) from error (→ undefined).
+	 * Also reaps stale locks on the read path (D5 from staleness fix).
+	 */
+	function computeLockInfo(goals: GoalRecord[], cwd: string): { heldByOther: Map<string, string>; liveLockHolderSet: Set<string> | null } {
+		// If locking is not enabled in this cwd (.locks/ dir absent), return null
+		// to signal legacy fallback to all consumers.
+		let locksDirExists = false;
+		try {
+			locksDirExists = existsSync(lockDir(cwd));
+		} catch {
+			locksDirExists = false;
+		}
+		if (!locksDirExists) {
+			return { heldByOther: new Map(), liveLockHolderSet: null };
+		}
+		const heldByOther = new Map<string, string>();
+		const liveLockHolderSet = new Set<string>();
 		for (const g of goals) {
 			// Bug #2 fix (D5): reap stale locks on the read path.
 			reapStaleLock(cwd, g.id);
-			const lock = readLock(cwd, g.id);
-			if (!lock) continue;
-			if (lock.owner.sessionId === SELF_SESSION_ID) continue;
-			if (!isLockHeld(lock)) continue;
-			out.set(g.id, lock.owner.sessionId);
+			const detailed = readLockDetailed(cwd, g.id);
+			if (detailed.status === "missing") continue; // no lock → not in live set → stale by display
+			if (detailed.status === "error") continue; // can't determine → undefined legacy fallback (skip)
+			const lock = detailed.lock;
+			if (!isLockHeld(lock)) continue; // stale lock → not live
+			liveLockHolderSet.add(g.id);
+			if (lock.owner.sessionId !== SELF_SESSION_ID) {
+				heldByOther.set(g.id, lock.owner.sessionId);
+			}
 		}
-		return out;
+		return { heldByOther, liveLockHolderSet };
 	}
 
 	async function confirmFocusOverride(ctx: ExtensionContext, goalId: string): Promise<boolean> {
@@ -1814,6 +1859,7 @@ Verification contract:
 
 	async function focusGoalCommand(ctx: ExtensionContext): Promise<void> {
 		const open = openGoals();
+		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) {
 			ctx.ui.notify("No open goals. Use /goals or /sisyphus to discuss, or /goals-set / /sisyphus-set to start immediately.", "warning");
 			return;
@@ -1829,15 +1875,16 @@ Verification contract:
 			return;
 		}
 		if (!ctx.hasUI) {
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(open, ctx.cwd) }), "info");
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, computeLockInfo(open, ctx.cwd)), "info");
 			return;
 		}
 		const shortIds = resolveShortIdsForPool(open);
-		const heldByOther = computeHeldByOther(open, ctx.cwd);
-		const sorted = sortGoalsForPicker(open);
+		const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+		const sorted = sortGoalsForPicker(open, liveLockHolderSet);
 		const labels = sorted.map((item) => goalSelectorLabel(item, focusedGoalId, {
 			shortId: shortIds.get(item.id),
 			heldByOtherSession: heldByOther.get(item.id) ?? null,
+			liveLockHolder: liveLockHolderSet ? liveLockHolderSet.has(item.id) : undefined,
 		}));
 		const byLabel = new Map(labels.map((label, index) => [label, sorted[index]?.id]));
 		const selected = await ctx.ui.select(`Focus open goal · ${open.length} open`, labels);
@@ -2207,7 +2254,10 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		description: "List all open pi goals and show which one this session is focused on.",
 		handler: async (_rawArgs, ctx) => {
 			reconcileFocusedGoalFromDisk(ctx);
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(openGoals(), ctx.cwd) }), "info");
+			const open = openGoals();
+			reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
+			const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther, liveLockHolderSet }), "info");
 			updateUI(ctx);
 		},
 	}));

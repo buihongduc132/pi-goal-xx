@@ -98,6 +98,8 @@ export interface GoalSelectorLabelOptions {
 	shortId?: string;
 	/** Holding session id if another live session holds the focus lock; surfaces a lock pill. */
 	heldByOtherSession?: string | null;
+	/** Tri-state liveness: true=live holder, false=stale, undefined=legacy fallback. */
+	liveLockHolder?: boolean;
 }
 
 /**
@@ -125,7 +127,7 @@ export function goalSelectorLabel(goal: GoalRecord, focusedGoalId: string | null
 	const marker = goal.id === focusedGoalId ? "*" : " ";
 	const glyph = goal.sisyphus ? "✊ " : "";
 	const shortId = opts?.shortId ?? shortGoalId(goal.id);
-	const status = compactStatusLabel(goal);
+	const status = compactStatusLabel(goal, opts?.liveLockHolder);
 	const abs = formatAbsoluteShort(goal.updatedAt);
 	const rel = formatRelativeTime(goal.updatedAt);
 	const title = truncateText(displayObjectiveTitle(goal.objective), 72);
@@ -136,14 +138,22 @@ export function goalSelectorLabel(goal: GoalRecord, focusedGoalId: string | null
 export interface BuildGoalListTextOptions {
 	/** Map of goalId → holding session id for goals held by OTHER live sessions. */
 	heldByOther?: Map<string, string> | null;
+	/** Set of goal IDs with a live lock holder. null = legacy fallback (no locking). */
+	liveLockHolderSet?: Set<string> | null;
 }
 
 /**
- * Stable ordering for the picker: running goals (active + autoContinue) first,
- * then everything else by updatedAt descending. Does not mutate the input.
+ * Stable ordering for the picker: running goals (active + autoContinue with a
+ * live lock holder) first, then everything else by updatedAt descending.
+ * When `liveLockHolderSet` is undefined, legacy behavior applies (all
+ * active+autoContinue rank 0). Does not mutate the input.
  */
-export function sortGoalsForPicker(goals: GoalRecord[]): GoalRecord[] {
-	const rank = (g: GoalRecord): number => (g.status === "active" && g.autoContinue ? 0 : 1);
+export function sortGoalsForPicker(goals: GoalRecord[], liveLockHolderSet?: Set<string> | null): GoalRecord[] {
+	const rank = (g: GoalRecord): number => {
+		if (g.status !== "active" || !g.autoContinue) return 1;
+		if (!liveLockHolderSet) return 0; // legacy (null or undefined)
+		return liveLockHolderSet.has(g.id) ? 0 : 1;
+	};
 	return goals.slice().sort((a, b) => {
 		const ra = rank(a);
 		const rb = rank(b);
@@ -158,8 +168,9 @@ export function buildGoalListText(pool: Map<string, GoalRecord>, focusedGoalId: 
 	const open = openGoalsFromPool(pool);
 	if (open.length === 0) return "No open goals. Use /goals <topic> or /sisyphus <topic> to discuss, or /goals-set <objective> / /sisyphus-set <objective> to start immediately.";
 	const shortIds = resolveShortIdsForPool(open);
-	const sorted = sortGoalsForPicker(open);
 	const heldByOther = opts?.heldByOther ?? null;
+	const liveLockHolderSet = opts?.liveLockHolderSet;
+	const sorted = sortGoalsForPicker(open, liveLockHolderSet);
 	const lines = [
 		`Open goals: ${open.length}`,
 		"Columns: · short-id · status · updated · objective",
@@ -169,6 +180,9 @@ export function buildGoalListText(pool: Map<string, GoalRecord>, focusedGoalId: 
 		lines.push(goalSelectorLabel(goal, focusedGoalId, {
 			shortId: shortIds.get(goal.id),
 			heldByOtherSession: heldByOther?.get(goal.id) ?? null,
+			liveLockHolder: liveLockHolderSet === undefined || liveLockHolderSet === null
+				? undefined
+				: liveLockHolderSet.has(goal.id),
 		}));
 		lines.push(`  ${displayObjectiveTitle(goal.objective)}`);
 		const usage = goal.usage.tokensUsed > 0 || goal.usage.activeSeconds > 0
