@@ -23,6 +23,8 @@ export interface GoalWidgetRecord extends GoalDisplayRecordLike {
 	pauseSuggestedAction?: string;
 	taskList?: GoalTaskList | null;
 	verificationContract?: string;
+	/** Tri-state liveness signal: true=live holder, false=stale, undefined=legacy fallback. */
+	liveLockHolder?: boolean;
 }
 
 export interface AuditorWidgetProgress {
@@ -77,6 +79,11 @@ function displayIcon(goal: GoalWidgetRecord): { icon: string; color: GoalWidgetC
 		return goal.stopReason === "agent"
 			? { icon: "⊘", color: "warning", label: "blocked" }
 			: { icon: "◐", color: "muted", label: "paused" };
+	}
+	if (goal.status === "active" && goal.autoContinue) {
+		if (goal.liveLockHolder === false) return { icon: "⌽", color: "muted", label: "stale" };
+		if (goal.sisyphus) return { icon: "◆", color: "accent", label: "sisyphus running" };
+		return { icon: "●", color: "accent", label: "goal running" };
 	}
 	if (goal.sisyphus) return { icon: "◆", color: "accent", label: goal.autoContinue ? "sisyphus running" : "sisyphus idle" };
 	return goal.autoContinue ? { icon: "●", color: "accent", label: "goal running" } : { icon: "○", color: "muted", label: "goal idle" };
