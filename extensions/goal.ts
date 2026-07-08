@@ -117,6 +117,7 @@ import {
 	isLockHeld,
 	readLock,
 	readLockDetailed,
+	reapStaleLock,
 	refreshLease,
 	releaseLock,
 	reapOrphanedLocks,
@@ -1778,7 +1779,9 @@ Verification contract:
 	 */
 	/**
 	 * Compute the set of open goals held by OTHER live sessions, for surfacing
-	 * a lock-owner pill in the picker/list. Pure read; does not reap or release.
+	 * a lock-owner pill in the picker/list. Read+reap-stale (D5): STALE locks
+	 * observed here are reaped on sight so they don't persist indefinitely until
+	 * another session attempts acquisition. HELD locks are never reaped.
 	 */
 	/**
 	 * Compute lock info for display: (1) goals held by OTHER live sessions
@@ -1789,6 +1792,7 @@ Verification contract:
 	 * active+autoContinue goals show 'running' unchanged).
 	 *
 	 * Uses readLockDetailed to distinguish missing (→ stale) from error (→ undefined).
+	 * Also reaps stale locks on the read path (D5 from staleness fix).
 	 */
 	function computeLockInfo(goals: GoalRecord[], cwd: string): { heldByOther: Map<string, string>; liveLockHolderSet: Set<string> | null } {
 		// If locking is not enabled in this cwd (.locks/ dir absent), return null
@@ -1805,6 +1809,8 @@ Verification contract:
 		const heldByOther = new Map<string, string>();
 		const liveLockHolderSet = new Set<string>();
 		for (const g of goals) {
+			// Bug #2 fix (D5): reap stale locks on the read path.
+			reapStaleLock(cwd, g.id);
 			const detailed = readLockDetailed(cwd, g.id);
 			if (detailed.status === "missing") continue; // no lock → not in live set → stale by display
 			if (detailed.status === "error") continue; // can't determine → undefined legacy fallback (skip)
@@ -1823,9 +1829,9 @@ Verification contract:
 		if (!lock) return true;
 		if (lock.owner.sessionId === SELF_SESSION_ID) return true;
 		if (!isLockHeld(lock)) {
-			// Stale (PID dead or lease lapsed) — silent reap, proceed.
+			// Stale (PID dead/identity-recycled or lease lapsed) — silent reap, proceed.
 			try {
-				releaseLock(ctx.cwd, goalId);
+				reapStaleLock(ctx.cwd, goalId);
 			} catch {}
 			return true;
 		}
