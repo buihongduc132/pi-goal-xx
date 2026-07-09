@@ -489,6 +489,22 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let continuationQueuedFor: string | null = null;
 	let continuationScheduledFor: string | null = null;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	// Message send mutex: serializes all pi.sendMessage / pi.sendUserMessage
+	// calls so a second send cannot race past isStreaming=true before the
+	// first's prompt() resolves the streamingBehavior option. Without this,
+	// concurrent sends surface as "Agent is already processing" errors emitted
+	// from the <runtime> bindCore catch handlers in agent-session.
+	let messageSendChain: Promise<void> = Promise.resolve();
+	function serializedSend<T>(fn: () => T | Promise<T>): Promise<T> {
+		const run = messageSendChain.then(fn);
+		// Swallow rejections on the chain itself so a failed send never poisons
+		// subsequent sends; the caller still sees the real rejection from `run`.
+		messageSendChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
 	let runningGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
 	let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -1557,21 +1573,23 @@ Verification contract:
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
-		pi.sendMessage<GoalEventDetails>(
-			{
-				customType: GOAL_EVENT_ENTRY,
-				content: continuationPrompt(goal, settings, ctx.cwd),
-				display: false,
-				details: {
-					kind: "checkpoint",
-					goalId: goal.id,
-					status: goal.status,
-					objective: goal.objective,
-					timestamp: Date.now(),
+		void serializedSend(() => {
+			pi.sendMessage<GoalEventDetails>(
+				{
+					customType: GOAL_EVENT_ENTRY,
+					content: continuationPrompt(goal, settings, ctx.cwd),
+					display: false,
+					details: {
+						kind: "checkpoint",
+						goalId: goal.id,
+						status: goal.status,
+						objective: goal.objective,
+						timestamp: Date.now(),
+					},
 				},
-			},
-			{ triggerTurn: true, deliverAs: "followUp" },
-		);
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		});
 	}
 
 
@@ -1683,21 +1701,23 @@ Verification contract:
 		);
 		const draftId = `tweak-${focused.id}-${Date.now().toString(36)}`;
 		try {
-			pi.sendMessage<GoalEventDetails>(
-				{
-					customType: GOAL_EVENT_ENTRY,
-					content: goalTweakDraftingPrompt(focused, trimmed, loadGoalSettings(ctx.cwd), ctx.cwd),
-					display: false,
-					details: {
-						kind: "drafting",
-						goalId: draftId,
-						objective: trimmed,
-						focus: sisyphusOn ? "sisyphus" : "goal",
-						timestamp: Date.now(),
+			void serializedSend(() => {
+				pi.sendMessage<GoalEventDetails>(
+					{
+						customType: GOAL_EVENT_ENTRY,
+						content: goalTweakDraftingPrompt(focused, trimmed, loadGoalSettings(ctx.cwd), ctx.cwd),
+						display: false,
+						details: {
+							kind: "drafting",
+							goalId: draftId,
+							objective: trimmed,
+							focus: sisyphusOn ? "sisyphus" : "goal",
+							timestamp: Date.now(),
+						},
 					},
-				},
-				{ triggerTurn: true, deliverAs: ctx.isIdle() ? "followUp" : "steer" },
-			);
+					{ triggerTurn: true, deliverAs: ctx.isIdle() ? "followUp" : "steer" },
+				);
+			});
 		} catch (err) {
 			tweakDraftingFor = null;
 			syncGoalTools();
@@ -1725,7 +1745,9 @@ Verification contract:
 		};
 		syncGoalTools();
 		try {
-			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus, loadGoalSettings(ctx.cwd), ctx.cwd), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+			void serializedSend(() => {
+				pi.sendUserMessage(goalDraftingPrompt(trimmed, focus, loadGoalSettings(ctx.cwd), ctx.cwd), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+			});
 		} catch (err) {
 			ctx.ui.notify(`Could not start ${label.toLowerCase()}: ${(err as Error).message}`, "error");
 		}
@@ -3050,7 +3072,10 @@ ${objective}` : objective,
 			}
 
 			// Auditor is enabled — run the normal audit flow
-			await pi.sendMessage<GoalAuditEventDetails>({
+			// IMPORTANT: do NOT await this sendMessage — it fires a UI notification
+			// while complete_goal is mid-execute. Awaiting it blocks the tool body
+			// and can crash/quit the host session. Fire-and-forget is correct here.
+			pi.sendMessage<GoalAuditEventDetails>({
 				customType: GOAL_AUDIT_ENTRY,
 				content: [
 					"Auditor: I am starting the independent completion audit.",
