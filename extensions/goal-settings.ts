@@ -170,6 +170,7 @@ const UNIFIED_PROMPT_MODES = new Set<PromptMode>([
  * pattern and are matched by prefix rather than enumeration.
  */
 const KNOWN_PROMPT_KEYS = new Set([
+	"goal",
 	"goal-running",
 	"goal-continuation",
 	"goal-drafting",
