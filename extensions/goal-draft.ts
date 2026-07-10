@@ -234,7 +234,7 @@ function resolveGoalDraftingOverride(settings: GoalSettings | undefined, cwd: st
 	return resolved.source === "none" ? undefined : resolved.final;
 }
 
-function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
+export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
 	if (!settings?.prompts) return "";
 	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
 	if (!cfg) return "";

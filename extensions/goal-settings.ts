@@ -33,6 +33,9 @@ export type AuditorMode = "inherit" | "minimal";
 /** Auditor prompt resolution mode. */
 export type AuditorPromptMode = "global-local" | "local" | "global-local-merge";
 
+/** Goal prompt resolution mode (supports all unified modes including override). */
+export type GoalPromptMode = PromptMode;
+
 /** Resource filter applied to tools / mcp / skills / extensions arrays. */
 export interface AuditorResourceFilter {
 	tools?: string[];
@@ -92,7 +95,7 @@ export interface GoalSettings {
 	/** Inline auditor prompt override; takes precedence over file-based prompts. */
 	auditorPrompt?: string;
 	/** Goal custom prompt resolution mode. Defaults to "global-local". */
-	goalPromptMode?: AuditorPromptMode;
+	goalPromptMode?: GoalPromptMode;
 	/** Inline goal custom prompt override; injected into runtime goal/continuation prompts. */
 	goalPrompt?: string;
 	/** Goal focus lock lease duration in ms. Default 180000 (3 min). */
@@ -357,6 +360,14 @@ function asAuditorPromptMode(value: unknown): AuditorPromptMode | undefined {
 		: undefined;
 }
 
+/** Parse goalPromptMode; accepts all unified PromptMode values including "override". */
+function asGoalPromptMode(value: unknown): GoalPromptMode | undefined {
+	const text = asNonEmptyString(value);
+	return text && UNIFIED_PROMPT_MODES.has(text as PromptMode)
+		? (text as GoalPromptMode)
+		: undefined;
+}
+
 /**
  * Coerce unknown value into an AuditorResourceFilter. Each of the four arrays
  * (tools/mcp/skills/extensions) is independently parsed via asStringArray.
@@ -416,7 +427,7 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (auditorPromptMode) settings.auditorPromptMode = auditorPromptMode;
 	const auditorPrompt = asNonEmptyString(record.auditorPrompt);
 	if (auditorPrompt) settings.auditorPrompt = auditorPrompt;
-	const goalPromptMode = asAuditorPromptMode(record.goalPromptMode);
+	const goalPromptMode = asGoalPromptMode(record.goalPromptMode);
 	if (goalPromptMode) settings.goalPromptMode = goalPromptMode;
 	const goalPrompt = asNonEmptyString(record.goalPrompt);
 	if (goalPrompt) settings.goalPrompt = goalPrompt;
@@ -534,7 +545,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const auditorInclude = asAuditorResourceFilter(settings.auditorInclude);
 	const auditorPromptMode = asAuditorPromptMode(settings.auditorPromptMode);
 	const auditorPrompt = asNonEmptyString(settings.auditorPrompt);
-	const goalPromptMode = asAuditorPromptMode(settings.goalPromptMode);
+	const goalPromptMode = asGoalPromptMode(settings.goalPromptMode);
 	const goalPrompt = asNonEmptyString(settings.goalPrompt);
 	const leaseMs = asPositiveInt(settings.leaseMs);
 	const heartbeatMs = asPositiveInt(settings.heartbeatMs);
