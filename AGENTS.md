@@ -11,7 +11,11 @@ Source of truth: `extensions/`. Tests: `tests/`. Config: `.pi/pi-goal-xx-setting
 
 ## flow/ bugs
 
-- `flow/bugs/2026-07-11_complete-goal-crash-and-reject-exit.md` — `complete_goal` bug 1: auditor `inheritFromCwd` loads host resources into in-process child → hang/exit. Bug 2: bare `pi.sendMessage` (no `.catch()`) in all 6 sends → exit-on-reject. Both open.
+- `flow/bugs/2026-07-11_complete-goal-crash-and-reject-exit.md` — `complete_goal` bug 1: auditor `inheritFromCwd` loads host resources into in-process child → hang/exit. Bug 2: bare `pi.sendMessage` (no `.catch()`) in all 6 sends → exit-on-reject. Both open. Fix: keep inheritance, harden with timeout + unhandledRejection guard.
+
+## flow/ requirements
+
+- `flow/requirements/2026-07-11_crash-safe-auditor-inheritance.md` — R1-R6 for crash-safe auditor inheritance: inherit all tools, opt-out via config, add timeout (R2), unhandledRejection guard (R3), crash-safe sends (R4), tests (R6). Verified by jewilo v1 (APPROVE), v2 null (backend issue with 121KB runtime git diff).
 
 ## Lesson Learned
 
