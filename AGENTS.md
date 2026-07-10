@@ -9,6 +9,10 @@ Source of truth: `extensions/`. Tests: `tests/`. Config: `.pi/pi-goal-xx-setting
 - `flow/requirements/2026-07-06_goal-ceremony-and-hook-routing.md` — derived requirements R1-R7 (settings schema, verifier-loop gate, interruption policy, webhook, auditor gate, teams safety, non-functional). Verifier-loop approved hash `070526-84f5ae38`.
 - `flow/plans/2026-07-06_goal-ceremony-and-hook-routing.md` — implementation plan phases P1-P7 + P1b. Verifier-loop approved (same hash).
 
+## flow/ bugs
+
+- `flow/bugs/2026-07-11_complete-goal-crash-and-reject-exit.md` — `complete_goal` bug 1: auditor `inheritFromCwd` loads host resources into in-process child → hang/exit. Bug 2: bare `pi.sendMessage` (no `.catch()`) in all 6 sends → exit-on-reject. Both open.
+
 ## Lesson Learned
 
 1: Never gate `ctx.ui.custom()` calls on `ctx.hasUI` — it lies true in RPC mode where `custom()` is a no-op returning undefined.
