@@ -459,7 +459,7 @@ The runtime goal/continuation system prompts that drive the **active goal agent*
 
 Global prompt file: `~/.pi/goal-prompt.md`  •  Local prompt file: `<cwd>/.pi/goal-prompt.md`
 
-The resolved block is appended to both `goalPrompt()` (agent start) and `continuationPrompt()` (checkpoint resume), after the Sisyphus discipline block when present. The `/goal` and `/sisyphus` **drafting** instructions live in pi-core's tool schema and are not reachable from this package.
+The resolved block is appended to both `goalPrompt()` (agent start) and `continuationPrompt()` (checkpoint resume), after the Sisyphus discipline block when present. The `/goal` and `/sisyphus` **drafting** instructions are also customizable via `prompts.goal-drafting` (see unified prompt configuration).
 
 ### Examples
 
