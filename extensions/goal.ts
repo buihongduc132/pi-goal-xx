@@ -2452,7 +2452,8 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 	// Schema gates enforce focus-vs-sisyphus consistency; draftId is ignored for
 	// one-release compatibility with older prompt residue.
 	// In headless mode (no UI), auto-confirms — harness-friendly.
-	const draftingBlock = resolveGoalDraftingBlock(loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd);
+	const effectiveCwd = cachedCwd ?? process.cwd();
+	const draftingBlock = resolveGoalDraftingBlock(loadGoalSettings(effectiveCwd), cachedCwd ?? undefined);
 	const baseGuidelines = [
 		"Call propose_goal_draft when a /goals or /sisyphus intent discussion has enough information to write a concrete goal. Ask a focused question only when the request is still ambiguous.",
 		"If an answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",

@@ -143,7 +143,7 @@ export function loadGoalPrompt(
 	const unifiedCfg: PromptConfig | undefined = settings?.prompts?.goal;
 	const legacyInline = settings?.goalPrompt?.trim();
 	const cfg: PromptConfig = unifiedCfg
-		? unifiedCfg
+		? { ...unifiedCfg, inline: unifiedCfg.inline ?? legacyInline }
 		: {
 				inline: legacyInline,
 				mode: resolveGoalPromptMode(settings) as PromptMode,
