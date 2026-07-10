@@ -761,14 +761,23 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				stopStatusRefresh();
 				return;
 			}
-			const displayGoal = goalForDisplay();
-			if (displayGoal) {
-				const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
-				const liveLock = isLockHeldBySelf(statusRefreshCtx.cwd, focusedGoalId);
-				statusRefreshCtx.ui.setStatus("goal", `${footerStatus(displayGoal, liveLock)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+			try {
+				const displayGoal = goalForDisplay();
+				if (displayGoal) {
+					const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
+					const liveLock = isLockHeldBySelf(statusRefreshCtx.cwd, focusedGoalId);
+					statusRefreshCtx.ui.setStatus("goal", `${footerStatus(displayGoal, liveLock)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+				}
+				// Live-tick the above-editor widget so duration/tokens update.
+				goalWidgetComponent?.update();
+			} catch (err) {
+				// ctx may be stale after session replacement / reload — the captured
+				// statusRefreshCtx's .ui getter calls assertActive() which throws once
+			// the session is replaced. Stop the timer and log; NEVER let a stale-ctx
+				// throw escape a timer callback (that crashes the host process).
+				stopStatusRefresh();
+				console.warn("[pi-goal] status refresh timer stopped (ctx likely stale):", err instanceof Error ? err.message : String(err));
 			}
-			// Live-tick the above-editor widget so duration/tokens update.
-			goalWidgetComponent?.update();
 		}, STATUS_REFRESH_MS);
 		statusRefreshTimer.unref?.();
 	}
@@ -4472,6 +4481,11 @@ promptGuidelines: [
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
+		// Clear the status-refresh timer FIRST: its callback captures the turn's
+		// ctx, which goes stale once compact replaces the session. Without this,
+		// the next interval tick hits the stale ctx's .ui getter (assertActive)
+		// and throws an uncaughtException that kills the host process.
+		stopStatusRefresh();
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (state.goal) persist(ctx);
 		beginAccounting();
