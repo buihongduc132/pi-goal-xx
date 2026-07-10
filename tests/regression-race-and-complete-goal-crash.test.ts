@@ -130,66 +130,72 @@ describe("COMPLETE_GOAL_AWAIT — audit-start sendMessage is fire-and-forget", (
 	it("complete_goal.execute resolves WITHOUT awaiting the audit-start sendMessage", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-red-"));
 		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-		const pi: any = createMockPi({ cwd });
-
-		// Load the extension with the record-only default send mock first (so
-		// goal creation / continuation sends during setup are harmless).
-		goalExtension(pi);
-
-		// Configure an auditor that resolves to an immediate "model not found"
-		// error so runGoalCompletionAuditor returns early instead of trying to
-		// spin a real sub-agent session. The auditor is still ENABLED
-		// (settings.disabled !== true) so we reach the audit-start sendMessage.
-		fs.writeFileSync(
-			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
-			JSON.stringify({ model: "nope/nomodel" }),
-		);
-		const ctx = createMockCtx(pi, { cwd, idle: false });
-		ctx.modelRegistry = { find: () => undefined, getAvailable: () => [] };
-
-		// Create + focus an active goal via the direct /goals-set command.
-		await invokeCommand(pi, ctx, "goals-set", "Objective: ship it. Success criteria: shipped.");
-
-		// NOW swap sendMessage to a deferred promise that we control. It must
-		// NOT resolve until we explicitly release it. If complete_goal.execute
-		// awaits it (the bug), execute will hang on this promise.
-		const pendingResolvers: Array<() => void> = [];
-		let sendCount = 0;
-		(pi as any).sendMessage = () => {
-			sendCount += 1;
-			return new Promise<void>((resolve) => pendingResolvers.push(resolve));
-		};
-
-		// Invoke complete_goal and race it against a timeout. With the fix
-		// (fire-and-forget), execute proceeds past the sendMessage, the auditor
-		// returns its early error, and execute settles — all while the
-		// sendMessage promise is still pending. Without the fix (await),
-		// execute blocks on the deferred promise and the timeout wins.
 		const envSnap = forceNonWorkerEnv();
-		const execPromise = invokeTool(pi, ctx, "complete_goal", {
-			verificationSummary: "all criteria verified",
-		});
-		const winner = await Promise.race([
-			execPromise.then(
-				() => "settled" as const,
-				() => "settled" as const,
-			),
-			new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 500)),
-		]);
+		const pi: any = createMockPi({ cwd });
+		const pendingResolvers: Array<() => void> = [];
+		let raceTimer: ReturnType<typeof setTimeout> | undefined;
 
-		// Release every deferred sendMessage so no promise is left dangling.
-		for (const fn of pendingResolvers) fn();
-		restoreGoalEnv(envSnap);
-		await cleanupTimers(pi, cwd);
+		try {
+			// Load the extension with the record-only default send mock first (so
+			// goal creation / continuation sends during setup are harmless).
+			goalExtension(pi);
 
-		assert.equal(
-			winner,
-			"settled",
-			"complete_goal.execute blocked on the audit-start sendMessage — it must be fire-and-forget, not awaited",
-		);
-		assert.ok(
-			sendCount >= 1,
-			"the audit-start sendMessage must still be invoked (fire-and-forget, not removed)",
-		);
+			// Configure an auditor that resolves to an immediate "model not found"
+			// error so runGoalCompletionAuditor returns early instead of trying to
+			// spin a real sub-agent session. The auditor is still ENABLED
+			// (settings.disabled !== true) so we reach the audit-start sendMessage.
+			fs.writeFileSync(
+				path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+				JSON.stringify({ model: "nope/nomodel" }),
+			);
+			const ctx = createMockCtx(pi, { cwd, idle: false });
+			ctx.modelRegistry = { find: () => undefined, getAvailable: () => [] };
+
+			// Create + focus an active goal via the direct /goals-set command.
+			await invokeCommand(pi, ctx, "goals-set", "Objective: ship it. Success criteria: shipped.");
+
+			// NOW swap sendMessage to a deferred promise that we control. It must
+			// NOT resolve until we explicitly release it. If complete_goal.execute
+			// awaits it (the bug), execute will hang on this promise.
+			let sendCount = 0;
+			(pi as any).sendMessage = () => {
+				sendCount += 1;
+				return new Promise<void>((resolve) => pendingResolvers.push(resolve));
+			};
+
+			// Invoke complete_goal and race it against a timeout. With the fix
+			// (fire-and-forget), execute proceeds past the sendMessage, the auditor
+			// returns its early error, and execute settles — all while the
+			// sendMessage promise is still pending. Without the fix (await),
+			// execute blocks on the deferred promise and the timeout wins.
+			const execPromise = invokeTool(pi, ctx, "complete_goal", {
+				verificationSummary: "all criteria verified",
+			});
+			const winner = await Promise.race([
+				execPromise.then(
+					() => "settled" as const,
+					() => "settled" as const,
+				),
+				new Promise<"timeout">((r) => { raceTimer = setTimeout(() => r("timeout"), 500); }),
+			]);
+
+			assert.equal(
+				winner,
+				"settled",
+				"complete_goal.execute blocked on the audit-start sendMessage — it must be fire-and-forget, not awaited",
+			);
+			assert.ok(
+				sendCount >= 1,
+				"the audit-start sendMessage must still be invoked (fire-and-forget, not removed)",
+			);
+		} finally {
+			// Guarantee cleanup even on assertion failure or timeout so no timer,
+			// deferred promise, env var, or temp dir leaks into sibling tests.
+			if (raceTimer) clearTimeout(raceTimer);
+			for (const fn of pendingResolvers) { try { fn(); } catch {} }
+			restoreGoalEnv(envSnap);
+			await cleanupTimers(pi, cwd);
+			try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+		}
 	});
 });
