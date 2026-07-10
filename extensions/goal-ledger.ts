@@ -13,7 +13,7 @@ export type GoalLedgerEvent =
   | { type: "goal_tweaked"; goalId: string; changeSummary: string; at: string }
   | { type: "completion_requested"; goalId: string; summary?: string; at: string }
   | { type: "audit_started"; goalId: string; provider?: string; model?: string; thinkingLevel?: string; at: string }
-  | { type: "audit_result"; goalId: string; verdict: "approved" | "disapproved" | "error"; report: string; at: string }
+  | { type: "audit_result"; goalId: string; verdict: "approved" | "disapproved" | "error"; report: string; at: string; timedOut?: boolean }
   | { type: "audit_skipped"; goalId: string; reason: "disabled" | "user_aborted"; provider?: string; model?: string; thinkingLevel?: string; at: string }
   | { type: "goal_completed"; goalId: string; archivePath?: string; at: string }
   | { type: "goal_aborted"; goalId: string; reason: string; archivePath?: string; at: string }

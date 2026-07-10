@@ -62,6 +62,7 @@ export interface GoalAuditorResult {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	error?: string;
+	timedOut?: boolean;
 }
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -703,6 +704,47 @@ export async function runGoalCompletionAuditor(args: {
 		const abortSession = () => { aborted = true; session.abort(); };
 		args.signal?.addEventListener("abort", abortSession, { once: true });
 
+		// ── Bug 1a fix: auditor timeout ──────────────────────────────────────
+		// Hard ceiling on audit duration to prevent indefinite hangs from
+		// inherited extensions that never resolve. Configurable via
+		// settings.auditorTimeoutMs (default 5 minutes). On timeout: abort
+		// session, set timedOut flag, return {approved:false, error:"Auditor timeout"}.
+		const DEFAULT_AUDITOR_TIMEOUT_MS = 5 * 60 * 1000;
+		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
+		let timedOut = false;
+		let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+		let rejectionMessage: string | undefined;
+
+		// ── Bug 1a fix: scoped unhandledRejection guard ──────────────────────
+		// Catches async rejections from inherited extensions during the audit
+		// window. Logs via logAuditorTrace, does NOT propagate to Node's default
+		// handler (which would terminate the process). Installed before
+		// session.prompt(), removed in finally block.
+		const unhandledRejectionHandler = (reason: unknown) => {
+			// R3.5: AbortError is benign (fired during abort teardown)
+			const isAbortError = reason instanceof Error && reason.name === "AbortError";
+			if (isAbortError) {
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "unhandledRejection",
+					goalId: args.goal.id,
+					reason: "AbortError (benign — swallowed)",
+				});
+				return;
+			}
+			// R3.4: capture message for error return
+			const msg = reason instanceof Error ? reason.message : String(reason);
+			rejectionMessage = `Auditor inherited-resource rejection: ${msg}`;
+			logAuditorTrace(args.ctx.cwd, {
+				ts: new Date().toISOString(),
+				phase: "unhandledRejection",
+				goalId: args.goal.id,
+				reason: msg,
+				stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
+			});
+		};
+
 		// Emit initial progress
 		progress.label = "Starting audit...";
 		progress.percentage = 0;
@@ -720,8 +762,175 @@ export async function runGoalCompletionAuditor(args: {
 				}));
 				return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: "Auditor aborted." };
 			}
-			await session.prompt(resolvedPrompt.prompt);
+			// Install timeout + unhandledRejection guard before prompt
+			process.on("unhandledRejection", unhandledRejectionHandler);
+			timeoutId = setTimeout(() => {
+				timedOut = true;
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "timeout",
+					goalId: args.goal.id,
+					timeoutMs,
+				});
+				session.abort();
+			}, timeoutMs);
+			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
+			// Generic errors MUST propagate to the catch block for proper error handling.
+			await session.prompt(resolvedPrompt.prompt).catch((err: unknown) => {
+				// Only swallow AbortError (from abort). All other errors propagate.
+				if (err instanceof Error && err.name === "AbortError") return;
+				throw err;
+			});
+			// Check timeout BEFORE checking aborted (timeout sets aborted via session.abort())
+			// Also check rejectionMessage — R3.4 says return rejection error if guard caught one
+			if (rejectionMessage) {
+				const rejOutput = outputParts.join("\n\n").trim();
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: rejectionMessage,
+					output: rejOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: rejOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: rejectionMessage,
+				};
+			}
+			if (timedOut) {
+				const timeoutOutput = outputParts.join("\n\n").trim();
+				const timeoutError = `Auditor timeout after ${timeoutMs}ms`;
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: timeoutError,
+					output: timeoutOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: timeoutOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: timeoutError,
+					timedOut: true,
+				};
+			}
+			// session.abort() does NOT throw — the agent loop returns normally with
+			// whatever output was captured before the abort. Check BOTH the local
+			// `aborted` flag (set synchronously before session.abort()) AND the
+			// signal's aborted state for defense-in-depth. The local flag catches
+			// the race where abort fires during prompt resolution but the signal
+			// check hasn't propagated yet.
+			if (aborted || args.signal?.aborted) {
+				const abortedOutput = outputParts.join("\n\n").trim();
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: "Auditor aborted.",
+					output: abortedOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: abortedOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: "Auditor aborted.",
+				};
+			}
+			const output = outputParts.join("\n\n").trim();
+			const decision = parseAuditorDecision(output);
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: decision.approved,
+				disapproved: decision.disapproved,
+				model: modelLabel(model),
+				output,
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return { ...decision, output, model: modelLabel(model), thinkingLevel };
+		} catch (error) {
+			// Check timeout BEFORE generic error handling
+			if (timedOut) {
+				const timeoutOutput = outputParts.join("\n\n").trim();
+				const timeoutError = `Auditor timeout after ${timeoutMs}ms`;
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: timeoutError,
+					output: timeoutOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: timeoutOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: timeoutError,
+					timedOut: true,
+				};
+			}
+			// Check rejectionMessage (from unhandledRejection guard)
+			if (rejectionMessage) {
+				const rejOutput = outputParts.join("\n\n").trim();
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: rejectionMessage,
+					output: rejOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: rejOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: rejectionMessage,
+				};
+			}
+			const isAborted = args.signal?.aborted || (error instanceof Error && error.name === "AbortError");
+			const errorMsg = isAborted ? "Auditor aborted." : (error instanceof Error ? error.message : String(error));
+			const errOutput = outputParts.join("\n\n").trim();
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: false,
+				disapproved: true,
+				model: modelLabel(model),
+				error: errorMsg,
+				output: errOutput,
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return {
+				approved: false,
+				disapproved: true,
+				output: errOutput,
+				model: modelLabel(model),
+				thinkingLevel,
+				error: errorMsg,
+			};
 		} finally {
+			// Remove timeout + unhandledRejection guard
+			if (timeoutId) clearTimeout(timeoutId);
+			process.off("unhandledRejection", unhandledRejectionHandler);
 			args.signal?.removeEventListener("abort", abortSession);
 			progress.phase = "done";
 			progress.label = "Audit complete.";
@@ -729,46 +938,9 @@ export async function runGoalCompletionAuditor(args: {
 			emitProgress();
 			unsubscribe();
 		}
-		// session.abort() does NOT throw — the agent loop returns normally with
-		// whatever output was captured before the abort. Check BOTH the local
-		// `aborted` flag (set synchronously before session.abort()) AND the
-		// signal's aborted state for defense-in-depth. The local flag catches
-		// the race where abort fires during prompt resolution but the signal
-		// check hasn't propagated yet.
-		if (aborted || args.signal?.aborted) {
-			const abortedOutput = outputParts.join("\n\n").trim();
-			logAuditorTrace(args.ctx.cwd, buildEndEntry({
-				goalId: args.goal.id,
-				approved: false,
-				disapproved: true,
-				model: modelLabel(model),
-				error: "Auditor aborted.",
-				output: abortedOutput,
-				elapsedMs: Date.now() - startedAt,
-			}));
-			return {
-				approved: false,
-				disapproved: true,
-				output: abortedOutput,
-				model: modelLabel(model),
-				thinkingLevel,
-				error: "Auditor aborted.",
-			};
-		}
-		const output = outputParts.join("\n\n").trim();
-		const decision = parseAuditorDecision(output);
-		logAuditorTrace(args.ctx.cwd, buildEndEntry({
-			goalId: args.goal.id,
-				approved: decision.approved,
-				disapproved: decision.disapproved,
-				model: modelLabel(model),
-				output,
-				elapsedMs: Date.now() - startedAt,
-			}));
-		return { ...decision, output, model: modelLabel(model), thinkingLevel };
 	} catch (error) {
-		const isAborted = args.signal?.aborted || (error instanceof Error && error.name === "AbortError");
-		const errorMsg = isAborted ? "Auditor aborted." : (error instanceof Error ? error.message : String(error));
+		// Outer catch for the entire audit function
+		const errorMsg = error instanceof Error ? error.message : String(error);
 		const errOutput = outputParts.join("\n\n").trim();
 		logAuditorTrace(args.ctx.cwd, buildEndEntry({
 			goalId: args.goal.id,
