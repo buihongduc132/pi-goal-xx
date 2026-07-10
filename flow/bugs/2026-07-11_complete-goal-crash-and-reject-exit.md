@@ -16,7 +16,10 @@
 
 **Why the landed "fix" (`ff36e54`/`ec4517c`, Jul 9) doesn't help:** those commits removed `await` from `pi.sendMessage` but did NOT touch `inheritFromCwd`. The crash is inside `runGoalCompletionAuditor`, ~60 lines downstream of the patched send.
 
-**Fix:** remove `mainResources` block from `goal.ts:3142-3150`. Restore upstream's isolated auditor (empty resource loader, 6 hardcoded tools, compaction disabled). If resource inheritance is still wanted, it must run out-of-process or with a hard allow-list.
+**Fix direction:** keep `inheritFromCwd:true` (user's design decision — auditor inherits all, opt-out via `auditorExclude`/`auditorInclude` settings). Harden in-process:
+1. Add **auditor prompt timeout** — currently NONE in `goal-auditor.ts`. Default ceiling (e.g. 5min for audit, separate from verifier-loop's 30min). Configurable via `ceremony.auditorTimeoutMs`. On timeout: abort session, return `{approved:false, error:"Auditor timeout"}`, do NOT kill host.
+2. Add **`unhandledRejection` guard** scoped to audit window — catch async rejections from inherited extensions during `await session.prompt()`. Log via `logAuditorTrace`, do NOT propagate to Node's default handler.
+3. If hardening still flaky after (1)+(2), escalate to out-of-process auditor (separate design).
 
 ## Bug 2 — auditor rejects → pi exits immediately
 
@@ -33,3 +36,5 @@
 - [ ] Bug 1: `complete_goal` with auditor enabled does not hang/exit. Ledger contains `audit_result`.
 - [ ] Bug 2: auditor rejects → pi stays alive, agent receives rejection text, can retry.
 - [ ] Test: complete_goal reject path does not produce unhandledRejection.
+- [ ] Test: auditor timeout fires → returns `{approved:false, error:"Auditor timeout"}`, host stays alive.
+- [ ] Test: inherited extension throws async rejection during audit → logged, host stays alive.
