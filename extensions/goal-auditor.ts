@@ -685,27 +685,36 @@ export async function runGoalCompletionAuditor(args: {
 		process.on("uncaughtException", uncaughtExceptionHandler);
 
 		let session: Awaited<ReturnType<typeof createSession>>["session"];
+		let csTimeoutId: ReturnType<typeof setTimeout> | undefined;
 		try {
-			let csTimeoutId: ReturnType<typeof setTimeout>;
-			const created = await Promise.race([
-				createSession({
-					cwd: args.ctx.cwd,
-					model,
-					thinkingLevel,
-					modelRegistry: args.ctx.modelRegistry,
-					resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
-					sessionManager: SessionManager.inMemory(args.ctx.cwd),
-					settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
-					tools: resolved.tools,
-					customTools: [reportProgressTool],
-				}),
-				new Promise<never>((_, reject) => {
-					csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), timeoutMs);
-				}),
-			]);
-			clearTimeout(csTimeoutId!);
-			session = created.session;
-			sessionRef = session;
+			try {
+				const created = await Promise.race([
+					createSession({
+						cwd: args.ctx.cwd,
+						model,
+						thinkingLevel,
+						modelRegistry: args.ctx.modelRegistry,
+						resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
+						sessionManager: SessionManager.inMemory(args.ctx.cwd),
+						settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+						tools: resolved.tools,
+						customTools: [reportProgressTool],
+					}),
+					new Promise<never>((_, reject) => {
+						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), timeoutMs);
+					}),
+				]);
+				session = created.session;
+				sessionRef = session;
+			} finally {
+				// Counterfactual fix (GAP-C): clear the createSession timeout
+				// timer on EVERY path — success, throw, and timeout-reject.
+				// The original code only cleared on the happy path (leaking on
+				// throw); the first counterfactual attempt only cleared on the
+				// catch path (leaking on success, regressing the common case).
+				// A finally here clears it unconditionally.
+				if (csTimeoutId) clearTimeout(csTimeoutId);
+			}
 		} catch (createError) {
 			if (createError instanceof Error && createError.message === "__auditor_cs_timeout__") {
 				timedOut = true;
@@ -875,7 +884,28 @@ export async function runGoalCompletionAuditor(args: {
 		// the session (which may fire after session.abort() returns) would
 		// resurrect the nulled auditProgress in the caller.
 		let aborted = args.signal?.aborted ?? false;
-		const abortSession = () => { aborted = true; session.abort(); };
+		// Counterfactual fix: wrap session.abort() in try/catch for
+		// defense-in-depth. abort() is non-throwing today (pi-agent-core),
+		// but a future refactor could throw — and a throw inside an
+		// AbortSignal listener or setTimeout callback surfaces as
+		// uncaughtException. captureGuardError already wraps its abort()
+		// (line ~672); these two sites should match. Unlike captureGuardError's
+		// bare catch, we log the failure to the trace so a future abort() throw
+		// is visible rather than silently swallowed (avoids broad exception
+		// masking).
+		const safeAbort = () => {
+			try { session.abort(); } catch (e) {
+				try {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "abort_failed",
+						goalId: args.goal.id,
+						error: e instanceof Error ? e.message : String(e),
+					});
+				} catch { /* trace logging must never crash */ }
+			}
+		};
+		const abortSession = () => { aborted = true; safeAbort(); };
 		args.signal?.addEventListener("abort", abortSession, { once: true });
 
 		// ── Bug 1a fix: auditor timeout ──────────────────────────────────────
@@ -912,7 +942,7 @@ export async function runGoalCompletionAuditor(args: {
 					goalId: args.goal.id,
 					timeoutMs,
 				});
-				session.abort();
+				safeAbort();
 			}, Math.max(0, timeoutMs - (Date.now() - startedAt)));
 			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
 			// Generic errors MUST propagate to the catch block for proper error handling.

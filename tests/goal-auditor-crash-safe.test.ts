@@ -190,6 +190,55 @@ describe("Bug 1a — auditor timeout (R2.1-R2.6)", () => {
 		assert.equal(listenersAfter, listenersBefore, "guard removed after happy-path audit");
 	});
 
+	it("GAP-C: createSession timeout timer (csTimeoutId) is cleared on the happy path (no leak)", async () => {
+		// Counterfactual regression test: the first GAP-C attempt only cleared
+		// csTimeoutId in the catch path, deleting the original happy-path
+		// clearTimeout. This leaked a 5min setTimeout on every SUCCESSFUL audit,
+		// pinning a libuv handle (the suite hung without --test-force-exit).
+		// This test MUST fail if the success-path clear is removed.
+		//
+		// Strategy: monkeypatch setTimeout/clearTimeout to track the specific
+		// cs-timeout timer (distinctive 7777ms delay). After a successful audit,
+		// assert that timer was passed to clearTimeout (i.e. cleared).
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ auditorTimeoutMs: 7777 }),
+		);
+		const realSetTimeout = globalThis.setTimeout;
+		const realClearTimeout = globalThis.clearTimeout;
+		const csTimers = new Set<ReturnType<typeof setTimeout>>();
+		const clearedTimers = new Set<ReturnType<typeof setTimeout>>();
+		globalThis.setTimeout = ((fn: any, ms?: number, ...rest: any[]) => {
+			const id = realSetTimeout(fn, ms, ...rest);
+			if (ms === 7777) csTimers.add(id); // track the cs-timeout timer
+			return id;
+		}) as any;
+		globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+			clearedTimers.add(id);
+			return realClearTimeout(id);
+		}) as any;
+		try {
+			await runGoalCompletionAuditor({
+				ctx: makeCtx(cwd),
+				goal: makeGoal(),
+				detailedSummary: "detailed",
+				createSession: makeApprovingCreateSession(10),
+			});
+		} finally {
+			globalThis.setTimeout = realSetTimeout;
+			globalThis.clearTimeout = realClearTimeout;
+		}
+		// At least one cs-timeout timer (7777ms) must have been created.
+		assert.ok(csTimers.size > 0, "a createSession timeout timer (7777ms) must have been created");
+		// EVERY cs-timeout timer must have been cleared (passed to clearTimeout).
+		const uncleared = [...csTimers].filter((id) => !clearedTimers.has(id));
+		assert.equal(
+			uncleared.length,
+			0,
+			`csTimeoutId must be cleared on the happy path; ${uncleared.length} of ${csTimers.size} cs-timer(s) were never cleared`,
+		);
+	});
+
 	it("writes audit trace with phase:'timeout' to trace file", async () => {
 		fs.writeFileSync(
 			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
@@ -203,12 +252,15 @@ describe("Bug 1a — auditor timeout (R2.1-R2.6)", () => {
 			createSession: makeHangingCreateSession(),
 		});
 
-		const traceDir = path.join(cwd, ".pi", "pi-goal-xx", "auditor-traces");
-		const traceFiles = fs.existsSync(traceDir) ? fs.readdirSync(traceDir) : [];
-		if (traceFiles.length > 0) {
-			const traceContent = fs.readFileSync(path.join(traceDir, traceFiles[0]), "utf8");
-			assert.match(traceContent, /"phase":"timeout"/);
-		}
+		// Counterfactual fix: the original test read from `.pi/pi-goal-xx/auditor-traces`
+		// (a directory that NEVER exists) while the source writes to
+		// `.pi/goals/auditor-trace.jsonl` (a file). The `if (traceFiles.length > 0)`
+		// guard then made the assertion vacuous — it always passed even if trace
+		// logging were deleted entirely. Read the real path and ALWAYS assert.
+		const traceFile = path.join(cwd, ".pi", "goals", "auditor-trace.jsonl");
+		assert.ok(fs.existsSync(traceFile), "auditor-trace.jsonl must exist after a timeout");
+		const traceContent = fs.readFileSync(traceFile, "utf8");
+		assert.match(traceContent, /"phase":"timeout"/, "trace must record the timeout phase");
 	});
 
 	it("R2.3: auditorTimeoutMs loaded from settings file", () => {
@@ -577,3 +629,90 @@ describe("P2 — guard error during createSession short-circuits before prompt",
 		assert.ok(checkIdx < subIdx, "P2: rejectionMessage check must be BEFORE session.subscribe");
 	});
 });
+
+// ─── Counterfactual fixes (adversarial audit follow-ups) ──────────────
+// These tests close gaps found by the counterfactual audit: a vacuous trace
+// test (now fixed above), a timeout/prompt-resolution race, and the lack of
+// any behavioral proof that the unhandledRejection guard actually captures a
+// rejection (the R3.x suite only counted listeners).
+
+describe("Counterfactual — unhandledRejection guard captures a real rejection", () => {
+	let cwd: string;
+
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+	});
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("behavioral: a rejection emitted during the audit window is captured into rejectionMessage and surfaced", async () => {
+		// The R3.x suite only counts process.listeners("unhandledRejection")
+		// before/during/after — it never fires a real rejection and verifies
+		// the guard captured it. This test does.
+		//
+		// Infeasibility note: Node's `--test` runner installs its own
+		// `unhandledRejection` handler that fails the test if it sees the
+		// rejection. `Promise.reject(...)` and `process.emit(...)` both
+		// dispatch to ALL listeners, so the test runner always intercepts.
+		// Workaround: during createSession, temporarily detach every
+		// pre-existing `unhandledRejection` listener EXCEPT the one the
+		// auditor just installed, emit the rejection so ONLY the auditor's
+		// guard sees it, then restore the detached listeners. This genuinely
+		// exercises captureGuardError → rejectionMessage → disapproved return.
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ auditorTimeoutMs: 2000 }),
+		);
+		const boom = new Error("counterfactual-inherited-ext-boom");
+		const createSession = (_args: any) => {
+			// The auditor's guard is now installed (G1: before createSession).
+			// Detach all OTHER handlers so the emit reaches only the guard.
+			const all = process.listeners("unhandledRejection");
+			// Remove every listener except the last-installed (the auditor's).
+			// The auditor installs exactly one unhandledRejection handler (G1),
+			// so after detaching the rest, exactly one remains.
+			const detached: { listener: NodeJS.UnhandledRejectionListener }[] = [];
+			for (const l of all.slice(0, -1)) {
+				process.off("unhandledRejection", l);
+				detached.push({ listener: l });
+			}
+			try {
+				// Emit synchronously — dispatches only to the auditor's guard.
+				process.emit("unhandledRejection", boom, Promise.resolve());
+			} finally {
+				// Restore the detached listeners (Node's test-runner handler).
+				for (const { listener } of detached) {
+					process.on("unhandledRejection", listener);
+				}
+			}
+			const session = {
+				subscribe(_cb: (event: any) => void) { return () => {}; },
+				prompt(_text: string): Promise<void> {
+					return Promise.resolve();
+				},
+				abort() {},
+			};
+			return Promise.resolve({ session });
+		};
+		const result = await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession,
+		});
+		// If we got here, the host survived — the guard captured the rejection
+		// and the audit returned disapproved-with-error (no process exit).
+		assert.equal(result.approved, false, "audit must disapprove when a guard error fired");
+		assert.equal(result.disapproved, true, "audit must be disapproved with an error");
+		assert.ok(
+			typeof result.error === "string" && result.error.includes("unhandledRejection"),
+			`error must reference the captured rejection kind; got: ${result.error}`,
+		);
+		assert.ok(
+			typeof result.error === "string" && result.error.includes("counterfactual-inherited-ext-boom"),
+			`error must carry the rejection message; got: ${result.error}`,
+		);
+	});
+});
+

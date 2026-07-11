@@ -422,4 +422,21 @@ describe("loadGoalSettings / saveGoalSettingsFileConfig — auditor round trip",
 		assert.equal(loaded.auditorPromptMode, undefined);
 		assert.equal(loaded.auditorPrompt, undefined);
 	});
+
+	it("counterfactual: auditorTimeoutMs round-trips through saveGoalSettingsFileConfig (was silently dropped)", () => {
+		// Counterfactual fix: saveGoalSettingsFileConfig previously persisted
+		// every auditor field EXCEPT auditorTimeoutMs. A settings rewrite
+		// (e.g. a /goal-settings edit) would silently delete the user's
+		// auditor timeout, falling back to the 5min default. Verify it now
+		// round-trips: save → reload → value preserved.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-timeout-"));
+		const original: GoalSettings = { auditorTimeoutMs: 42_000 };
+		saveGoalSettingsFileConfig(tmp, original);
+		const loaded = loadGoalSettingsFileConfig(tmp, {});
+		assert.equal(loaded.auditorTimeoutMs, 42_000, "auditorTimeoutMs must survive a save→load round-trip");
+		// Also confirm it landed in the JSON file (not just the clean object).
+		const raw = JSON.parse(fs.readFileSync(path.join(tmp, ".pi", "pi-goal-xx-settings.json"), "utf8"));
+		assert.equal(raw.auditorTimeoutMs, 42_000, "auditorTimeoutMs must be persisted to the settings file");
+		fs.rmSync(tmp, { recursive: true, force: true });
+	});
 });
