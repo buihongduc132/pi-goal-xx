@@ -506,6 +506,25 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		);
 		return run;
 	}
+	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
+	// Catches rejections and logs them via auditor trace to prevent process crashes.
+	// Used for all 6 sendMessage calls in complete_goal (Bug 1b fix).
+	function safeFireAndForget(fn: () => unknown, context: string, cwd: string): void {
+		Promise.resolve()
+			.then(fn)
+			.catch((err) => {
+				try {
+					logAuditorTrace(cwd, {
+						ts: nowIso(),
+						phase: "send_failure",
+						context,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				} catch {
+					// trace logging must never crash
+				}
+			});
+	}
 	let runningGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
 	let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -2960,12 +2979,14 @@ ${objective}` : objective,
 
 			// Check if auditor is disabled per-goal (user toggled it off during goal confirmation)
 			if (auditTarget.skipAuditor) {
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: `Goal completed — per-goal auditor disabled.`,
-					display: true,
-					details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: `Goal completed — per-goal auditor disabled.`,
+						display: true,
+						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+					}),
+				 "complete_goal_skipAuditor", ctx.cwd);
 				try {
 					appendGoalEvent(ctx, {
 						type: "audit_skipped",
@@ -3026,12 +3047,14 @@ ${objective}` : objective,
 				// Defer archival: set goal complete in-memory + write active file WITHOUT
 				// archiving. Archival happens at turn_end so the agent has a chance to
 				// recognise the skipped audit before the goal is archived.
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: `Goal completed — auditor disabled in settings.`,
-					display: true,
-					details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: `Goal completed — auditor disabled in settings.`,
+						display: true,
+						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+					}),
+				 "complete_goal_disabled_settings", ctx.cwd);
 				try {
 					appendGoalEvent(ctx, {
 						type: "audit_skipped",
@@ -3080,17 +3103,19 @@ ${objective}` : objective,
 			// IMPORTANT: do NOT await this sendMessage — it fires a UI notification
 			// while complete_goal is mid-execute. Awaiting it blocks the tool body
 			// and can crash/quit the host session. Fire-and-forget is correct here.
-			pi.sendMessage<GoalAuditEventDetails>({
-				customType: GOAL_AUDIT_ENTRY,
-				content: [
-					"Auditor: I am starting the independent completion audit.",
-					`Goal id: ${auditTarget.id}`,
-					`Auditor model: ${auditorLabel}`,
-					params.completionSummary?.trim() ? `Completion claim: ${params.completionSummary.trim()}` : undefined,
-				].filter((line): line is string => line !== undefined).join("\n"),
-				display: true,
-				details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
-			});
+			safeFireAndForget(() => 
+				pi.sendMessage<GoalAuditEventDetails>({
+					customType: GOAL_AUDIT_ENTRY,
+					content: [
+						"Auditor: I am starting the independent completion audit.",
+						`Goal id: ${auditTarget.id}`,
+						`Auditor model: ${auditorLabel}`,
+						params.completionSummary?.trim() ? `Completion claim: ${params.completionSummary.trim()}` : undefined,
+					].filter((line): line is string => line !== undefined).join("\n"),
+					display: true,
+					details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
+				}),
+			 "complete_goal_started", ctx.cwd);
 			// Append ledger: audit started
 			try {
 				appendGoalEvent(ctx, {
@@ -3186,12 +3211,14 @@ ${objective}` : objective,
 
 				if (userChoice === "complete_without_audit") {
 					// ── Mark complete without audit ────────────────────────────
-					pi.sendMessage<GoalAuditEventDetails>({
-						customType: GOAL_AUDIT_ENTRY,
-						content: `Goal completed — user bypassed audit via Escape.`,
-						display: true,
-						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-					});
+					safeFireAndForget(() => 
+						pi.sendMessage<GoalAuditEventDetails>({
+							customType: GOAL_AUDIT_ENTRY,
+							content: `Goal completed — user bypassed audit via Escape.`,
+							display: true,
+							details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+						}),
+					 "complete_goal_user_bypass", ctx.cwd);
 					try {
 						appendGoalEvent(ctx, {
 							type: "audit_skipped",
@@ -3261,6 +3288,7 @@ ${objective}` : objective,
 					verdict,
 					report: auditor.output || "Auditor produced no output.",
 					at: nowIso(),
+					timedOut: auditor.timedOut === true ? true : undefined,
 				});
 			} catch {
 				// Ledger append failure should not block completion
@@ -3278,12 +3306,14 @@ ${objective}` : objective,
 					"",
 					auditor.output || "Auditor produced no approval marker.",
 				].filter((line): line is string => line !== undefined).join("\n");
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: rejectionText,
-					display: true,
-					details: { phase: "rejected", goalId: auditTarget.id, auditor: auditor.model },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: rejectionText,
+						display: true,
+						details: { phase: "rejected", goalId: auditTarget.id, auditor: auditor.model },
+					}),
+				 "complete_goal_rejected", ctx.cwd);
 				return {
 					content: [{ type: "text", text: rejectionText }],
 					details: goalDetails(state.goal),
@@ -3295,12 +3325,14 @@ ${objective}` : objective,
 				"",
 				auditor.output || "Auditor approved completion.",
 			].filter((line): line is string => line !== undefined).join("\n");
-			pi.sendMessage<GoalAuditEventDetails>({
-				customType: GOAL_AUDIT_ENTRY,
-				content: approvalText,
-				display: true,
-				details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
-			});
+			safeFireAndForget(() => 
+				pi.sendMessage<GoalAuditEventDetails>({
+					customType: GOAL_AUDIT_ENTRY,
+					content: approvalText,
+					display: true,
+					details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
+				}),
+			 "complete_goal_approved", ctx.cwd);
 			// Account for any remaining elapsed time.
 			// Defer archival: set goal complete in-memory + write active file WITHOUT
 			// archiving. Archival happens at turn_end so the agent can see the auditor

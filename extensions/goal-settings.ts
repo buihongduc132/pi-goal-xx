@@ -114,6 +114,8 @@ export interface GoalSettings {
 	contractTemplates?: boolean;
 	/** UNIFIED: override the contracts directory (default `.pi/pi-goal-xx/contracts/`). */
 	contractsDir?: string;
+	/** Auditor timeout in milliseconds. Default 300000 (5 minutes). */
+	auditorTimeoutMs?: number;
 }
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
@@ -146,6 +148,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"hooksDir",
 	"contractTemplates",
 	"contractsDir",
+	"auditorTimeoutMs",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -452,6 +455,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	settings.leaseMs = leaseMs;
 	const heartbeatMs = asPositiveInt(record.heartbeatMs) ?? 60_000;
 	settings.heartbeatMs = heartbeatMs;
+	const auditorTimeoutMsRaw = asPositiveInt(record.auditorTimeoutMs);
+	if (auditorTimeoutMsRaw !== undefined) settings.auditorTimeoutMs = auditorTimeoutMsRaw;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
 	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
 	// Read the raw mode value (not the legacy-validated one) so unified modes
@@ -516,6 +521,7 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 			? false
 			: (fileConfig.contractTemplates ?? true),
 		contractsDir: fileConfig.contractsDir,
+		auditorTimeoutMs: fileConfig.auditorTimeoutMs,
 	};
 }
 
