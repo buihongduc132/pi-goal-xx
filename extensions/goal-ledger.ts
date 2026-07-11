@@ -71,7 +71,9 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
   // Pass the incoming line length so rotation accounts for it.
   rotateIfNeeded(filePath, undefined, undefined, Buffer.byteLength(line, "utf8"));
 
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  // Include a random suffix so two calls within the same millisecond (same pid)
+  // don't collide on the "wx" exclusive-create flag. (gemini review)
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   let appended = false;
   try {
     fs.writeFileSync(tempPath, line, { flag: "wx", encoding: "utf8" });

@@ -81,6 +81,48 @@ describe("G4: complete_goal surfaces disk-write failures to the agent", () => {
 			await cleanupTimers(pi, cwd);
 		}
 	});
+
+	it("rolls back in-memory state.goal to active on write failure so retry is possible (gemini/coderabbit)", async () => {
+		// Regression for the high-severity review finding: on a write failure
+		// the in-memory goal was left status:"complete" while the disk still
+		// held the active record. A retry was then blocked because
+		// validateGoalCompletion saw the stale "complete" status. The fix
+		// rolls state.goal back to auditTarget (the pre-completion record).
+		const envSnap = forceNonWorkerEnv();
+		const cwd = makeCwd();
+		const pi: any = createMockPi({ cwd });
+		goalExtension(pi);
+		try {
+			const ctx = createMockCtx(pi, { cwd, idle: false });
+			ctx.modelRegistry = { find: () => undefined, getAvailable: () => [] };
+			fs.writeFileSync(
+				path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+				JSON.stringify({ disabled: true }),
+			);
+			await invokeCommand(pi, ctx, "goals-set", "Objective: ship it. Success criteria: shipped.");
+			// Break persistence so complete_goal's write fails.
+			fs.chmodSync(path.join(cwd, ".pi", "goals"), 0o555);
+			await invokeTool(pi, ctx, "complete_goal", {
+				verificationSummary: "verified",
+				confirmBypassAuditor: true,
+			});
+			// Restore writability so the get_goal read path works.
+			fs.chmodSync(path.join(cwd, ".pi", "goals"), 0o755);
+			// The in-memory goal must NOT be stuck at status:"complete" — it
+			// must be rolled back so the agent can retry complete_goal.
+			const goalResult = await invokeTool(pi, ctx, "get_goal", {});
+			const goalText = String((goalResult as any)?.content?.[0]?.text ?? "");
+			assert.ok(
+				!/status:\s*complete/i.test(goalText) || /could not be saved/i.test(goalText),
+				`in-memory goal must not be left "complete" after a write failure: ${goalText}`,
+			);
+		} finally {
+			fs.chmodSync(path.join(cwd, ".pi", "goals"), 0o755);
+			try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+			restoreGoalEnv(envSnap);
+			await cleanupTimers(pi, cwd);
+		}
+	});
 });
 
 describe("G4: turn_end archival failure does not crash the hook", () => {
@@ -144,6 +186,34 @@ describe("P1: propose_goal_tweak enforces G6 objective cap on confirmation", () 
 			SRC,
 			/propose_goal_tweak REJECTED: revised objective/,
 			"P1: overlong objective must be rejected with a clear message",
+		);
+	});
+
+	it("source: the tweak path rejects overlong newObjective BEFORE the dialog (coderabbit)", () => {
+		// Early cap — before buildTweakConfirmationText / showProposalDialog.
+		assert.match(
+			SRC,
+			/newObjective\.length > MAX_OBJECTIVE_LENGTH/,
+			"P1: propose_goal_tweak must check newObjective.length early, before the dialog",
+		);
+	});
+
+	it("source: handleDirectGoalSet enforces the G6 cap (coderabbit)", () => {
+		// /goals-set and /sisyphus-set must not bypass the 50KB cap.
+		assert.match(
+			SRC,
+			/raw\.length > MAX_OBJECTIVE_LENGTH/,
+			"P1: handleDirectGoalSet must check raw.length against MAX_OBJECTIVE_LENGTH",
+		);
+	});
+
+	it("source: all 4 complete_goal write-failure paths roll back state.goal (gemini/coderabbit)", () => {
+		// Each writeResult error block must restore state.goal = auditTarget
+		// so the in-memory state is not left "complete" when the disk write failed.
+		const rollbackCount = (SRC.match(/state\.goal = auditTarget;/g) || []).length;
+		assert.ok(
+			rollbackCount >= 4,
+			`expected >=4 state.goal = auditTarget rollbacks in complete_goal, found ${rollbackCount}`,
 		);
 	});
 });

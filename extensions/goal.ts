@@ -2022,6 +2022,17 @@ Verification contract:
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
+		// G6 (coderabbit review): enforce the 50KB objective cap on direct-start
+		// commands too, matching propose_goal_draft / complete_goal / propose_goal_tweak.
+		// Without this, a >50KB /goals-set objective bypasses every cap and reaches
+		// persistence + later auditor prompts unbounded.
+		if (raw.length > MAX_OBJECTIVE_LENGTH) {
+			ctx.ui.notify(
+				`Objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.`,
+				"error",
+			);
+			return;
+		}
 		const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
 		if (missingSnippets && missingSnippets.length > 0) {
 			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
@@ -2778,6 +2789,18 @@ ${objective}` : objective,
 			}
 			const newObjective = params.newObjective.trim();
 			if (!newObjective) throw new Error("propose_goal_tweak requires a non-empty newObjective.");
+			// G6 early cap (coderabbit review): reject an overlong objective BEFORE
+			// building the confirmation dialog / rendering UI. The later
+			// cleanedObjective check still covers contract-expansion edge cases.
+			if (newObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${newObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 			const changeSummary = params.changeSummary.trim();
 			if (!changeSummary) throw new Error("propose_goal_tweak requires a non-empty changeSummary.");
 
@@ -3111,6 +3134,12 @@ ${objective}` : objective,
 				// G4: surface disk-write failure instead of letting it crash complete_goal.
 				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal, true);
 				if (!writeResult3.ok) {
+					// Rollback: restore the pre-completion in-memory state so the disk
+					// and memory stay consistent. Without this, state.goal remains
+					// status:"complete" while the disk still holds the active/paused
+					// record — a retry would be blocked by validateGoalCompletion
+					// seeing the stale in-memory "complete" status. (gemini/coderabbit)
+					state.goal = auditTarget;
 					return {
 						content: [{ type: "text", text: writeResult3.error }],
 						details: goalDetails(state.goal),
@@ -3188,6 +3217,8 @@ ${objective}` : objective,
 				// G4: surface disk-write failure instead of letting it crash complete_goal.
 				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal, true);
 				if (!writeResult4.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
 					return {
 						content: [{ type: "text", text: writeResult4.error }],
 						details: goalDetails(state.goal),
@@ -3358,6 +3389,8 @@ ${objective}` : objective,
 					// G4: surface disk-write failure instead of letting it crash complete_goal.
 					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal, true);
 					if (!writeResult5.ok) {
+						// Rollback: see writeResult3 — keep memory consistent with disk.
+						state.goal = auditTarget;
 						return {
 							content: [{ type: "text", text: writeResult5.error }],
 							details: goalDetails(state.goal),
@@ -3470,13 +3503,15 @@ ${objective}` : objective,
 				updatedAt: nowIso(),
 			};
 			// G4: surface disk-write failure instead of letting it crash complete_goal.
-			const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal, true);
-			if (!writeResult6.ok) {
-				return {
-					content: [{ type: "text", text: writeResult6.error }],
-					details: goalDetails(state.goal),
-				};
-			}
+				const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult6.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult6.error }],
+						details: goalDetails(state.goal),
+					};
+				}
 			state.goal = writeResult6.goal;
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 			setTurnStopped(state.goal?.id ?? null);
