@@ -288,7 +288,9 @@ export function previewError(err: unknown): string {
 
 function safeStringify(value: unknown): string {
 	try {
-		return JSON.stringify(value);
+		// JSON.stringify(undefined|function|symbol) returns undefined (not a string);
+		// coalesce to String() so the declared `string` return type always holds.
+		return JSON.stringify(value) ?? String(value);
 	} catch {
 		return String(value);
 	}
