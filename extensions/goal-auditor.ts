@@ -803,7 +803,7 @@ export async function runGoalCompletionAuditor(args: {
 					timeoutMs,
 				});
 				session.abort();
-			}, timeoutMs);
+			}, Math.max(0, timeoutMs - (Date.now() - startedAt)));
 			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
 			// Generic errors MUST propagate to the catch block for proper error handling.
 			await session.prompt(resolvedPrompt.prompt).catch((err: unknown) => {

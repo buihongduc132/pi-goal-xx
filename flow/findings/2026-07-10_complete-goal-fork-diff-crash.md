@@ -1,5 +1,7 @@
 # Forensic Diff — WHY `complete_goal` Crashes the Host Session (fork-only, no exception)
 
+> **HISTORICAL DISCLAIMER** — This analysis was performed on a **pre-fix** revision of the fork (md5 `f473045d…`). The 'Primary fix' recommendation in §5 below proposes **removing** `inheritFromCwd: true`. That recommendation was **superseded** by the user's design decision: inheritance is **intentionally retained** and the in-process boundary is hardened instead (auditor timeout `auditorTimeoutMs`, scoped `unhandledRejection` guard, crash-safe sends). This document is kept for its forensic value (root-cause analysis, evidence chain, line references) — NOT as the current fix direction. See `flow/requirements/2026-07-11_crash-safe-auditor-inheritance.md` for the chosen approach.
+
 **Status:** Read-only investigation complete.
 **Fork:** `buihongduc132/pi-goal-xx` @ `main` (md5 `f473045d…` — confirmed identical to the file deployed in beet-orches at `~/.pi/agent/git/github.com/buihongduc132/pi-goal-xx/extensions/goal.ts`).
 **Upstream:** `tmonk/pi-goal-x` @ `upstream/main` (fetched & reachable — no re-spawn needed).
@@ -131,7 +133,7 @@ Two failure modes, both matching the "no stack trace" constraint:
     // createSession itself threw — almost certainly an extension onLoad
     // failure in the auditor's inherited resource loader. Log it.
 ```
-The author acknowledges the inherited loader causes extension-`onLoad` failures and wraps `createSession` in try/catch. But that catch only catches **synchronous** throws. It does **not** catch (a) an async `onLoad` rejection that lands after `createSession` returns, or (b) a `createSession`/`session.prompt` that simply **hangs**. Both escape the catch → unhandled rejection or infinite await → host dies, exactly as observed.
+The author acknowledges the inherited loader causes extension-`onLoad` failures and wraps `createSession` in try/catch. But while a `try/catch` around `await` DOES catch rejections from the awaited expression itself, it does **not** catch (a) a **detached** async `onLoad` rejection that fires after `createSession` resolves (the promise is not chained), or (b) a `createSession`/`session.prompt` that simply **hangs** (never resolves or rejects). Both escape the catch → unhandled rejection or infinite await → host dies, exactly as observed.
 
 **Fork-only?** ✅ Yes (verified absent upstream — purity angle c). Upstream passes **no** `mainResources`, calls `makeAuditorResourceLoader()` with no args (hard-coded empties), uses a 6-item hardcoded `tools` list, and sets `compaction.enabled = false`.
 
