@@ -15,6 +15,7 @@ import {
 	buildTweakConfirmationText,
 	extractVerificationContract,
 	goalDraftingPrompt,
+	MAX_OBJECTIVE_LENGTH,
 	renderConfirmationTasks,
 	resolveGoalDraftingBlock,
 	validateGoalDraftProposal,
@@ -496,14 +497,25 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// concurrent sends surface as "Agent is already processing" errors emitted
 	// from the <runtime> bindCore catch handlers in agent-session.
 	let messageSendChain: Promise<void> = Promise.resolve();
+	// G7: counter of sends that have been queued but not yet resolved.
+	// When it returns to 0, the chain tail is reset to a fresh
+	// Promise.resolve() so the linked-promise chain (each link references its
+	// predecessor) can be GC'd instead of growing unbounded for the session
+	// lifetime.
+	let pendingSends = 0;
 	function serializedSend<T>(fn: () => T | Promise<T>): Promise<T> {
+		pendingSends++;
 		const run = messageSendChain.then(fn);
 		// Swallow rejections on the chain itself so a failed send never poisons
 		// subsequent sends; the caller still sees the real rejection from `run`.
-		messageSendChain = run.then(
-			() => undefined,
-			() => undefined,
-		);
+		// G7: decrement + reset when drained on BOTH resolve and reject paths.
+		const drain = () => {
+			pendingSends--;
+			if (pendingSends === 0) {
+				messageSendChain = Promise.resolve();
+			}
+		};
+		messageSendChain = run.then(drain, drain);
 		return run;
 	}
 	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
@@ -524,6 +536,35 @@ export default function goalExtension(pi: ExtensionAPI): void {
 					// trace logging must never crash
 				}
 			});
+	}
+	/**
+	 * G4: writeActiveGoalFile can throw if the disk is full, the path is
+	 * unsafe, or permissions deny the write. Every caller wraps the write in
+	 * this helper so a persistence failure is surfaced to the agent instead
+	 * of crashing the tool. Without it, the in-memory goal would look updated
+	 * while the on-disk file stayed stale — the agent would never learn the
+	 * save failed.
+	 *
+	 * Returns the canonical post-write record on success, or an error object
+	 * the caller surfaces to the user/context.
+	 */
+	function tryWriteActiveGoalFile(ctx: ExtensionContext, goal: GoalRecord): { goal: GoalRecord; ok: true } | { error: string; ok: false } {
+		try {
+			return { goal: writeActiveGoalFile(ctx, goal), ok: true };
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const text = `Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`;
+			try { ctx.ui.notify(text, "error"); } catch {}
+			try {
+				logAuditorTrace(ctx.cwd, {
+					ts: nowIso(),
+					phase: "write_failure",
+					context: "writeActiveGoalFile",
+					error: msg,
+				});
+			} catch {}
+			return { error: text, ok: false };
+		}
 	}
 	let runningGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
@@ -1004,7 +1045,21 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (ctx) {
 				syncGoalPromptFromDisk(ctx);
 				const next = state.goal;
-				if (next) state.goal = next.status === "complete" ? archiveGoalFile(ctx, next) : writeActiveGoalFile(ctx, next);
+				if (next) {
+					if (next.status === "complete") {
+						// G4: wrap archival too (archiveGoalFile can throw on the same
+						// disk-failure class). On failure keep the prior in-memory goal.
+						try {
+							state.goal = archiveGoalFile(ctx, next);
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							try { ctx.ui.notify(`Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`, "error"); } catch {}
+						}
+					} else {
+						const writeResult = tryWriteActiveGoalFile(ctx, next);
+						if (writeResult.ok) state.goal = writeResult.goal;
+					}
+				}
 			}
 		}
 		pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
@@ -2827,7 +2882,14 @@ ${objective}` : objective,
 				//   2) update in-memory `goal` to the canonical post-write record
 				//   3) append the state entry and re-sync tools
 				//   4) clear the tweak drafting gate so propose_goal_tweak can't be re-used
-				state.goal = writeActiveGoalFile(ctx, next);
+				const tweakWrite = tryWriteActiveGoalFile(ctx, next);
+				if (!tweakWrite.ok) {
+					return {
+						content: [{ type: "text", text: tweakWrite.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = tweakWrite.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				tweakDraftingFor = null;
 				// Reset autoContinue counter — plan changed, agent gets a fresh chain.
@@ -2920,6 +2982,23 @@ ${objective}` : objective,
 			// invocation, with potential drift if the settings file changed mid-call.
 			const settings = loadGoalSettings(ctx.cwd);
 
+			// G6: length caps — reject overlong summaries before they reach the
+			// auditor prompt or memory structures. Prevents OOM / unbounded prompt.
+			for (const [fieldName, value] of [
+				["completionSummary", params.completionSummary],
+				["verificationSummary", params.verificationSummary],
+			] as const) {
+				if (typeof value === "string" && value.length > MAX_OBJECTIVE_LENGTH) {
+					return {
+						content: [{
+							type: "text",
+							text: `complete_goal REJECTED: ${fieldName} is ${value.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Summarize the evidence more concisely and retry.`,
+						}],
+						details: goalDetails(state.goal),
+					};
+				}
+			}
+
 			// -- Phase 2: Status validation --
 			const effectiveStatus = params.status ?? COMPLETE_STATUS;
 			if (effectiveStatus !== COMPLETE_STATUS) {
@@ -3009,7 +3088,15 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal);
+				if (!writeResult3.ok) {
+					return {
+						content: [{ type: "text", text: writeResult3.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult3.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3078,7 +3165,15 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal);
+				if (!writeResult4.ok) {
+					return {
+						content: [{ type: "text", text: writeResult4.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult4.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3240,7 +3335,15 @@ ${objective}` : objective,
 						stopReason: "agent",
 						updatedAt: nowIso(),
 					};
-					state.goal = writeActiveGoalFile(ctx, state.goal);
+					// G4: surface disk-write failure instead of letting it crash complete_goal.
+					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal);
+					if (!writeResult5.ok) {
+						return {
+							content: [{ type: "text", text: writeResult5.error }],
+							details: goalDetails(state.goal),
+						};
+					}
+					state.goal = writeResult5.goal;
 					pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 					setTurnStopped(state.goal?.id ?? null);
 					resetGetGoalNudgeState(state.goal?.id);
@@ -3346,7 +3449,15 @@ ${objective}` : objective,
 				stopReason: "agent",
 				updatedAt: nowIso(),
 			};
-			state.goal = writeActiveGoalFile(ctx, state.goal);
+			// G4: surface disk-write failure instead of letting it crash complete_goal.
+			const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal);
+			if (!writeResult6.ok) {
+				return {
+					content: [{ type: "text", text: writeResult6.error }],
+					details: goalDetails(state.goal),
+				};
+			}
+			state.goal = writeResult6.goal;
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 			setTurnStopped(state.goal?.id ?? null);
 			resetGetGoalNudgeState(state.goal?.id);

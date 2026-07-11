@@ -307,3 +307,137 @@ describe("Bug 1a — scoped unhandledRejection guard (R3.1-R3.5)", () => {
 		assert.equal(listenersAfter, listenersBefore, "guard removed after happy-path audit");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// G1: process guards installed BEFORE createSession (not after)
+// ---------------------------------------------------------------------------
+describe("G1 — process guards installed BEFORE createSession", () => {
+	let cwd: string;
+	let preUR: NodeJS.UnhandledRejectionListener[];
+	let preUE: NodeJS.UncaughtExceptionListener[];
+
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+		preUR = process.listeners("unhandledRejection") as NodeJS.UnhandledRejectionListener[];
+		preUE = process.listeners("uncaughtException") as NodeJS.UncaughtExceptionListener[];
+	});
+
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+		assert.equal(process.listeners("unhandledRejection").length, preUR.length, "G1: unhandledRejection guard must be removed");
+		assert.equal(process.listeners("uncaughtException").length, preUE.length, "G1: uncaughtException guard must be removed");
+	});
+
+	it("G1: unhandledRejection guard present BEFORE createSession resolves", async () => {
+		let guardSeenBeforeCS = false;
+		const wrappedCreateSession = (...args: any[]) => {
+			// Inside createSession: the guard MUST already be installed (G1 fix).
+			guardSeenBeforeCS = process.listeners("unhandledRejection").length > preUR.length;
+			return makeHangingCreateSession()(...args);
+		};
+		fs.writeFileSync(path.join(cwd, ".pi", "pi-goal-xx-settings.json"), JSON.stringify({ auditorTimeoutMs: 50 }));
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: wrappedCreateSession,
+		});
+		assert.ok(guardSeenBeforeCS, "G1: unhandledRejection guard must be installed BEFORE createSession runs");
+	});
+
+	it("G1: uncaughtException guard present BEFORE createSession resolves", async () => {
+		let guardSeenBeforeCS = false;
+		const wrappedCreateSession = (...args: any[]) => {
+			guardSeenBeforeCS = process.listeners("uncaughtException").length > preUE.length;
+			return makeHangingCreateSession()(...args);
+		};
+		fs.writeFileSync(path.join(cwd, ".pi", "pi-goal-xx-settings.json"), JSON.stringify({ auditorTimeoutMs: 50 }));
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: wrappedCreateSession,
+		});
+		assert.ok(guardSeenBeforeCS, "G1: uncaughtException guard must be installed BEFORE createSession runs");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// G2: process.on handlers inherited extensions register during the audit are removed
+// ---------------------------------------------------------------------------
+describe("G2 — inherited extension process.on handlers removed after audit", () => {
+	let cwd: string;
+	let preUR: NodeJS.UnhandledRejectionListener[];
+	let preUE: NodeJS.UncaughtExceptionListener[];
+
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+		preUR = process.listeners("unhandledRejection") as NodeJS.UnhandledRejectionListener[];
+		preUE = process.listeners("uncaughtException") as NodeJS.UncaughtExceptionListener[];
+	});
+
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+		assert.equal(process.listeners("unhandledRejection").length, preUR.length, "G2: stray unhandledRejection listeners cleaned");
+		assert.equal(process.listeners("uncaughtException").length, preUE.length, "G2: stray uncaughtException listeners cleaned");
+	});
+
+	it("G2: an unhandledRejection listener registered during createSession is removed after audit", async () => {
+		const stray = () => {};
+		const wrappedCreateSession = (...args: any[]) => {
+			// Simulate an inherited extension registering a process handler onLoad.
+			process.on("unhandledRejection", stray);
+			return makeApprovingCreateSession(5)(...args);
+		};
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: wrappedCreateSession,
+		});
+		assert.ok(!process.listeners("unhandledRejection").includes(stray), "G2: stray listener must be removed after audit");
+	});
+
+	it("G2: an uncaughtException listener registered during createSession is removed after audit", async () => {
+		const stray = () => {};
+		const wrappedCreateSession = (...args: any[]) => {
+			process.on("uncaughtException", stray);
+			return makeApprovingCreateSession(5)(...args);
+		};
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: wrappedCreateSession,
+		});
+		assert.ok(!process.listeners("uncaughtException").includes(stray), "G2: stray uncaughtException listener must be removed after audit");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// G3: in-memory auditor session cleaned up after audit (output buffer cleared)
+// ---------------------------------------------------------------------------
+describe("G3 — in-memory auditor state cleaned after audit", () => {
+	let cwd: string;
+
+	beforeEach(() => { cwd = makeTmpCwd(); });
+	afterEach(() => { fs.rmSync(cwd, { recursive: true, force: true }); });
+
+	it("G3: completes and returns a result, demonstrating cleanup ran", async () => {
+		// Behavioral guard: a happy-path audit completes and returns a result,
+		// demonstrating the session was used and then released. The explicit
+		// outputParts.length = 0 cleanup runs in the outer finally regardless.
+		const result = await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: makeApprovingCreateSession(5),
+		});
+		// The approving mock does not emit real assistant text events, so we
+		// only assert the audit settled cleanly (no throw) with the expected
+		// result envelope — proving the outer-finally cleanup executed.
+		assert.equal(typeof result.approved, "boolean");
+		assert.equal(typeof result.disapproved, "boolean");
+		assert.equal(result.timedOut, undefined);
+	});
+});

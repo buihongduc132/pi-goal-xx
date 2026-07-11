@@ -16,6 +16,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { rotateIfNeeded } from "./storage/rotating-log.ts";
 
 const LOG_FILE_NAME = "auditor-trace.jsonl";
 const PROMPT_PREVIEW_BYTES = 4_000;
@@ -56,11 +57,14 @@ export function previewBytes(value: string, max: number): string {
 export function logAuditorTrace(cwd: string, entry: AuditorTraceEntry): void {
 	try {
 		ensureLogDir(cwd);
+		const target = logPath(cwd);
+		// G5: cap the trace log at 10MB and keep 3 rotations before appending.
+		rotateIfNeeded(target);
 		const line = JSON.stringify({
 			...entry,
 			ts: entry.ts ?? new Date().toISOString(),
 		}) + "\n";
-		fs.appendFileSync(logPath(cwd), line, { encoding: "utf8" });
+		fs.appendFileSync(target, line, { encoding: "utf8" });
 	} catch {
 		// Logging is best-effort. Never let it crash the audit.
 	}

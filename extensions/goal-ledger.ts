@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { normalizeRelPath, nowIso, safeIdPart, type GoalRecord } from "./goal-record.ts";
+import { rotateIfNeeded } from "./storage/rotating-log.ts";
 
 export const GOAL_LEDGER_FILE = ".pi/goals/goal_events.jsonl";
 
@@ -63,6 +64,9 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
   const filePath = goalLedgerPath(ctx);
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
+
+  // G5: cap the event log at 10MB and keep 3 rotations before appending.
+  rotateIfNeeded(filePath);
 
   const line = JSON.stringify(event) + "\n";
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;

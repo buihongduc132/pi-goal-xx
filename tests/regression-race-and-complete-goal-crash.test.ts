@@ -124,6 +124,45 @@ describe("RACE — serializedSend mutex guards the 3 triggerTurn send sites", ()
 });
 
 // ---------------------------------------------------------------------------
+// Bug G7 — MEMORY: serializedSend linked-promise chain must reset when drained
+// ---------------------------------------------------------------------------
+// The messageSendChain is a linked promise chain: each link references its
+// predecessor, so the chain grows unbounded (one node per send) for the
+// lifetime of the session, pinning memory. The fix: when the last pending
+// send resolves and the queue is empty, reset messageSendChain to a fresh
+// Promise.resolve() so the old chain becomes unreferenced and eligible for GC.
+describe("G7 — serializedSend chain resets to Promise.resolve() when drained", () => {
+	it("source has a pending-send counter that tracks outstanding sends", () => {
+		const src = readGoalSource();
+		assert.match(src, /pendingSends/, "G7: a pendingSends counter must exist to detect drain");
+	});
+
+	it("source resets messageSendChain to Promise.resolve() on drain", () => {
+		const src = readGoalSource();
+		// The reset must live inside the serializedSend resolution path, and be
+		// guarded by a drained check (pendingSends === 0), not unconditional.
+		assert.match(
+			src,
+			/if\s*\(\s*pendingSends\s*===?\s*0\s*\)\s*\{[\s\S]*?messageSendChain\s*=\s*Promise\.resolve\(\)/,
+			"G7: serializedSend must reset messageSendChain = Promise.resolve() when pendingSends hits 0",
+		);
+	});
+
+	it("source decrements pendingSends on BOTH resolve and reject paths", () => {
+		const src = readGoalSource();
+		// Either two explicit `pendingSends--` sites, or a shared drain handler
+		// passed to BOTH slots of `.then(drain, drain)` so a rejected send does
+		// not prevent the chain from ever resetting again.
+		const decrements = src.match(/pendingSends--/g) ?? [];
+		const sharedDrain = /\.then\(\s*drain\s*,\s*drain\s*\)/.test(src);
+		assert.ok(
+			decrements.length >= 2 || sharedDrain,
+			`G7: pendingSends must decrement on both resolve and reject (>=2 decrements OR a shared drain handler on both .then slots), found ${decrements.length} decrement(s)${sharedDrain ? " (shared drain OK)" : ""}`,
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Bug 2 — COMPLETE_GOAL CRASH: audit-start sendMessage must NOT be awaited
 // ---------------------------------------------------------------------------
 describe("COMPLETE_GOAL_AWAIT — audit-start sendMessage is fire-and-forget", () => {
