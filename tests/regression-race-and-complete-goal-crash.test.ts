@@ -143,7 +143,7 @@ describe("G7 — serializedSend chain resets to Promise.resolve() when drained",
 		// guarded by a drained check (pendingSends === 0), not unconditional.
 		assert.match(
 			src,
-			/if\s*\(\s*pendingSends\s*===?\s*0\s*\)\s*\{[\s\S]*?messageSendChain\s*=\s*Promise\.resolve\(\)/,
+			/if\s*\(\s*pendingSends\s*===?\s*0\s*\)\s*\{[^}]*?messageSendChain\s*=\s*Promise\.resolve\(\)/,
 			"G7: serializedSend must reset messageSendChain = Promise.resolve() when pendingSends hits 0",
 		);
 	});

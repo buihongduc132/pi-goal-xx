@@ -65,10 +65,12 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
 
-  // G5: cap the event log at 10MB and keep 3 rotations before appending.
-  rotateIfNeeded(filePath);
-
   const line = JSON.stringify(event) + "\n";
+
+  // G5: cap the event log at 10MB and keep 3 rotations before appending.
+  // Pass the incoming line length so rotation accounts for it.
+  rotateIfNeeded(filePath, undefined, undefined, Buffer.byteLength(line, "utf8"));
+
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   let appended = false;
   try {

@@ -79,4 +79,19 @@ describe("G5: rotateIfNeeded", () => {
 		assert.ok(!fs.existsSync(file), "file at exactly the cap must rotate");
 		assert.ok(fs.existsSync(`${file}.1`));
 	});
+
+	it("rotates BEFORE appending when size + appendBytes would exceed the cap", () => {
+		// Existing file is under the cap but the incoming record would push it over.
+		fs.writeFileSync(file, "x".repeat(80));
+		rotateIfNeeded(file, 100, 3, 30);
+		assert.ok(!fs.existsSync(file), "file must rotate when size+append > cap");
+		assert.ok(fs.existsSync(`${file}.1`));
+	});
+
+	it("does NOT rotate when size + appendBytes still fits under the cap", () => {
+		fs.writeFileSync(file, "x".repeat(70));
+		rotateIfNeeded(file, 100, 3, 25);
+		assert.ok(fs.existsSync(file), "file must stay when size+append <= cap");
+		assert.ok(!fs.existsSync(`${file}.1`));
+	});
 });

@@ -18,7 +18,6 @@
  */
 
 import * as fs from "node:fs";
-import * as path from "node:path";
 
 /** Default cap per rotating log file (10 MB). */
 export const DEFAULT_ROTATING_LOG_MAX_BYTES = 10 * 1024 * 1024;
@@ -26,15 +25,18 @@ export const DEFAULT_ROTATING_LOG_MAX_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_ROTATING_LOG_KEEP = 3;
 
 /**
- * Rotate `filePath` if its current size is at or over `maxBytes`.
- * Renames `filePath`→`filePath.1`, `filePath.1`→`filePath.2`, …, and unlinks
- * the oldest (`.<keepCount>`). Best-effort: any error is swallowed so the
+ * Rotate `filePath` if appending `appendBytes` more would push it over
+ * `maxBytes`. Accounts for the incoming line length so a single oversized
+ * record can't silently blow past the cap (review P2). Renames
+ * `filePath`→`filePath.1`, `filePath.1`→`filePath.2`, …, and unlinks the
+ * oldest (`.<keepCount>`). Best-effort: any error is swallowed so the
  * caller's append still runs.
  */
 export function rotateIfNeeded(
 	filePath: string,
 	maxBytes = DEFAULT_ROTATING_LOG_MAX_BYTES,
 	keepCount = DEFAULT_ROTATING_LOG_KEEP,
+	appendBytes = 0,
 ): void {
 	if (keepCount < 1) return;
 	let size: number;
@@ -44,7 +46,10 @@ export function rotateIfNeeded(
 		// File may not exist yet; nothing to rotate.
 		return;
 	}
-	if (size < maxBytes) return;
+	// Rotate when the EXISTING size already meets the cap, OR when appending
+	// the next record would push it over. This bounds growth even for a single
+	// large incoming line.
+	if (size < maxBytes && size + appendBytes <= maxBytes) return;
 	try {
 		// Drop the oldest rotation, then shift each older rotation down by one.
 		const oldest = `${filePath}.${keepCount}`;
@@ -59,23 +64,4 @@ export function rotateIfNeeded(
 	} catch {
 		// Rotation failure must not block the append. The caller writes next.
 	}
-}
-
-/**
- * Resolve the rotation parameters for a log path. Exposed for tests that want
- * to assert the resolved cap without hardcoding the default.
- */
-export function rotationParams(
-	maxBytes?: number,
-	keepCount?: number,
-): { maxBytes: number; keepCount: number } {
-	return {
-		maxBytes: maxBytes ?? DEFAULT_ROTATING_LOG_MAX_BYTES,
-		keepCount: keepCount ?? DEFAULT_ROTATING_LOG_KEEP,
-	};
-}
-
-/** Build the `.N` rotation path for a base file (test helper). */
-export function rotatedPath(filePath: string, index: number): string {
-	return path.format({ ...path.parse(filePath), base: `${path.parse(filePath).base}.${index}` });
 }

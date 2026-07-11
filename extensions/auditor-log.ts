@@ -58,12 +58,13 @@ export function logAuditorTrace(cwd: string, entry: AuditorTraceEntry): void {
 	try {
 		ensureLogDir(cwd);
 		const target = logPath(cwd);
-		// G5: cap the trace log at 10MB and keep 3 rotations before appending.
-		rotateIfNeeded(target);
 		const line = JSON.stringify({
 			...entry,
 			ts: entry.ts ?? new Date().toISOString(),
 		}) + "\n";
+		// G5: cap the trace log at 10MB and keep 3 rotations before appending.
+		// Pass the incoming line length so rotation accounts for it.
+		rotateIfNeeded(target, undefined, undefined, Buffer.byteLength(line, "utf8"));
 		fs.appendFileSync(target, line, { encoding: "utf8" });
 	} catch {
 		// Logging is best-effort. Never let it crash the audit.

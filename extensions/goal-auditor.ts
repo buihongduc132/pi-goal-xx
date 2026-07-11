@@ -1040,6 +1040,14 @@ export async function runGoalCompletionAuditor(args: {
 		//     the only way to fully isolate side effects (timers, globalThis
 		//     mutations, other event names). Residual risk documented.
 		//
+		//     KNOWN LIMITATION (concurrent audits): if two runGoalCompletionAuditor
+		//     calls overlap, the snapshot-based diff can remove a listener the
+		//     OTHER concurrent audit legitimately owns, because process listeners
+		//     are global. Audits are not designed to run concurrently (a single
+		//     complete_goal holds the goal lock), so this is accepted as residual
+		//     risk. A proper fix requires either serializing audit windows or the
+		//     out-of-process auditor noted above.
+		//
 		// G3: explicitly clear the in-memory output buffer and drop references so
 		//     the auditor session can be garbage-collected promptly after the
 		//     audit ends, instead of lingering until the next GC sweep.

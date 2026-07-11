@@ -548,12 +548,19 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	 * Returns the canonical post-write record on success, or an error object
 	 * the caller surfaces to the user/context.
 	 */
-	function tryWriteActiveGoalFile(ctx: ExtensionContext, goal: GoalRecord): { goal: GoalRecord; ok: true } | { error: string; ok: false } {
+	function tryWriteActiveGoalFile(
+		ctx: ExtensionContext,
+		goal: GoalRecord,
+		alreadyCommitted = false,
+	): { goal: GoalRecord; ok: true } | { error: string; ok: false } {
 		try {
 			return { goal: writeActiveGoalFile(ctx, goal), ok: true };
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			const text = `Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`;
+			const memoryHint = alreadyCommitted
+				? "The in-memory goal was updated but persistence failed; please retry."
+				: "The goal changes were not committed to disk; please retry.";
+			const text = `Goal state could not be saved to disk: ${msg}. ${memoryHint}`;
 			try { ctx.ui.notify(text, "error"); } catch {}
 			try {
 				logAuditorTrace(ctx.cwd, {
@@ -1056,7 +1063,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 							try { ctx.ui.notify(`Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`, "error"); } catch {}
 						}
 					} else {
-						const writeResult = tryWriteActiveGoalFile(ctx, next);
+						const writeResult = tryWriteActiveGoalFile(ctx, next, true);
 						if (writeResult.ok) state.goal = writeResult.goal;
 					}
 				}
@@ -3089,7 +3096,7 @@ ${objective}` : objective,
 					updatedAt: nowIso(),
 				};
 				// G4: surface disk-write failure instead of letting it crash complete_goal.
-				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal);
+				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal, true);
 				if (!writeResult3.ok) {
 					return {
 						content: [{ type: "text", text: writeResult3.error }],
@@ -3166,7 +3173,7 @@ ${objective}` : objective,
 					updatedAt: nowIso(),
 				};
 				// G4: surface disk-write failure instead of letting it crash complete_goal.
-				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal);
+				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal, true);
 				if (!writeResult4.ok) {
 					return {
 						content: [{ type: "text", text: writeResult4.error }],
@@ -3336,7 +3343,7 @@ ${objective}` : objective,
 						updatedAt: nowIso(),
 					};
 					// G4: surface disk-write failure instead of letting it crash complete_goal.
-					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal);
+					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal, true);
 					if (!writeResult5.ok) {
 						return {
 							content: [{ type: "text", text: writeResult5.error }],
@@ -3450,7 +3457,7 @@ ${objective}` : objective,
 				updatedAt: nowIso(),
 			};
 			// G4: surface disk-write failure instead of letting it crash complete_goal.
-			const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal);
+			const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal, true);
 			if (!writeResult6.ok) {
 				return {
 					content: [{ type: "text", text: writeResult6.error }],
