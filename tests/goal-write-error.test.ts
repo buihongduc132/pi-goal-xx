@@ -82,3 +82,42 @@ describe("G4: complete_goal surfaces disk-write failures to the agent", () => {
 		}
 	});
 });
+
+describe("G4: turn_end archival failure does not crash the hook", () => {
+	it("notifies and returns cleanly when archiveGoalFile fails in turn_end", async () => {
+		const envSnap = forceNonWorkerEnv();
+		const cwd = makeCwd();
+		const pi: any = createMockPi({ cwd });
+		goalExtension(pi);
+		try {
+			const ctx = createMockCtx(pi, { cwd, idle: false });
+			ctx.modelRegistry = { find: () => undefined, getAvailable: () => [] };
+			fs.writeFileSync(path.join(cwd, ".pi", "pi-goal-xx-settings.json"), JSON.stringify({ disabled: true }));
+			await invokeCommand(pi, ctx, "goals-set", "Objective: ship it. Success criteria: shipped.");
+			// Complete the goal; this writes the active file successfully and
+			// defers archival to turn_end.
+			await invokeTool(pi, ctx, "complete_goal", {
+				verificationSummary: "verified",
+				confirmBypassAuditor: true,
+			});
+			// Make the goals dir read-only so the turn_end archiveGoalFile fails.
+			fs.chmodSync(path.join(cwd, ".pi", "goals"), 0o555);
+			// Emit a synthetic turn_end. Without the try/catch, this throws and
+			// the test fails; with the fix, it should return cleanly and notify.
+			let threw = false;
+			try {
+				await pi.handlers.get("turn_end")?.[0]({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, ctx);
+			} catch {
+				threw = true;
+			}
+			assert.ok(!threw, "turn_end archival failure must not crash the handler");
+			const errorNotifies = pi.ui.notifyCalls.filter((n: any) => n.kind === "error" && /archival failed/i.test(String(n.msg)));
+			assert.ok(errorNotifies.length > 0, "turn_end should notify about archival failure");
+		} finally {
+			fs.chmodSync(path.join(cwd, ".pi", "goals"), 0o755);
+			try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+			restoreGoalEnv(envSnap);
+			await cleanupTimers(pi, cwd);
+		}
+	});
+});

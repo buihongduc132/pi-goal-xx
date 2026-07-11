@@ -4175,7 +4175,25 @@ promptGuidelines: [
 		// This runs after the agent's turn ends — the agent has now seen the result.
 		if (state.goal?.status === "complete" && !state.goal?.archivedPath) {
 			const completedGoal = state.goal;
-			const archived = archiveGoalFile(ctx, completedGoal);
+			// G4 (review follow-up): wrap the deferred archiveGoalFile in try/catch.
+			// This runs in a background turn_end hook; an uncaught throw here
+			// crashes the hook handler and can take down the background agent.
+			let archived: GoalRecord;
+			try {
+				archived = archiveGoalFile(ctx, completedGoal);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				try { ctx.ui.notify(`Goal archival failed: ${msg}. The goal is marked complete in memory but was not archived to disk; please retry.`, "error"); } catch {}
+				try {
+					logAuditorTrace(ctx.cwd, {
+						ts: nowIso(),
+						phase: "write_failure",
+						context: "turn_end archiveGoalFile",
+						error: msg,
+					});
+				} catch {}
+				return;
+			}
 			// Unit E task 4.6: release the focus lock (co-located with turn_end archival).
 			try {
 				releaseLock(ctx.cwd, completedGoal.id, selfLockOwner());
