@@ -716,3 +716,60 @@ describe("Counterfactual — unhandledRejection guard captures a real rejection"
 	});
 });
 
+describe("Counterfactual — safeAbort logs abort_failed trace when session.abort() throws", () => {
+	let cwd: string;
+
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+	});
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("behavioral: a throwing session.abort() on timeout logs phase:'abort_failed' and still returns a timeout result", async () => {
+		// coderabbit review: the safeAbort wrapper logs phase:'abort_failed'
+		// when session.abort() throws, but no test exercised this path.
+		// This test makes abort() throw, triggers the timeout, and asserts:
+		//   (1) the trace contains a phase:'abort_failed' entry
+		//   (2) the audit still returns a timeout result (cubic P2: the
+		//       prompt-vs-timeout race means a throwing abort() does NOT
+		//       leave the audit hanging forever)
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ auditorTimeoutMs: 50 }),
+		);
+		// createSession whose prompt hangs AND whose abort() throws.
+		const createSession = (_args: any) => {
+			const session = {
+				subscribe(_cb: (event: any) => void) { return () => {}; },
+				prompt(_text: string): Promise<void> {
+					// Hang forever — only the timeout race unblocks this.
+					return new Promise<void>(() => {});
+				},
+				abort() {
+					// Hostile throw — simulates a future pi-agent-core refactor
+					// where abort() can fail.
+					throw new Error("abort-boom-from-mock");
+				},
+			};
+			return Promise.resolve({ session });
+		};
+		const result = await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession,
+		});
+		// (2) The audit must return a timeout result — NOT hang.
+		assert.equal(result.timedOut, true, "audit must return a timeout result even when abort() throws");
+		assert.equal(result.approved, false, "timeout must be disapproved");
+		assert.match(result.error ?? "", /Auditor timeout after 50ms/, "error must be the timeout message");
+		// (1) The trace must record the abort failure.
+		const traceFile = path.join(cwd, ".pi", "goals", "auditor-trace.jsonl");
+		assert.ok(fs.existsSync(traceFile), "auditor-trace.jsonl must exist");
+		const trace = fs.readFileSync(traceFile, "utf8");
+		assert.match(trace, /"phase":"abort_failed"/, "trace must record the abort failure");
+		assert.match(trace, /abort-boom-from-mock/, "trace must carry the abort error message");
+	});
+});
+

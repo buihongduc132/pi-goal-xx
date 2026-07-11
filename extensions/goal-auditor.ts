@@ -938,6 +938,16 @@ export async function runGoalCompletionAuditor(args: {
 			}
 			// Install timeout guard before prompt. (G1: the unhandledRejection /
 			// uncaughtException guards are installed before createSession, not here.)
+			// cubic P2 fix: race the prompt against the timeout directly. Previously
+			// the timeout only called session.abort() to unblock prompt — but if
+			// abort() throws (safeAbort swallows it), prompt() never resolves and
+			// the audit hangs forever despite the timeout having fired. By racing
+			// prompt against a rejecting timeout promise, the await unblocks on the
+			// timeout path regardless of whether abort() succeeded.
+			let timeoutReject: ((err: Error) => void) | null = null;
+			const timeoutPromise = new Promise<never>((_, reject) => {
+				timeoutReject = reject;
+			});
 			timeoutId = setTimeout(() => {
 				timedOut = true;
 				logAuditorTrace(args.ctx.cwd, {
@@ -947,11 +957,20 @@ export async function runGoalCompletionAuditor(args: {
 					timeoutMs,
 				});
 				safeAbort();
+				// Reject the race so prompt unblocks even if abort() threw.
+				if (timeoutReject) {
+					const err = new Error("__auditor_prompt_timeout__");
+					err.name = "AbortError";
+					timeoutReject(err);
+				}
 			}, Math.max(0, timeoutMs - (Date.now() - startedAt)));
 			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
 			// Generic errors MUST propagate to the catch block for proper error handling.
-			await session.prompt(resolvedPrompt.prompt).catch((err: unknown) => {
-				// Only swallow AbortError (from abort). All other errors propagate.
+			await Promise.race([
+				session.prompt(resolvedPrompt.prompt),
+				timeoutPromise,
+			]).catch((err: unknown) => {
+				// Only swallow AbortError (from abort/timeout). All other errors propagate.
 				if (err instanceof Error && err.name === "AbortError") return;
 				throw err;
 			});
