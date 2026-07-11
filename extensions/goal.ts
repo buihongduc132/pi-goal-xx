@@ -15,6 +15,7 @@ import {
 	buildTweakConfirmationText,
 	extractVerificationContract,
 	goalDraftingPrompt,
+	MAX_OBJECTIVE_LENGTH,
 	renderConfirmationTasks,
 	resolveGoalDraftingBlock,
 	validateGoalDraftProposal,
@@ -496,14 +497,25 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// concurrent sends surface as "Agent is already processing" errors emitted
 	// from the <runtime> bindCore catch handlers in agent-session.
 	let messageSendChain: Promise<void> = Promise.resolve();
+	// G7: counter of sends that have been queued but not yet resolved.
+	// When it returns to 0, the chain tail is reset to a fresh
+	// Promise.resolve() so the linked-promise chain (each link references its
+	// predecessor) can be GC'd instead of growing unbounded for the session
+	// lifetime.
+	let pendingSends = 0;
 	function serializedSend<T>(fn: () => T | Promise<T>): Promise<T> {
+		pendingSends++;
 		const run = messageSendChain.then(fn);
 		// Swallow rejections on the chain itself so a failed send never poisons
 		// subsequent sends; the caller still sees the real rejection from `run`.
-		messageSendChain = run.then(
-			() => undefined,
-			() => undefined,
-		);
+		// G7: decrement + reset when drained on BOTH resolve and reject paths.
+		const drain = () => {
+			pendingSends--;
+			if (pendingSends === 0) {
+				messageSendChain = Promise.resolve();
+			}
+		};
+		messageSendChain = run.then(drain, drain);
 		return run;
 	}
 	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
@@ -524,6 +536,42 @@ export default function goalExtension(pi: ExtensionAPI): void {
 					// trace logging must never crash
 				}
 			});
+	}
+	/**
+	 * G4: writeActiveGoalFile can throw if the disk is full, the path is
+	 * unsafe, or permissions deny the write. Every caller wraps the write in
+	 * this helper so a persistence failure is surfaced to the agent instead
+	 * of crashing the tool. Without it, the in-memory goal would look updated
+	 * while the on-disk file stayed stale — the agent would never learn the
+	 * save failed.
+	 *
+	 * Returns the canonical post-write record on success, or an error object
+	 * the caller surfaces to the user/context.
+	 */
+	function tryWriteActiveGoalFile(
+		ctx: ExtensionContext,
+		goal: GoalRecord,
+		alreadyCommitted = false,
+	): { goal: GoalRecord; ok: true } | { error: string; ok: false } {
+		try {
+			return { goal: writeActiveGoalFile(ctx, goal), ok: true };
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const memoryHint = alreadyCommitted
+				? "The in-memory goal was updated but persistence failed; please retry."
+				: "The goal changes were not committed to disk; please retry.";
+			const text = `Goal state could not be saved to disk: ${msg}. ${memoryHint}`;
+			try { ctx.ui.notify(text, "error"); } catch {}
+			try {
+				logAuditorTrace(ctx.cwd, {
+					ts: nowIso(),
+					phase: "write_failure",
+					context: "writeActiveGoalFile",
+					error: msg,
+				});
+			} catch {}
+			return { error: text, ok: false };
+		}
 	}
 	let runningGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
@@ -1004,7 +1052,21 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (ctx) {
 				syncGoalPromptFromDisk(ctx);
 				const next = state.goal;
-				if (next) state.goal = next.status === "complete" ? archiveGoalFile(ctx, next) : writeActiveGoalFile(ctx, next);
+				if (next) {
+					if (next.status === "complete") {
+						// G4: wrap archival too (archiveGoalFile can throw on the same
+						// disk-failure class). On failure keep the prior in-memory goal.
+						try {
+							state.goal = archiveGoalFile(ctx, next);
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							try { ctx.ui.notify(`Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`, "error"); } catch {}
+						}
+					} else {
+						const writeResult = tryWriteActiveGoalFile(ctx, next, true);
+						if (writeResult.ok) state.goal = writeResult.goal;
+					}
+				}
 			}
 		}
 		pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
@@ -1960,6 +2022,17 @@ Verification contract:
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
+		// G6 (coderabbit review): enforce the 50KB objective cap on direct-start
+		// commands too, matching propose_goal_draft / complete_goal / propose_goal_tweak.
+		// Without this, a >50KB /goals-set objective bypasses every cap and reaches
+		// persistence + later auditor prompts unbounded.
+		if (raw.length > MAX_OBJECTIVE_LENGTH) {
+			ctx.ui.notify(
+				`Objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.`,
+				"error",
+			);
+			return;
+		}
 		const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
 		if (missingSnippets && missingSnippets.length > 0) {
 			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
@@ -2716,6 +2789,18 @@ ${objective}` : objective,
 			}
 			const newObjective = params.newObjective.trim();
 			if (!newObjective) throw new Error("propose_goal_tweak requires a non-empty newObjective.");
+			// G6 early cap (coderabbit review): reject an overlong objective BEFORE
+			// building the confirmation dialog / rendering UI. The later
+			// cleanedObjective check still covers contract-expansion edge cases.
+			if (newObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${newObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 			const changeSummary = params.changeSummary.trim();
 			if (!changeSummary) throw new Error("propose_goal_tweak requires a non-empty changeSummary.");
 
@@ -2795,18 +2880,32 @@ ${objective}` : objective,
 			}
 
 			if (decision.decision === "confirm") {
-				// Persist any auditor toggle change
-				if (state.goal) {
-					state.goal = { ...state.goal, skipAuditor: !decision.auditorEnabled };
-				}
 				// Extract verification contract from revised objective
 				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
 			if (missingSnippets && missingSnippets.length > 0) {
 				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
 			}
+			// G6 (cubic review): enforce the 50KB objective cap on the tweak
+			// confirmation path, matching the guard in propose_goal_draft and
+			// complete_goal. Without this, an overlong revised objective reaches
+			// disk and later inflates the auditor prompt unbounded → OOM/hang.
+			if (cleanedObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${cleanedObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 				// Apply the tweak: write the new objective to disk authoritatively.
+				// cubic-dev P2: the skipAuditor toggle is folded into `next` (not
+				// assigned to state.goal earlier) so it only commits on a successful
+				// write. Previously it was set before G6/write guards, leaking the
+				// toggle into the error-return and the turn_end persist chain.
 				const next: GoalRecord = {
 					...state.goal,
+					skipAuditor: !decision.auditorEnabled,
 					objective: cleanedObjective,
 					verificationContract: verificationContract,
 					updatedAt: nowIso(),
@@ -2827,7 +2926,14 @@ ${objective}` : objective,
 				//   2) update in-memory `goal` to the canonical post-write record
 				//   3) append the state entry and re-sync tools
 				//   4) clear the tweak drafting gate so propose_goal_tweak can't be re-used
-				state.goal = writeActiveGoalFile(ctx, next);
+				const tweakWrite = tryWriteActiveGoalFile(ctx, next);
+				if (!tweakWrite.ok) {
+					return {
+						content: [{ type: "text", text: tweakWrite.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = tweakWrite.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				tweakDraftingFor = null;
 				// Reset autoContinue counter — plan changed, agent gets a fresh chain.
@@ -2920,6 +3026,23 @@ ${objective}` : objective,
 			// invocation, with potential drift if the settings file changed mid-call.
 			const settings = loadGoalSettings(ctx.cwd);
 
+			// G6: length caps — reject overlong summaries before they reach the
+			// auditor prompt or memory structures. Prevents OOM / unbounded prompt.
+			for (const [fieldName, value] of [
+				["completionSummary", params.completionSummary],
+				["verificationSummary", params.verificationSummary],
+			] as const) {
+				if (typeof value === "string" && value.length > MAX_OBJECTIVE_LENGTH) {
+					return {
+						content: [{
+							type: "text",
+							text: `complete_goal REJECTED: ${fieldName} is ${value.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Summarize the evidence more concisely and retry.`,
+						}],
+						details: goalDetails(state.goal),
+					};
+				}
+			}
+
 			// -- Phase 2: Status validation --
 			const effectiveStatus = params.status ?? COMPLETE_STATUS;
 			if (effectiveStatus !== COMPLETE_STATUS) {
@@ -3009,7 +3132,21 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult3.ok) {
+					// Rollback: restore the pre-completion in-memory state so the disk
+					// and memory stay consistent. Without this, state.goal remains
+					// status:"complete" while the disk still holds the active/paused
+					// record — a retry would be blocked by validateGoalCompletion
+					// seeing the stale in-memory "complete" status. (gemini/coderabbit)
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult3.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult3.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3078,7 +3215,17 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult4.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult4.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult4.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3240,7 +3387,17 @@ ${objective}` : objective,
 						stopReason: "agent",
 						updatedAt: nowIso(),
 					};
-					state.goal = writeActiveGoalFile(ctx, state.goal);
+					// G4: surface disk-write failure instead of letting it crash complete_goal.
+					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal, true);
+					if (!writeResult5.ok) {
+						// Rollback: see writeResult3 — keep memory consistent with disk.
+						state.goal = auditTarget;
+						return {
+							content: [{ type: "text", text: writeResult5.error }],
+							details: goalDetails(state.goal),
+						};
+					}
+					state.goal = writeResult5.goal;
 					pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 					setTurnStopped(state.goal?.id ?? null);
 					resetGetGoalNudgeState(state.goal?.id);
@@ -3346,7 +3503,17 @@ ${objective}` : objective,
 				stopReason: "agent",
 				updatedAt: nowIso(),
 			};
-			state.goal = writeActiveGoalFile(ctx, state.goal);
+			// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult6.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult6.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+			state.goal = writeResult6.goal;
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 			setTurnStopped(state.goal?.id ?? null);
 			resetGetGoalNudgeState(state.goal?.id);
@@ -4064,7 +4231,25 @@ promptGuidelines: [
 		// This runs after the agent's turn ends — the agent has now seen the result.
 		if (state.goal?.status === "complete" && !state.goal?.archivedPath) {
 			const completedGoal = state.goal;
-			const archived = archiveGoalFile(ctx, completedGoal);
+			// G4 (review follow-up): wrap the deferred archiveGoalFile in try/catch.
+			// This runs in a background turn_end hook; an uncaught throw here
+			// crashes the hook handler and can take down the background agent.
+			let archived: GoalRecord;
+			try {
+				archived = archiveGoalFile(ctx, completedGoal);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				try { ctx.ui.notify(`Goal archival failed: ${msg}. The goal is marked complete in memory but was not archived to disk; please retry.`, "error"); } catch {}
+				try {
+					logAuditorTrace(ctx.cwd, {
+						ts: nowIso(),
+						phase: "write_failure",
+						context: "turn_end archiveGoalFile",
+						error: msg,
+					});
+				} catch {}
+				return;
+			}
 			// Unit E task 4.6: release the focus lock (co-located with turn_end archival).
 			try {
 				releaseLock(ctx.cwd, completedGoal.id, selfLockOwner());

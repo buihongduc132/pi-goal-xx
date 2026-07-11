@@ -1,8 +1,9 @@
 # Bugs — `complete_goal`: crash-on-run + exit-on-reject
 
 > Date: 2026-07-11
-> Status: open (not fixed)
+> Status: fixed on `fix/g1-g7-crash-vectors` branch (G1-G7 + P1 review follow-ups); NOT YET merged to main — merge pending PR creation.
 > Related finding: `flow/findings/2026-07-10_complete-goal-fork-diff-crash.md`
+> Root cause of "still not running on main": main only had PR #21 (partial — removed `await` from sendMessage, did NOT touch `inheritFromCwd`). The G1-G7 hardening + P1 follow-ups live on `fix/g1-g7-crash-vectors` and must be merged via PR.
 
 ## Bug 1 — `complete_goal` crashes pi when auditor runs
 
@@ -33,8 +34,13 @@
 
 ## Verification
 
-- [ ] Bug 1: `complete_goal` with auditor enabled does not hang/exit. Ledger contains `audit_result`.
-- [ ] Bug 2: auditor rejects → pi stays alive, agent receives rejection text, can retry.
-- [ ] Test: complete_goal reject path does not produce unhandledRejection.
-- [ ] Test: auditor timeout fires → returns `{approved:false, error:"Auditor timeout"}`, host stays alive.
-- [ ] Test: inherited extension throws async rejection during audit → logged, host stays alive.
+- [x] Bug 1: `complete_goal` with auditor enabled does not hang/exit. Ledger contains `audit_result`. (G1: guards before createSession; timeout ceiling; isGoalSelfExtension strips the goal extension from the auditor)
+- [x] Bug 2: auditor rejects → pi stays alive, agent receives rejection text, can retry. (safeFireAndForget wraps all 6 sends; implicit-return per LSL #2)
+- [x] Test: complete_goal reject path does not produce unhandledRejection. (regression-race-and-complete-goal-crash.test.ts)
+- [x] Test: auditor timeout fires → returns `{approved:false, error:"Auditor timeout"}`, host stays alive. (goal-auditor-crash-safe.test.ts R2.4)
+- [x] Test: inherited extension throws async rejection during audit → logged, host stays alive. (goal-auditor-crash-safe.test.ts R3.x + G1)
+- [x] P1: guard body non-throwing — safeToString handles Object.create(null) / throwing proxy. (goal-auditor-crash-safe.test.ts P1 suite)
+- [x] P1: propose_goal_tweak enforces G6 50KB objective cap on confirmation. (goal-write-error.test.ts P1 suite)
+- [x] P1: all tryWriteActiveGoalFile callers check `.ok` (propose_goal_tweak, persist, complete_goal x4).
+- [x] Tracing: auditor-trace.jsonl records pre-createSession, start, every event, end/abort/error. (auditor-log.test.ts)
+- [x] `npm test` exits cleanly (975 tests, 0 fail). --test-force-exit added for lingering test handle.

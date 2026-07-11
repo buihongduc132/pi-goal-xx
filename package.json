@@ -36,8 +36,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "test:coverage": "c8 --all --include='extensions/**' --exclude='tests/**' --exclude='node_modules/**' --reporter=text --reporter=json node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test --test-force-exit tests/*.test.ts",
+    "test:coverage": "c8 --all --include='extensions/**' --exclude='tests/**' --exclude='node_modules/**' --reporter=text --reporter=json node --experimental-strip-types --test --test-force-exit tests/*.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

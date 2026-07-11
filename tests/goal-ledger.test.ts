@@ -186,3 +186,25 @@ describe("latestGoalLifecycleEvent", () => {
 		assert.equal(latest!.goalId, "g1");
 	});
 });
+
+// cubic-dev P1: the goal ledger must NOT be rotated — readGoalLedger only reads
+// the live file, so rotating goal_created events into .1/.2/.3 archives would
+// silently drop later events for those goals during reconstruction.
+describe("P1: goal ledger is not rotated (event-sourced reconstruction)", () => {
+	it("appendGoalEvent does not create rotation archives (.1/.2/.3)", () => {
+		const ctx = tmpCtx();
+		try {
+			appendGoalEvent(ctx, { type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" });
+			appendGoalEvent(ctx, { type: "goal_focused", goalId: "g1", reason: "selected", at: "t2" });
+			const live = goalLedgerPath(ctx);
+			assert.ok(fs.existsSync(live), "live ledger file must exist");
+			assert.ok(!fs.existsSync(`${live}.1`), "ledger must NOT be rotated to .1 (cubic P1)");
+			assert.ok(!fs.existsSync(`${live}.2`), "ledger must NOT be rotated to .2");
+			// Reconstruction must still see both events.
+			const { events } = readGoalLedger(ctx);
+			assert.equal(events.length, 2, "all events must be readable from the live ledger");
+		} finally {
+			fs.rmSync(ctx._dir, { recursive: true, force: true });
+		}
+	});
+});
