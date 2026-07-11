@@ -121,3 +121,29 @@ describe("G4: turn_end archival failure does not crash the hook", () => {
 		}
 	});
 });
+
+// ---------------------------------------------------------------------------
+// P1 (cubic review): propose_goal_tweak confirmation path must enforce the
+// G6 50KB objective cap. Without it, an overlong revised objective reaches
+// disk and later inflates the auditor prompt unbounded → OOM/hang.
+// ---------------------------------------------------------------------------
+describe("P1: propose_goal_tweak enforces G6 objective cap on confirmation", () => {
+	const SRC = fs.readFileSync(
+		path.join(import.meta.dirname, "..", "extensions", "goal.ts"),
+		"utf8",
+	);
+
+	it("source: the tweak confirmation path validates cleanedObjective length", () => {
+		// The G6 cap must be applied to cleanedObjective BEFORE the write.
+		assert.match(
+			SRC,
+			/cleanedObjective\.length > MAX_OBJECTIVE_LENGTH/,
+			"P1: propose_goal_tweak must check cleanedObjective.length against MAX_OBJECTIVE_LENGTH",
+		);
+		assert.match(
+			SRC,
+			/propose_goal_tweak REJECTED: revised objective/,
+			"P1: overlong objective must be rejected with a clear message",
+		);
+	});
+});

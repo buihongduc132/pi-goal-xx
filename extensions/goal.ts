@@ -2866,6 +2866,19 @@ ${objective}` : objective,
 			if (missingSnippets && missingSnippets.length > 0) {
 				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
 			}
+			// G6 (cubic review): enforce the 50KB objective cap on the tweak
+			// confirmation path, matching the guard in propose_goal_draft and
+			// complete_goal. Without this, an overlong revised objective reaches
+			// disk and later inflates the auditor prompt unbounded → OOM/hang.
+			if (cleanedObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${cleanedObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 				// Apply the tweak: write the new objective to disk authoritatively.
 				const next: GoalRecord = {
 					...state.goal,

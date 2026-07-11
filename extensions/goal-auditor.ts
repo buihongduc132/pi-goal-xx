@@ -76,6 +76,41 @@ function asThinkingLevel(value: unknown): ThinkingLevel | undefined {
 	return text && THINKING_LEVELS.has(text) ? text as ThinkingLevel : undefined;
 }
 
+/**
+ * Never-throwing stringification for an arbitrary rejection/exception value.
+ *
+ * `String(reason)` throws when `reason` is an object without `toString`/
+ * `valueOf` (e.g. `Object.create(null)`) or a proxy whose traps throw. The
+ * process-level guards (unhandledRejection / uncaughtException) MUST be
+ * non-throwing end-to-end — a throw inside an uncaughtException handler
+ * terminates the process, defeating the crash protection this module exists
+ * to provide. This helper isolates that risk: it tries Error.message, then
+ * String(), then JSON, then a stable placeholder, swallowing any throw.
+ *
+ * Exported for direct unit testing with hostile inputs (P1 regression).
+ */
+export function safeToString(reason: unknown): string {
+	try {
+		if (reason instanceof Error) return reason.message;
+		if (typeof reason === "string") return reason;
+		if (reason === null) return "null";
+		if (reason === undefined) return "undefined";
+		// Object.create(null) has no toString → String() throws. Try it, then
+		// fall back to JSON, then a placeholder. Each step is independently guarded.
+		try {
+			return String(reason);
+		} catch {
+			try {
+				return JSON.stringify(reason) ?? "[unserializable]";
+			} catch {
+				return "[unformattable reason]";
+			}
+		}
+	} catch {
+		return "[unformattable reason]";
+	}
+}
+
 
 
 export function parseAuditorDecision(output: string): { approved: boolean; disapproved: boolean } {
@@ -593,28 +628,43 @@ export async function runGoalCompletionAuditor(args: {
 		preUncaughtExceptionListeners = process.listeners("uncaughtException").slice();
 
 		const captureGuardError = (reason: unknown, kind: string): void => {
-			// R3.5: AbortError is benign (fired during abort teardown)
-			const isAbortError = reason instanceof Error && reason.name === "AbortError";
-			if (isAbortError) {
+			// P1 fix (cubic review): the ENTIRE guard body must be non-throwing.
+			// String(reason) throws for Object.create(null) or a throwing proxy,
+			// and an uncaughtException handler that itself throws terminates the
+			// process — the exact failure this guard exists to prevent. Wrap the
+			// whole body so no formatting or trace write can escape.
+			try {
+				// R3.5: AbortError is benign (fired during abort teardown)
+				const isAbortError = reason instanceof Error && reason.name === "AbortError";
+				if (isAbortError) {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: kind,
+						goalId: args.goal.id,
+						reason: "AbortError (benign — swallowed)",
+					});
+					return;
+				}
+				// safeToString never throws: Object.create(null) and throwing
+				// proxies fall back to a stable placeholder instead of crashing
+				// the guard (which would re-enter Node's default fatal handler).
+				const msg = safeToString(reason);
+				// R3.4: capture message for error return (first escape wins; later
+				// events do not overwrite the recorded cause).
+				if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: ${msg}`;
 				logAuditorTrace(args.ctx.cwd, {
 					ts: new Date().toISOString(),
 					phase: kind,
 					goalId: args.goal.id,
-					reason: "AbortError (benign — swallowed)",
+					reason: msg,
+					stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
 				});
-				return;
+			} catch {
+				// Last-resort: even safeToString/logAuditorTrace failed. Record a
+				// generic cause so the audit still returns disapproved-with-error
+				// instead of letting the rejection escape uncaught.
+				if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: (unformattable reason)`;
 			}
-			const msg = reason instanceof Error ? reason.message : String(reason);
-			// R3.4: capture message for error return (first escape wins; later
-			// events do not overwrite the recorded cause).
-			if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: ${msg}`;
-			logAuditorTrace(args.ctx.cwd, {
-				ts: new Date().toISOString(),
-				phase: kind,
-				goalId: args.goal.id,
-				reason: msg,
-				stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
-			});
 			// G1 follow-up (review): fail-fast — abort the active session so the
 			// audit returns the captured error immediately instead of waiting for
 			// the timeout. No-op if the error fired during createSession (no

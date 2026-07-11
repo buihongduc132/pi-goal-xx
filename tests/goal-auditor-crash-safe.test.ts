@@ -475,3 +475,65 @@ describe("G1 follow-up — guard error aborts the session immediately", () => {
 		);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// P1 (cubic review): guard body must be non-throwing end-to-end.
+// String(reason) throws for Object.create(null) / throwing proxy → if the
+// uncaughtException handler throws, Node terminates the process. The guard
+// must use a safe stringification and wrap its whole body in try/catch.
+// ---------------------------------------------------------------------------
+describe("P1 — guard body is non-throwing (safeToString + try/catch)", () => {
+	const SRC = fs.readFileSync(
+		path.join(import.meta.dirname, "..", "extensions", "goal-auditor.ts"),
+		"utf8",
+	);
+
+	it("source: a safeToString helper exists (never-throws stringification)", () => {
+		assert.match(SRC, /function safeToString/, "P1: safeToString helper must exist");
+		assert.match(SRC, /\[unformattable reason\]/, "P1: safeToString must have a stable fallback placeholder");
+	});
+
+	it("source: captureGuardError uses safeToString, not bare String(reason)", () => {
+		assert.match(SRC, /const msg = safeToString\(reason\)/, "P1: guard must call safeToString(reason)");
+		// The old unsafe form must be gone from the guard body.
+		assert.doesNotMatch(SRC, /const msg = reason instanceof Error \? reason\.message : String\(reason\)/, "P1: bare String(reason) must be removed from guard");
+	});
+
+	it("source: the entire captureGuardError body is wrapped in try/catch", () => {
+		// The guard must have a catch that records a generic cause so a
+		// formatting failure still yields a disapproved-with-error result.
+		assert.match(SRC, /if \(!rejectionMessage\) rejectionMessage = `Auditor \$\{kind\}: \(unformattable reason\)`/, "P1: guard catch must record a generic cause");
+	});
+
+	it("runtime: safeToString never throws on hostile inputs that crash String()", async () => {
+		// Direct unit test of the P1 fix. String(reason) throws for each of
+		// these inputs; if the guard called String() it would re-throw inside
+		// the unhandledRejection/uncaughtException handler → process exit.
+		// safeToString must return a stable string for all of them instead.
+		const { safeToString } = await import("../extensions/goal-auditor.ts");
+
+		// 1. Object.create(null) — no toString/valueOf → String() throws.
+		const nullProto = Object.create(null);
+		let out = safeToString(nullProto);
+		assert.equal(typeof out, "string", "P1: Object.create(null) must yield a string, not throw");
+		assert.ok(out.length > 0);
+
+		// 2. Throwing Proxy — String()/toString() trap throws.
+		const throwingProxy = new Proxy({}, {
+			get() { throw new Error("proxy trap boom"); },
+		});
+		out = safeToString(throwingProxy);
+		assert.equal(typeof out, "string", "P1: throwing proxy must yield a string, not throw");
+		assert.ok(out.length > 0);
+
+		// 3. Plain values still stringify normally. (String({a:1}) returns
+		// "[object Object]" — does not throw — so safeToString returns that;
+		// JSON is only the fallback when String() itself throws.)
+		assert.equal(safeToString(new Error("msg")), "msg");
+		assert.equal(safeToString("plain"), "plain");
+		assert.equal(safeToString(42), "42");
+		assert.equal(safeToString(null), "null");
+		assert.equal(safeToString(undefined), "undefined");
+		assert.equal(typeof safeToString({ a: 1 }), "string");
+	});
+});
