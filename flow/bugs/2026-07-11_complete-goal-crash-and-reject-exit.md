@@ -1,9 +1,9 @@
 # Bugs — `complete_goal`: crash-on-run + exit-on-reject
 
 > Date: 2026-07-11
-> Status: fixed on `fix/g1-g7-crash-vectors` branch (G1-G7 + P1 review follow-ups); NOT YET merged to main — merge pending PR creation.
+> Status: FIXED and merged to main via PR #24 (squash merge commit `ff45804`, merged 2026-07-11T20:17:28Z). All G1-G7 hardening + P1 review follow-ups (safeToString, G6 caps, rollback, cubic P1/P2 fixes) are on `origin/main`.
 > Related finding: `flow/findings/2026-07-10_complete-goal-fork-diff-crash.md`
-> Root cause of "still not running on main": main only had PR #21 (partial — removed `await` from sendMessage, did NOT touch `inheritFromCwd`). The G1-G7 hardening + P1 follow-ups live on `fix/g1-g7-crash-vectors` and must be merged via PR.
+> Root cause of "still not running on main": main previously only had PR #21 (partial — removed `await` from sendMessage, did NOT touch `inheritFromCwd`). Fixed by PR #24 which merged the complete G1-G7 + P1 hardening.
 
 ## Bug 1 — `complete_goal` crashes pi when auditor runs
 
