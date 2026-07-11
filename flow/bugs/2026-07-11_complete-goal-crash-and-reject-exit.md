@@ -1,9 +1,9 @@
 # Bugs — `complete_goal`: crash-on-run + exit-on-reject
 
 > Date: 2026-07-11
-> Status: fixed (G1-G7 + P1 review follow-ups on `fix/g1-g7-crash-vectors`; merged to main via PR)
+> Status: fixed on `fix/g1-g7-crash-vectors` branch (G1-G7 + P1 review follow-ups); NOT YET merged to main — merge pending PR creation.
 > Related finding: `flow/findings/2026-07-10_complete-goal-fork-diff-crash.md`
-> Root cause of "still not running on main": main only had PR #21 (partial — removed `await` from sendMessage, did NOT touch `inheritFromCwd`). The G1-G7 hardening lived on `fix/g1-g7-crash-vectors` and was never merged (PR #22 closed as dup of #23; #23 open but base = agent2 branch missing review follow-ups).
+> Root cause of "still not running on main": main only had PR #21 (partial — removed `await` from sendMessage, did NOT touch `inheritFromCwd`). The G1-G7 hardening + P1 follow-ups live on `fix/g1-g7-crash-vectors` and must be merged via PR.
 
 ## Bug 1 — `complete_goal` crashes pi when auditor runs
 
