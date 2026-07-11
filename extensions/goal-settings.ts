@@ -556,6 +556,11 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const goalPrompt = asNonEmptyString(settings.goalPrompt);
 	const leaseMs = asPositiveInt(settings.leaseMs);
 	const heartbeatMs = asPositiveInt(settings.heartbeatMs);
+	// Counterfactual fix: auditorTimeoutMs was read + parsed by loadGoalSettings
+	// but never persisted by saveGoalSettingsFileConfig. A settings rewrite
+	// (e.g. a /goal-settings edit) would silently delete the user's auditor
+	// timeout, falling back to the 5min default. Round-trip it like leaseMs.
+	const auditorTimeoutMs = asPositiveInt(settings.auditorTimeoutMs);
 	if (provider) clean.provider = provider;
 	if (model) clean.model = model;
 	if (thinkingLevel) clean.thinkingLevel = thinkingLevel;
@@ -580,6 +585,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (settings.contractsDir) clean.contractsDir = settings.contractsDir;
 	if (leaseMs !== undefined && leaseMs !== 180_000) clean.leaseMs = leaseMs;
 	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
+	if (auditorTimeoutMs !== undefined) clean.auditorTimeoutMs = auditorTimeoutMs;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -607,6 +613,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.contractsDir) persisted.contractsDir = clean.contractsDir;
 	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
+	if (clean.auditorTimeoutMs !== undefined) persisted.auditorTimeoutMs = clean.auditorTimeoutMs;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }
