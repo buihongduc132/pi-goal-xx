@@ -7,6 +7,7 @@ import { QUESTIONNAIRE_TOOL_NAME, QUESTION_TOOL_NAME } from "./goal-tool-names.t
 import type { GoalDraftingFocus } from "./goal-draft.ts";
 import { wrapToolDefinition } from "./tool-prompt-wrapper.ts";
 import { loadGoalSettings } from "./goal-settings.ts";
+import { wrapExecuteWithTrace, resolveTraceSink } from "./goal-trace.ts";
 
 export interface GoalQuestionnaireQuestion {
 	id: string;
@@ -563,7 +564,24 @@ export async function showProposalDialog(
 export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 	const settings = loadGoalSettings(process.cwd());
 	const cwd = process.cwd();
-	pi.registerTool(wrapToolDefinition(defineTool({
+	// Re-resolve the sink from current settings at call time so a settings
+	// change (e.g. logging.level → off) is honoured without a reload.
+	const getSink = () => resolveTraceSink(loadGoalSettings(cwd).logging);
+	/** Wrap a tool definition's execute in a trace span, then apply prompt wrapping. */
+	const regTraced = <T extends { name: string; execute?: (...a: never[]) => unknown }>(def: T) => {
+		const toolName = def.name;
+		const originalExecute = def.execute;
+		const out = { ...def } as T;
+		if (typeof originalExecute === "function") {
+			(out as { execute: unknown }).execute = wrapExecuteWithTrace(
+				`tool.${toolName}`,
+				originalExecute as (...args: unknown[]) => unknown,
+				{ getSink, fallbackCwd: cwd },
+			);
+		}
+		return wrapToolDefinition(out, settings, cwd);
+	};
+	pi.registerTool(regTraced(defineTool({
 		name: QUESTION_TOOL_NAME,
 		label: "goal_question",
 		description:
@@ -623,9 +641,9 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "", 0, 0);
 		},
-	}), settings, cwd));
+	})));
 
-	pi.registerTool(wrapToolDefinition(defineTool({
+	pi.registerTool(regTraced(defineTool({
 		name: QUESTIONNAIRE_TOOL_NAME,
 		label: "goal_questionnaire",
 		description:
@@ -704,5 +722,5 @@ export function registerQuestionnaireTools(pi: ExtensionAPI): void {
 			});
 			return new Text(lines.join("\n"), 0, 0);
 		},
-	}), settings, cwd));
+	})));
 }
