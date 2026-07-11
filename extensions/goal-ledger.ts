@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { normalizeRelPath, nowIso, safeIdPart, type GoalRecord } from "./goal-record.ts";
-import { rotateIfNeeded } from "./storage/rotating-log.ts";
 
 export const GOAL_LEDGER_FILE = ".pi/goals/goal_events.jsonl";
 
@@ -67,9 +66,13 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
 
   const line = JSON.stringify(event) + "\n";
 
-  // G5: cap the event log at 10MB and keep 3 rotations before appending.
-  // Pass the incoming line length so rotation accounts for it.
-  rotateIfNeeded(filePath, undefined, undefined, Buffer.byteLength(line, "utf8"));
+  // NOTE: the goal ledger is an event-sourced log — readGoalLedger replays it
+  // to reconstruct goal state (goal_created → goal_focused → goal_paused …).
+  // Rotating it would move older goal_created events into .1/.2/.3 archives
+  // that readGoalLedger does NOT read, silently dropping later events for
+  // those goals (cubic-dev P1). Rotation is only safe for the auditor trace
+  // log (auditor-log.ts), which is append-only forensic data. The ledger
+  // relies on compaction via goal archival instead.
 
   // Include a random suffix so two calls within the same millisecond (same pid)
   // don't collide on the "wx" exclusive-create flag. (gemini review)

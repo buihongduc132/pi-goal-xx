@@ -738,6 +738,31 @@ export async function runGoalCompletionAuditor(args: {
 			});
 			throw createError;
 		}
+		// cubic-dev P2: if a process guard captured an error DURING createSession
+		// (e.g. an extension onLoad rejection), sessionRef was still undefined so
+		// the fail-fast abort could not fire. createSession may still succeed and
+		// reach session.prompt(). Short-circuit here — before subscribe/prompt —
+		// so a guard-captured error returns immediately instead of running a full
+		// (potentially timeout-length) LLM prompt.
+		if (rejectionMessage) {
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: false,
+				disapproved: true,
+				model: modelLabel(model),
+				error: rejectionMessage,
+				output: "",
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return {
+				approved: false,
+				disapproved: true,
+				output: "",
+				model: modelLabel(model),
+				thinkingLevel,
+				error: rejectionMessage,
+			};
+		}
 		const unsubscribe = session.subscribe((event) => {
 			// Forensic trace: record every session event with a bounded preview.
 			// This is the timeline used to diagnose crashes/hangs after the fact.

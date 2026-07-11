@@ -537,3 +537,43 @@ describe("P1 — guard body is non-throwing (safeToString + try/catch)", () => {
 		assert.equal(typeof safeToString({ a: 1 }), "string");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// P2 (cubic review): a guard error captured DURING createSession must
+// short-circuit the audit BEFORE session.prompt() runs. Previously the
+// rejectionMessage check was only after prompt() completed, so a guard
+// error during onLoad still triggered a full (timeout-length) LLM prompt.
+// ---------------------------------------------------------------------------
+describe("P2 — guard error during createSession short-circuits before prompt", () => {
+	const SRC = fs.readFileSync(
+		path.join(import.meta.dirname, "..", "extensions", "goal-auditor.ts"),
+		"utf8",
+	);
+
+	it("source: rejectionMessage is checked after sessionRef is set, before subscribe", () => {
+		// The short-circuit must appear between `sessionRef = session` and
+		// `session.subscribe(...)`. Verify the check exists and is documented.
+		assert.match(SRC, /if \(rejectionMessage\)/, "P2: rejectionMessage check must exist after createSession");
+		assert.match(SRC, /before subscribe\/prompt/, "P2: comment must document the short-circuit timing");
+	});
+
+	it("source: the short-circuit returns disapproved-with-error (no prompt)", () => {
+		// The short-circuit must return a disapproved result with the captured
+		// rejectionMessage — NOT fall through to session.prompt().
+		const idx = SRC.indexOf("if (rejectionMessage)");
+		assert.ok(idx > 0, "P2: rejectionMessage check must exist");
+		const tail = SRC.slice(idx, idx + 400);
+		assert.match(tail, /disapproved: true/, "P2: short-circuit must return disapproved: true");
+		assert.match(tail, /error: rejectionMessage/, "P2: short-circuit must return the captured error");
+	});
+
+	it("source: the short-circuit sits between sessionRef assignment and subscribe", () => {
+		// Structural ordering proof: sessionRef = session → rejectionMessage check → subscribe
+		const refIdx = SRC.indexOf("sessionRef = session");
+		const checkIdx = SRC.indexOf("if (rejectionMessage)");
+		const subIdx = SRC.indexOf("const unsubscribe = session.subscribe");
+		assert.ok(refIdx > 0 && checkIdx > 0 && subIdx > 0, "P2: all three markers must exist");
+		assert.ok(refIdx < checkIdx, "P2: sessionRef must be set BEFORE the rejectionMessage check");
+		assert.ok(checkIdx < subIdx, "P2: rejectionMessage check must be BEFORE session.subscribe");
+	});
+});

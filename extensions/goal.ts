@@ -2880,10 +2880,6 @@ ${objective}` : objective,
 			}
 
 			if (decision.decision === "confirm") {
-				// Persist any auditor toggle change
-				if (state.goal) {
-					state.goal = { ...state.goal, skipAuditor: !decision.auditorEnabled };
-				}
 				// Extract verification contract from revised objective
 				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
 			if (missingSnippets && missingSnippets.length > 0) {
@@ -2903,8 +2899,13 @@ ${objective}` : objective,
 				};
 			}
 				// Apply the tweak: write the new objective to disk authoritatively.
+				// cubic-dev P2: the skipAuditor toggle is folded into `next` (not
+				// assigned to state.goal earlier) so it only commits on a successful
+				// write. Previously it was set before G6/write guards, leaking the
+				// toggle into the error-return and the turn_end persist chain.
 				const next: GoalRecord = {
 					...state.goal,
+					skipAuditor: !decision.auditorEnabled,
 					objective: cleanedObjective,
 					verificationContract: verificationContract,
 					updatedAt: nowIso(),

@@ -31,6 +31,12 @@ export const DEFAULT_ROTATING_LOG_KEEP = 3;
  * `filePath`→`filePath.1`, `filePath.1`→`filePath.2`, …, and unlinks the
  * oldest (`.<keepCount>`). Best-effort: any error is swallowed so the
  * caller's append still runs.
+ *
+ * Single-writer assumption (cubic-dev P2): the stat-then-return design leaves
+ * a race window between this helper returning and the caller appending. This
+ * is safe under pi-goal's single-writer-per-cwd model (the goal lock serializes
+ * complete_goal; auditor-trace writes are sync and single-threaded). Concurrent
+ * writers to the same path would need an advisory lock.
  */
 export function rotateIfNeeded(
 	filePath: string,
@@ -53,15 +59,30 @@ export function rotateIfNeeded(
 	try {
 		// Drop the oldest rotation, then shift each older rotation down by one.
 		const oldest = `${filePath}.${keepCount}`;
-		try { fs.unlinkSync(oldest); } catch { /* may not exist */ }
+		try { fs.unlinkSync(oldest); } catch (e) {
+			// ENOENT = file doesn't exist yet (expected); re-throw anything else
+			// so a transient I/O error aborts the partial rotation before a
+			// later successful shift overwrites retained archives (cubic-dev P1).
+			if (!isENOENT(e)) throw e;
+		}
 		for (let i = keepCount - 1; i >= 1; i--) {
 			const from = `${filePath}.${i}`;
 			const to = `${filePath}.${i + 1}`;
-			try { fs.renameSync(from, to); } catch { /* may not exist */ }
+			try { fs.renameSync(from, to); } catch (e) {
+				// Only swallow "file doesn't exist" — a real I/O error must abort
+				// the rotation to avoid cascading overwrites of retained archives.
+				if (!isENOENT(e)) throw e;
+			}
 		}
 		// Finally rotate the live file to .1.
 		fs.renameSync(filePath, `${filePath}.1`);
 	} catch {
 		// Rotation failure must not block the append. The caller writes next.
+		// The next append will retry rotation on the following call.
 	}
+}
+
+/** True only for "file not found" errors (expected during rotation). */
+function isENOENT(e: unknown): boolean {
+	return e instanceof Error && "code" in e && (e as { code: string }).code === "ENOENT";
 }
