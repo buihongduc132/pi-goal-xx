@@ -254,7 +254,13 @@ describe("goal.ts — sisyphus-set + propose_goal_draft flows", () => {
 		const cwd = tmpCwd();
 		await h.commands.get("goals-set")!.handler("   ", makeCtx(cwd));
 		const dir = path.join(cwd, ".pi", "goals");
-		assert.ok(!fs.existsSync(dir) || fs.readdirSync(dir).length === 0, "no goal created for empty objective");
+		// An empty objective must create no goal FILE. The directory may exist due
+		// to the goal-trace.jsonl operational trace (which mkdir's .pi/goals like
+		// auditor-trace.jsonl does), so assert on goal records, not the directory.
+		const goalFiles = fs.existsSync(dir)
+			? fs.readdirSync(dir).filter((f) => f.startsWith("active_goal_") || f.startsWith("goal_"))
+			: [];
+		assert.equal(goalFiles.length, 0, "no goal created for empty objective");
 	});
 
 	it("propose_goal_draft with sisyphus mismatch (sisyphus=true on /goals focus) is rejected", async () => {

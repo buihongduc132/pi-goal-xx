@@ -36,6 +36,15 @@ import {
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
 import {
+	logGoalTrace,
+	resolveTraceSink,
+	traceStep,
+	goalTraceLogPath,
+	previewBytes,
+	wrapExecuteWithTrace,
+	type GoalTraceSinkConfig,
+} from "./goal-trace.ts";
+import {
 	isInteractiveTui,
 	proposalDialogFailureMessage,
 	registerQuestionnaireTools,
@@ -457,6 +466,22 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Cached cwd so syncGoalTools (which has no ctx parameter) can read settings.
 	// Set on every turn_start / extension lifecycle entry.
 	let cachedCwd: string | null = null;
+	// Resolved trace sink (level floor + toStderr) cached alongside cachedCwd.
+	// Reloaded whenever settings change; defaults to "info" until first load.
+	let cachedTraceSink: GoalTraceSinkConfig = resolveTraceSink(undefined);
+	/** Resolve the trace sink from current settings, caching the result. */
+	function traceSink(): GoalTraceSinkConfig {
+		return cachedTraceSink;
+	}
+	/** Refresh cached cwd and the trace-sink derived from current settings. */
+	function setCwdAndRefreshSink(cwd: string): void {
+		cachedCwd = cwd;
+		try {
+			cachedTraceSink = resolveTraceSink(loadGoalSettings(cwd).logging);
+		} catch {
+			cachedTraceSink = resolveTraceSink(undefined);
+		}
+	}
 	const state = {
 		get goal(): GoalRecord | null {
 			return focusedGoalFromPool(goalsById, focusedGoalId);
@@ -476,6 +501,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 					releaseLock(cachedCwd, prevId, { sessionId: SELF_SESSION_ID, pid: process.pid });
 				} catch (err) {
 					console.warn(`[goal] failed to release lock on goal clear/change ${prevId}:`, err);
+					logGoalTrace(cachedCwd, { level: "warn", step: "lock.release_failed", goalId: prevId, message: `failed to release lock on goal clear/change ${prevId}`, error: err instanceof Error ? err.message : String(err) });
 				}
 				stopHeartbeatTimer();
 			}
@@ -625,6 +651,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const initialTools = pi.getActiveTools();
 			if (!Array.isArray(initialTools)) {
 				console.error("[pi-goal] syncGoalTools: pi.getActiveTools() did not return an array, got", typeof initialTools);
+				logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "pi.getActiveTools() did not return an array", gotType: typeof initialTools });
 				return;
 			}
 			const disabledToolsSet = cachedCwd
@@ -676,6 +703,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			pi.setActiveTools(Array.from(active));
 		} catch (err) {
 			console.error("[pi-goal] syncGoalTools error:", err instanceof Error ? err.message : String(err));
+			logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "syncGoalTools threw", error: err instanceof Error ? err.message : String(err) });
 		}
 	}
 
@@ -827,6 +855,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				const result = refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
 				if (result.lostLock) {
 					stopHeartbeatTimer();
+					logGoalTrace(cwd, { level: "warn", step: "heartbeat.lost", goalId, message: "focus lock lost during heartbeat" });
 					statusRefreshCtx?.ui.notify(
 						`Goal ${goalId} focus lock lost — another session took over or the lease lapsed. Use /goal-resume to reacquire.`,
 						"warning",
@@ -835,6 +864,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				}
 			} catch (err) {
 				console.warn(`[goal] heartbeat refresh failed for ${goalId}:`, err);
+				logGoalTrace(cwd, { level: "warn", step: "heartbeat.refresh_failed", goalId, message: "heartbeat refresh threw", error: err instanceof Error ? err.message : String(err) });
 			}
 		}, interval);
 		heartbeatTimer.unref?.();
@@ -897,6 +927,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				focusedGoalId = current.id;
 				return true;
 			}
+			logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_vanished", goalId: focusedGoalId, message: "focused goal missing from disk; clearing focus", hadInMemoryGoal: !!current });
 			goalsById = fresh;
 			focusedGoalId = null;
 			clearStoppedRuntimeState();
@@ -1690,6 +1721,7 @@ Verification contract:
 		// block when the lease lapsed — auto-run is NOT fail-open (D7).
 		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
 			console.warn(`[goal] auto-run blocked: focus ${goalId} not locked by self`);
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.blocked", goalId, message: "continuation blocked: focus lock not held by self" });
 			return;
 		}
 		if (continuationQueuedFor === goalId || continuationScheduledFor === goalId) return;
@@ -1697,7 +1729,8 @@ Verification contract:
 		let delay = CONTINUATION_IDLE_RETRY_MS;
 		try {
 			delay = ctx.isIdle() && !ctx.hasPendingMessages() ? 0 : CONTINUATION_IDLE_RETRY_MS;
-		} catch {
+		} catch (err) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.idle_check_failed", goalId, message: "ctx.isIdle()/hasPendingMessages() threw", error: err instanceof Error ? err.message : String(err) });
 			return;
 		}
 		continuationScheduledFor = goalId;
@@ -2350,14 +2383,34 @@ Verification contract:
 		},
 	};
 // Tool-prompt wrapping (group 4, D3). Resolves tool-<name> prompts at load.
+// Also wraps each tool's `execute` in a trace span (tool.<name>) so every tool
+// call — start / end / duration / error — is recorded in goal-trace.jsonl. The
+// span is best-effort: traceStep never lets a trace-write failure affect the
+// wrapped tool. See extensions/goal-trace.ts.
 function regTool<T extends { name: string; promptSnippet?: string; promptGuidelines?: string[] }>(def: T): T {
-	return wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+	const wrapped = wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+	const toolName = def.name;
+	const originalExecute = (wrapped as { execute?: unknown }).execute;
+	if (typeof originalExecute !== "function") return wrapped;
+	const traced = wrapExecuteWithTrace(`tool.${toolName}`, originalExecute as (...args: unknown[]) => unknown, {
+		getSink: traceSink,
+		fallbackCwd: cachedCwd ?? process.cwd(),
+	});
+	(wrapped as unknown as { execute: unknown }).execute = traced;
+	return wrapped;
 }
 
 // Command-hook wrapping (group 6). Wraps each /goal-* command handler so
 // user hooks (default off) can pre/post/override when enabled in settings.
+// Also wraps the final handler in a trace span (cmd.<name>) so every command
+// invocation — start / end / duration / error — is recorded in goal-trace.jsonl.
 function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: string, def: T): T {
-	return { ...def, handler: lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd()) as T["handler"] };
+	const hookWrapped = lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd());
+	const traced = wrapExecuteWithTrace(`cmd.${name}`, hookWrapped as (...args: unknown[]) => unknown, {
+		getSink: traceSink,
+		fallbackCwd: cachedCwd ?? process.cwd(),
+	});
+	return { ...def, handler: traced as T["handler"] };
 }
 
 	pi.registerCommand("goal", wrapCmdDef("goal", {
@@ -4158,7 +4211,7 @@ promptGuidelines: [
 
 	pi.on("turn_start", async (_event, ctx) => {
 		// Cache cwd for syncGoalTools settings access.
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		// Per-turn flag resets (#4 + C9 fix).
 		advanceTurnSeq();
 		goalWorkToolCalledThisTurn = false;
@@ -4175,6 +4228,7 @@ promptGuidelines: [
 		// read-only inspection. Forces the agent to yield the turn instead of "fixing"
 		// the situation by creating extra files etc.
 		if (stoppedGoalId !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "tool_call.blocked", goalId: stoppedGoalId, message: `blocked ${event.toolName}: goal already stopped this turn`, tool: event.toolName, reason: "post_stop" });
 			return {
 				block: true,
 				reason: `The goal was already stopped earlier in this turn (goalId=${stoppedGoalId}). ` +
@@ -4184,6 +4238,7 @@ promptGuidelines: [
 		// Stale checkpoint guard: if the turn was triggered by a queued continuation
 		// for a goal that is no longer active/autoContinue, block work tools.
 		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isStaleCheckpointBlockedToolCall(event.toolName)) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "tool_call.blocked", goalId: checkpointGoalId, message: `blocked ${event.toolName}: stale checkpoint`, tool: event.toolName, reason: "stale_checkpoint" });
 			// Block the tool call with a stale-checkpoint message.
 			return {
 				block: true,
@@ -4253,7 +4308,9 @@ promptGuidelines: [
 			// Unit E task 4.6: release the focus lock (co-located with turn_end archival).
 			try {
 				releaseLock(ctx.cwd, completedGoal.id, selfLockOwner());
-			} catch {}
+			} catch (err) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "lock.release_failed", goalId: completedGoal.id, message: "failed to release lock at turn_end completion", error: err instanceof Error ? err.message : String(err) });
+			}
 			stopHeartbeatTimer();
 			resetGetGoalNudgeState(completedGoal.id);
 			goalsById.delete(completedGoal.id);
@@ -4295,7 +4352,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_start", async (event, ctx) => {
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, event.reason);
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
@@ -4348,7 +4405,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, null);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
@@ -4505,7 +4562,9 @@ promptGuidelines: [
 		if (focusedGoalId) {
 			try {
 				releaseLock(ctx.cwd, focusedGoalId, selfLockOwner());
-			} catch {}
+			} catch (err) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "lock.release_failed", goalId: focusedGoalId, message: "failed to release lock at session_shutdown", error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 		stopHeartbeatTimer();
 		clearContinuationTimer();

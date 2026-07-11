@@ -6,6 +6,7 @@
  *   PI_GOAL_DISABLE_CONTRACTS — "true" to disable, any other value = use file config
  *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
  *   PI_GOAL_SETTINGS_FILE     — alternative settings file path (relative to cwd or absolute)
+ *   PI_GOAL_LOG_LEVEL         — trace log level override: off|error|warn|info|debug
  *
  * The file may contain:
  *   disableTasks, disableContracts, subtaskDepth,
@@ -116,9 +117,30 @@ export interface GoalSettings {
 	contractsDir?: string;
 	/** Auditor timeout in milliseconds. Default 300000 (5 minutes). */
 	auditorTimeoutMs?: number;
+	/**
+	 * Operational trace logging. Controls the rotating `goal-trace.jsonl`
+	 * (tool/command spans, focus-lock ops, heartbeat, hook dispatch). Default
+	 * level is "info"; "off" disables all trace writes. Never affects the
+	 * event-sourced goal_events.jsonl ledger or auditor-trace.jsonl.
+	 */
+	logging?: GoalLoggingConfig;
+}
+
+/**
+ * Trace logging configuration. Mirrors the goal-trace sink config.
+ *   - level: minimum severity to emit. "off" disables tracing entirely.
+ *     Ordered: off < error < warn < info < debug. Default "info".
+ *   - toStderr: mirror every emitted trace line to stderr for live debugging.
+ *     Default false.
+ */
+export interface GoalLoggingConfig {
+	level?: "off" | "error" | "warn" | "info" | "debug";
+	toStderr?: boolean;
 }
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
+/** Env override for the trace log level: off|error|warn|info|debug. Takes precedence over file config. */
+export const PI_GOAL_LOG_LEVEL_ENV = "PI_GOAL_LOG_LEVEL";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -149,6 +171,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"contractTemplates",
 	"contractsDir",
 	"auditorTimeoutMs",
+	"logging",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -227,6 +250,34 @@ function asPromptsBlock(raw: unknown): Record<string, PromptConfig> | undefined 
 		if (cfg) out[key] = cfg;
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+const LOGGING_LEVELS = new Set(["off", "error", "warn", "info", "debug"]);
+
+/** Validate + coerce the logging block. Throws on unknown nested keys / invalid level. */
+function asLoggingConfig(raw: unknown): GoalLoggingConfig | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const knownNested = new Set(["level", "toStderr"]);
+	const unknownNested = Object.keys(rec).filter((k) => !knownNested.has(k));
+	if (unknownNested.length > 0) {
+		throw new Error(
+			`Unknown logging nested key(s): ${unknownNested.join(", ")}`,
+		);
+	}
+	const cfg: GoalLoggingConfig = {};
+	if (rec.level !== undefined) {
+		const level = typeof rec.level === "string" ? rec.level.toLowerCase() : "";
+		if (!LOGGING_LEVELS.has(level)) {
+			throw new Error(
+				`Invalid logging.level: ${String(rec.level)} (must be one of ${[...LOGGING_LEVELS].join(", ")})`,
+			);
+		}
+		cfg.level = level as GoalLoggingConfig["level"];
+	}
+	if (rec.toStderr === true || rec.toStderr === "true") cfg.toStderr = true;
+	else if (rec.toStderr === false || rec.toStderr === "false") cfg.toStderr = false;
+	return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
 /** Validate + coerce the commandHooks block. */
@@ -457,6 +508,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	settings.heartbeatMs = heartbeatMs;
 	const auditorTimeoutMsRaw = asPositiveInt(record.auditorTimeoutMs);
 	if (auditorTimeoutMsRaw !== undefined) settings.auditorTimeoutMs = auditorTimeoutMsRaw;
+	const logging = asLoggingConfig(record.logging);
+	if (logging) settings.logging = logging;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
 	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
 	// Read the raw mode value (not the legacy-validated one) so unified modes
@@ -522,7 +575,24 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 			: (fileConfig.contractTemplates ?? true),
 		contractsDir: fileConfig.contractsDir,
 		auditorTimeoutMs: fileConfig.auditorTimeoutMs,
+		logging: resolveLoggingFromEnv(env, fileConfig.logging),
 	};
+}
+
+/**
+ * Resolve the effective logging config: PI_GOAL_LOG_LEVEL env overrides the
+ * file-configured level (and enables logging when the file had none). An
+ * invalid env value is ignored (falls back to file config). `toStderr` is only
+ * applied from the file config — there is no env override for it.
+ */
+function resolveLoggingFromEnv(env: NodeJS.ProcessEnv, fileLogging?: GoalLoggingConfig): GoalLoggingConfig | undefined {
+	const envLevel = typeof env[PI_GOAL_LOG_LEVEL_ENV] === "string"
+		? (env[PI_GOAL_LOG_LEVEL_ENV] as string).toLowerCase()
+		: undefined;
+	if (envLevel && LOGGING_LEVELS.has(envLevel)) {
+		return { level: envLevel as GoalLoggingConfig["level"], toStderr: fileLogging?.toStderr };
+	}
+	return fileLogging;
 }
 
 /**
@@ -580,6 +650,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (settings.contractsDir) clean.contractsDir = settings.contractsDir;
 	if (leaseMs !== undefined && leaseMs !== 180_000) clean.leaseMs = leaseMs;
 	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
+	const logging = settings.logging ? asLoggingConfig(settings.logging) : undefined;
+	if (logging) clean.logging = logging;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -607,6 +679,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.contractsDir) persisted.contractsDir = clean.contractsDir;
 	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
+	if (clean.logging) persisted.logging = clean.logging;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }
