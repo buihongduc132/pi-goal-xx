@@ -685,27 +685,36 @@ export async function runGoalCompletionAuditor(args: {
 		process.on("uncaughtException", uncaughtExceptionHandler);
 
 		let session: Awaited<ReturnType<typeof createSession>>["session"];
+		let csTimeoutId: ReturnType<typeof setTimeout> | undefined;
 		try {
-			let csTimeoutId: ReturnType<typeof setTimeout>;
-			const created = await Promise.race([
-				createSession({
-					cwd: args.ctx.cwd,
-					model,
-					thinkingLevel,
-					modelRegistry: args.ctx.modelRegistry,
-					resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
-					sessionManager: SessionManager.inMemory(args.ctx.cwd),
-					settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
-					tools: resolved.tools,
-					customTools: [reportProgressTool],
-				}),
-				new Promise<never>((_, reject) => {
-					csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), timeoutMs);
-				}),
-			]);
-			clearTimeout(csTimeoutId!);
-			session = created.session;
-			sessionRef = session;
+			try {
+				const created = await Promise.race([
+					createSession({
+						cwd: args.ctx.cwd,
+						model,
+						thinkingLevel,
+						modelRegistry: args.ctx.modelRegistry,
+						resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
+						sessionManager: SessionManager.inMemory(args.ctx.cwd),
+						settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+						tools: resolved.tools,
+						customTools: [reportProgressTool],
+					}),
+					new Promise<never>((_, reject) => {
+						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), timeoutMs);
+					}),
+				]);
+				session = created.session;
+				sessionRef = session;
+			} finally {
+				// Counterfactual fix (GAP-C): clear the createSession timeout
+				// timer on EVERY path — success, throw, and timeout-reject.
+				// The original code only cleared on the happy path (leaking on
+				// throw); the first counterfactual attempt only cleared on the
+				// catch path (leaking on success, regressing the common case).
+				// A finally here clears it unconditionally.
+				if (csTimeoutId) clearTimeout(csTimeoutId);
+			}
 		} catch (createError) {
 			if (createError instanceof Error && createError.message === "__auditor_cs_timeout__") {
 				timedOut = true;
@@ -875,7 +884,32 @@ export async function runGoalCompletionAuditor(args: {
 		// the session (which may fire after session.abort() returns) would
 		// resurrect the nulled auditProgress in the caller.
 		let aborted = args.signal?.aborted ?? false;
-		const abortSession = () => { aborted = true; session.abort(); };
+		// Counterfactual fix: wrap session.abort() in try/catch for
+		// defense-in-depth. abort() is non-throwing today (pi-agent-core),
+		// but a future refactor could throw — and a throw inside an
+		// AbortSignal listener or setTimeout callback surfaces as
+		// uncaughtException. captureGuardError already wraps its abort()
+		// (line ~672); these two sites should match. Unlike captureGuardError's
+		// bare catch, we log the failure to the trace so a future abort() throw
+		// is visible rather than silently swallowed (avoids broad exception
+		// masking).
+		const safeAbort = () => {
+			try { session.abort(); } catch (e) {
+				try {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "abort_failed",
+						goalId: args.goal.id,
+						// safeToString (not String(e)) — String() throws for
+						// Object.create(null) / throwing proxies, which would
+						// escape the inner catch and lose the trace. Same
+						// rationale as captureGuardError's use of safeToString.
+						error: safeToString(e),
+					});
+				} catch { /* trace logging must never crash */ }
+			}
+		};
+		const abortSession = () => { aborted = true; safeAbort(); };
 		args.signal?.addEventListener("abort", abortSession, { once: true });
 
 		// ── Bug 1a fix: auditor timeout ──────────────────────────────────────
@@ -904,6 +938,16 @@ export async function runGoalCompletionAuditor(args: {
 			}
 			// Install timeout guard before prompt. (G1: the unhandledRejection /
 			// uncaughtException guards are installed before createSession, not here.)
+			// cubic P2 fix: race the prompt against the timeout directly. Previously
+			// the timeout only called session.abort() to unblock prompt — but if
+			// abort() throws (safeAbort swallows it), prompt() never resolves and
+			// the audit hangs forever despite the timeout having fired. By racing
+			// prompt against a rejecting timeout promise, the await unblocks on the
+			// timeout path regardless of whether abort() succeeded.
+			let timeoutReject: ((err: Error) => void) | null = null;
+			const timeoutPromise = new Promise<never>((_, reject) => {
+				timeoutReject = reject;
+			});
 			timeoutId = setTimeout(() => {
 				timedOut = true;
 				logAuditorTrace(args.ctx.cwd, {
@@ -912,12 +956,21 @@ export async function runGoalCompletionAuditor(args: {
 					goalId: args.goal.id,
 					timeoutMs,
 				});
-				session.abort();
+				safeAbort();
+				// Reject the race so prompt unblocks even if abort() threw.
+				if (timeoutReject) {
+					const err = new Error("__auditor_prompt_timeout__");
+					err.name = "AbortError";
+					timeoutReject(err);
+				}
 			}, Math.max(0, timeoutMs - (Date.now() - startedAt)));
 			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
 			// Generic errors MUST propagate to the catch block for proper error handling.
-			await session.prompt(resolvedPrompt.prompt).catch((err: unknown) => {
-				// Only swallow AbortError (from abort). All other errors propagate.
+			await Promise.race([
+				session.prompt(resolvedPrompt.prompt),
+				timeoutPromise,
+			]).catch((err: unknown) => {
+				// Only swallow AbortError (from abort/timeout). All other errors propagate.
 				if (err instanceof Error && err.name === "AbortError") return;
 				throw err;
 			});
