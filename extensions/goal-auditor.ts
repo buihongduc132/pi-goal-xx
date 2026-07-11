@@ -562,21 +562,54 @@ export async function runGoalCompletionAuditor(args: {
 			extensionsCount: resolved.extensions.length,
 			extensions: resolved.extensions,
 		});
+		// cubic P1 fix: createSession must also be timeout-bounded.
+		// Extension onLoad hangs during inherited resource loading would
+		// otherwise stall complete_goal indefinitely. Same ceiling as prompt.
+		const DEFAULT_AUDITOR_TIMEOUT_MS = 5 * 60 * 1000;
+		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
+		let timedOut = false;
+
 		let session: Awaited<ReturnType<typeof createSession>>["session"];
 		try {
-			const created = await createSession({
-				cwd: args.ctx.cwd,
-				model,
-				thinkingLevel,
-				modelRegistry: args.ctx.modelRegistry,
-				resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
-				sessionManager: SessionManager.inMemory(args.ctx.cwd),
-				settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
-				tools: resolved.tools,
-				customTools: [reportProgressTool],
-			});
+			let csTimeoutId: ReturnType<typeof setTimeout>;
+			const created = await Promise.race([
+				createSession({
+					cwd: args.ctx.cwd,
+					model,
+					thinkingLevel,
+					modelRegistry: args.ctx.modelRegistry,
+					resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
+					sessionManager: SessionManager.inMemory(args.ctx.cwd),
+					settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+					tools: resolved.tools,
+					customTools: [reportProgressTool],
+				}),
+				new Promise<never>((_, reject) => {
+					csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), timeoutMs);
+				}),
+			]);
+			clearTimeout(csTimeoutId!);
 			session = created.session;
 		} catch (createError) {
+			if (createError instanceof Error && createError.message === "__auditor_cs_timeout__") {
+				timedOut = true;
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "timeout",
+					goalId: args.goal.id,
+					timeoutMs,
+					source: "createSession",
+				});
+				return {
+					approved: false,
+					disapproved: true,
+					output: "",
+					model: modelLabel(model),
+					thinkingLevel,
+					error: `Auditor timeout during session creation after ${timeoutMs}ms`,
+					timedOut: true,
+				};
+			}
 			// createSession itself threw — almost certainly an extension onLoad
 			// failure in the auditor's inherited resource loader. Log it.
 			logAuditorTrace(args.ctx.cwd, {
@@ -709,9 +742,6 @@ export async function runGoalCompletionAuditor(args: {
 		// inherited extensions that never resolve. Configurable via
 		// settings.auditorTimeoutMs (default 5 minutes). On timeout: abort
 		// session, set timedOut flag, return {approved:false, error:"Auditor timeout"}.
-		const DEFAULT_AUDITOR_TIMEOUT_MS = 5 * 60 * 1000;
-		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
-		let timedOut = false;
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
 		let rejectionMessage: string | undefined;

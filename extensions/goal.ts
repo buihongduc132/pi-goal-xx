@@ -509,7 +509,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
 	// Catches rejections and logs them via auditor trace to prevent process crashes.
 	// Used for all 6 sendMessage calls in complete_goal (Bug 1b fix).
-	function safeFireAndForget(fn: () => void, context: string, cwd: string): void {
+	function safeFireAndForget(fn: () => unknown, context: string, cwd: string): void {
 		Promise.resolve()
 			.then(fn)
 			.catch((err) => {
