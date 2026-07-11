@@ -23,3 +23,8 @@ Source of truth: `extensions/`. Tests: `tests/`. Config: `.pi/pi-goal-xx-setting
 Context: propose_goal_draft and all custom-dialog tools crashed in Web UI/RPC mode with TypeError on `undefined.cancelled`.
 Solutions: Gate on `isInteractiveTui(ctx)` (checks `ctx.mode === "interactive"`), not `ctx.hasUI`. Add safety net for undefined return from `ctx.ui.custom()`.
 Ref: `flow/bugs/2026-07-07_propose-goal-draft-rpc-crash.md`
+
+2: Arrow function `() => { expr }` (braces, no `return`) discards inner Promise → `.then(fn).catch()` never catches rejections → unhandledRejection → process exit.
+Context: PR #21 safeFireAndForget wrapper. 6 `pi.sendMessage` calls written with braces-without-return, rejections floated.
+Solutions: Use implicit return `() => expr` or `() => { return expr; }`. Type `fn` as `() => unknown` not `() => void` so TS flags missing return.
+Ref: `flow/lesson_learn/2_arrow-implicit-return-promise-chain.md`
