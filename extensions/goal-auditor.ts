@@ -900,7 +900,11 @@ export async function runGoalCompletionAuditor(args: {
 						ts: new Date().toISOString(),
 						phase: "abort_failed",
 						goalId: args.goal.id,
-						error: e instanceof Error ? e.message : String(e),
+						// safeToString (not String(e)) — String() throws for
+						// Object.create(null) / throwing proxies, which would
+						// escape the inner catch and lose the trace. Same
+						// rationale as captureGuardError's use of safeToString.
+						error: safeToString(e),
 					});
 				} catch { /* trace logging must never crash */ }
 			}
