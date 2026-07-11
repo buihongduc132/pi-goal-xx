@@ -17,6 +17,39 @@ export type PolicyValidation =
 	| { ok: true }
 	| { ok: false; message: string };
 
+/**
+ * G6 fix — maximum byte size for user/agent-supplied free-text fields.
+ *
+ * An oversized objective / verificationSummary / completionSummary is a
+ * memory + blocking vector: the value is held in the in-memory goal record,
+ * serialized into the goal file, echoed into the auditor prompt, and stored
+ * in the ledger. A pathologically large value (e.g. an agent dumping a whole
+ * file into `objective`) can OOM the process or stall the auditor turn.
+ * 50 KB is far above any legitimate goal text while bounding the blast
+ * radius.
+ */
+export const MAX_FIELD_BYTES = 50_000;
+
+/**
+ * G6 fix — shared length policy for free-text goal fields.
+ *
+ * Returns `{ ok:false, message }` when the value exceeds `max` bytes (UTF-8).
+ * Used by propose_goal_draft (objective), complete_goal
+ * (verificationSummary, completionSummary), and anywhere else agent-supplied
+ * text is accepted into goal state.
+ */
+export function validateFieldLength(value: string, max: number = MAX_FIELD_BYTES, label: string = "field"): PolicyValidation {
+	if (typeof value !== "string") return { ok: true };
+	const bytes = Buffer.byteLength(value, "utf8");
+	if (bytes > max) {
+		return {
+			ok: false,
+			message: `${label} is too large (${bytes} bytes; limit ${max}). Truncate or summarize it — very large values can stall the session and the auditor.`,
+		};
+	}
+	return { ok: true };
+}
+
 export function isGoalUnfinished(goal: Pick<GoalPolicyRecordLike, "status"> | null | undefined): boolean {
 	return !!goal && goal.status !== "complete";
 }
@@ -175,6 +208,11 @@ export function validateVerificationSummary(args: {
 			ok: false,
 			message: `This goal has a verification contract but no verificationSummary was provided. Provide a verificationSummary that addresses the contract requirements.`,
 		};
+	}
+	// G6: bound the verificationSummary size.
+	if (summary) {
+		const lengthGate = validateFieldLength(summary, MAX_FIELD_BYTES, "verificationSummary");
+		if (!lengthGate.ok) return lengthGate;
 	}
 	return { ok: true };
 }

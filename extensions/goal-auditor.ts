@@ -428,6 +428,18 @@ export async function runGoalCompletionAuditor(args: {
 		return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: resolved.error };
 	}
 	const startedAt = Date.now();
+	// G1: declare process-guard state at function scope so the guards can be
+	// installed BEFORE createSession and removed in the OUTER finally below
+	// (which covers every exit path, including createSession-timeout returns and
+	// createSession throws — those previously leaked the handler because the
+	// inner prompt-only finally never ran).
+	// G3: `auditUnsubscribe` holds the session subscription so the outer finally
+	// can release it on every path, dropping the callback's closure over
+	// outputParts/progress and allowing GC.
+	let rejectionMessage: string | undefined;
+	let unhandledRejectionHandler: ((reason: unknown) => void) | undefined;
+	let uncaughtExceptionHandler: ((err: unknown) => void) | undefined;
+	let auditUnsubscribe: (() => void) | undefined;
 	try {
 		const createSession = args.createSession ?? createAgentSession;
 		const patternCache = new AuditorPatternCache();
@@ -568,6 +580,49 @@ export async function runGoalCompletionAuditor(args: {
 		const DEFAULT_AUDITOR_TIMEOUT_MS = 5 * 60 * 1000;
 		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
 		let timedOut = false;
+
+		// G1 + G2: install process-level guards BEFORE createSession is invoked.
+		// Host extensions fire their onLoad handlers during createSession; an
+		// unhandled rejection or uncaught exception there would otherwise hit
+		// Node's default handlers and terminate the process. Previously these
+		// guards were installed at line 796 (AFTER createSession) — too late.
+		// G2 mitigation: we also snapshot the process listeners before/after and
+		// the outer finally removes any handlers we added, so no global listener
+		// is left behind.
+		unhandledRejectionHandler = (reason: unknown) => {
+			const isAbortError = reason instanceof Error && reason.name === "AbortError";
+			if (isAbortError) {
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "unhandledRejection",
+					goalId: args.goal.id,
+					reason: "AbortError (benign — swallowed)",
+				});
+				return;
+			}
+			const msg = reason instanceof Error ? reason.message : String(reason);
+			rejectionMessage = `Auditor inherited-resource rejection: ${msg}`;
+			logAuditorTrace(args.ctx.cwd, {
+				ts: new Date().toISOString(),
+				phase: "unhandledRejection",
+				goalId: args.goal.id,
+				reason: msg,
+				stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
+			});
+		};
+		uncaughtExceptionHandler = (err: unknown) => {
+			const msg = err instanceof Error ? err.message : String(err);
+			rejectionMessage = `Auditor inherited-resource exception: ${msg}`;
+			logAuditorTrace(args.ctx.cwd, {
+				ts: new Date().toISOString(),
+				phase: "uncaughtException",
+				goalId: args.goal.id,
+				reason: msg,
+				stack: err instanceof Error ? err.stack?.slice(0, 2000) : undefined,
+			});
+		};
+		process.on("unhandledRejection", unhandledRejectionHandler);
+		process.on("uncaughtException", uncaughtExceptionHandler);
 
 		let session: Awaited<ReturnType<typeof createSession>>["session"];
 		try {
@@ -736,6 +791,10 @@ export async function runGoalCompletionAuditor(args: {
 		let aborted = args.signal?.aborted ?? false;
 		const abortSession = () => { aborted = true; session.abort(); };
 		args.signal?.addEventListener("abort", abortSession, { once: true });
+		// G3: expose the session unsubscribe to the outer finally so the
+		// subscription (and the callback's closure over outputParts/progress) is
+		// released on EVERY exit path, not just the prompt-window one.
+		auditUnsubscribe = unsubscribe;
 
 		// ── Bug 1a fix: auditor timeout ──────────────────────────────────────
 		// Hard ceiling on audit duration to prevent indefinite hangs from
@@ -744,36 +803,9 @@ export async function runGoalCompletionAuditor(args: {
 		// session, set timedOut flag, return {approved:false, error:"Auditor timeout"}.
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-		let rejectionMessage: string | undefined;
-
-		// ── Bug 1a fix: scoped unhandledRejection guard ──────────────────────
-		// Catches async rejections from inherited extensions during the audit
-		// window. Logs via logAuditorTrace, does NOT propagate to Node's default
-		// handler (which would terminate the process). Installed before
-		// session.prompt(), removed in finally block.
-		const unhandledRejectionHandler = (reason: unknown) => {
-			// R3.5: AbortError is benign (fired during abort teardown)
-			const isAbortError = reason instanceof Error && reason.name === "AbortError";
-			if (isAbortError) {
-				logAuditorTrace(args.ctx.cwd, {
-					ts: new Date().toISOString(),
-					phase: "unhandledRejection",
-					goalId: args.goal.id,
-					reason: "AbortError (benign — swallowed)",
-				});
-				return;
-			}
-			// R3.4: capture message for error return
-			const msg = reason instanceof Error ? reason.message : String(reason);
-			rejectionMessage = `Auditor inherited-resource rejection: ${msg}`;
-			logAuditorTrace(args.ctx.cwd, {
-				ts: new Date().toISOString(),
-				phase: "unhandledRejection",
-				goalId: args.goal.id,
-				reason: msg,
-				stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
-			});
-		};
+		// G1: the unhandledRejection + uncaughtException guards are now installed
+		// BEFORE createSession (see above) and removed in the OUTER finally. The
+		// inner try only needs the prompt timeout.
 
 		// Emit initial progress
 		progress.label = "Starting audit...";
@@ -792,8 +824,9 @@ export async function runGoalCompletionAuditor(args: {
 				}));
 				return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: "Auditor aborted." };
 			}
-			// Install timeout + unhandledRejection guard before prompt
-			process.on("unhandledRejection", unhandledRejectionHandler);
+			// Install the prompt timeout. The process guards were already
+			// installed before createSession (G1) and are removed by the outer
+			// finally (G2/G3).
 			timeoutId = setTimeout(() => {
 				timedOut = true;
 				logAuditorTrace(args.ctx.cwd, {
@@ -958,15 +991,18 @@ export async function runGoalCompletionAuditor(args: {
 				error: errorMsg,
 			};
 		} finally {
-			// Remove timeout + unhandledRejection guard
+			// Remove the prompt timeout. The process guards are removed by the
+			// OUTER finally (G1/G2) so this inner finally only owns prompt-scoped state.
 			if (timeoutId) clearTimeout(timeoutId);
-			process.off("unhandledRejection", unhandledRejectionHandler);
 			args.signal?.removeEventListener("abort", abortSession);
 			progress.phase = "done";
 			progress.label = "Audit complete.";
 			progress.percentage = 100;
 			emitProgress();
 			unsubscribe();
+			// G3: the inner finally has released the subscription; clear the handle
+			// so the outer finally doesn't double-call it.
+			auditUnsubscribe = undefined;
 		}
 	} catch (error) {
 		// Outer catch for the entire audit function
@@ -989,5 +1025,24 @@ export async function runGoalCompletionAuditor(args: {
 			thinkingLevel,
 			error: errorMsg,
 		};
+	}
+	// G1/G2/G3 outer finally — runs on EVERY exit path (happy, prompt-error,
+	// createSession-timeout early-return, createSession-throw). Removes the
+	// process guards we added at the top and releases the session subscription.
+	//
+	// G2 residual-risk note: this is a MITIGATION, not a full fix. The
+	// in-process auditor loads host extensions that may register their OWN
+	// process listeners / mutate global state during onLoad; we cannot
+	// enumerate or remove handlers we did not add. The authoritative fix is an
+	// out-of-process auditor (design change). Here we only guarantee our OWN
+	// handlers (unhandledRejection + uncaughtException) are removed, so the
+	// auditor never *leaks* the guards it installed for itself.
+	finally {
+		if (unhandledRejectionHandler) process.off("unhandledRejection", unhandledRejectionHandler);
+		if (uncaughtExceptionHandler) process.off("uncaughtException", uncaughtExceptionHandler);
+		// G3: release the session subscription + clear accumulated output so
+		// the closure graph is eligible for GC once the audit returns.
+		try { auditUnsubscribe?.(); } catch { /* best-effort */ }
+		outputParts.length = 0;
 	}
 }

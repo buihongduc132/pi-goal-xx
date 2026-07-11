@@ -80,6 +80,7 @@ import {
 	type GoalTask,
 	type GoalTaskList,
 } from "./goal-record.ts";
+import { SerializedSender } from "./serialized-send.ts";
 import {
 	appendGoalEvent,
 	latestAuditorResultForGoal,
@@ -100,6 +101,7 @@ import {
 	sanitizeGoalPaths,
 	serializeGoalFile,
 	writeActiveGoalFile,
+	writeActiveGoalFileSafe,
 } from "./storage/goal-files.ts";
 import {
 	buildGoalListText,
@@ -162,6 +164,8 @@ import {
 	validateTaskListProposal,
 	validateTaskSkip,
 	validateVerificationSummary,
+	validateFieldLength,
+	MAX_FIELD_BYTES,
 } from "./goal-policy.ts";
 
 const STATE_ENTRY = "pi-goal-state";
@@ -495,16 +499,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// first's prompt() resolves the streamingBehavior option. Without this,
 	// concurrent sends surface as "Agent is already processing" errors emitted
 	// from the <runtime> bindCore catch handlers in agent-session.
-	let messageSendChain: Promise<void> = Promise.resolve();
+	//
+	// G7: backed by SerializedSender, which resets the internal promise chain
+	// to a fresh Promise.resolve() once every queued send has drained. The old
+	// inline implementation appended a new .then() per send for the whole
+	// session lifetime, producing unbounded chain growth in long runs.
+	const messageSender = new SerializedSender();
 	function serializedSend<T>(fn: () => T | Promise<T>): Promise<T> {
-		const run = messageSendChain.then(fn);
-		// Swallow rejections on the chain itself so a failed send never poisons
-		// subsequent sends; the caller still sees the real rejection from `run`.
-		messageSendChain = run.then(
-			() => undefined,
-			() => undefined,
-		);
-		return run;
+		return messageSender.serializedSend(fn);
 	}
 	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
 	// Catches rejections and logs them via auditor trace to prevent process crashes.
@@ -1004,7 +1006,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (ctx) {
 				syncGoalPromptFromDisk(ctx);
 				const next = state.goal;
-				if (next) state.goal = next.status === "complete" ? archiveGoalFile(ctx, next) : writeActiveGoalFile(ctx, next);
+				if (next) state.goal = next.status === "complete" ? archiveGoalFile(ctx, next) : writeActiveGoalFileSafe(ctx, next, ctx.ui).goal;
 			}
 		}
 		pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
@@ -2827,7 +2829,7 @@ ${objective}` : objective,
 				//   2) update in-memory `goal` to the canonical post-write record
 				//   3) append the state entry and re-sync tools
 				//   4) clear the tweak drafting gate so propose_goal_tweak can't be re-used
-				state.goal = writeActiveGoalFile(ctx, next);
+				state.goal = writeActiveGoalFileSafe(ctx, next, ctx.ui).goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				tweakDraftingFor = null;
 				// Reset autoContinue counter — plan changed, agent gets a fresh chain.
@@ -2961,6 +2963,18 @@ ${objective}` : objective,
 				}
 			}
 
+			// G6: bound completionSummary size as well — it is written into the
+			// goal file and echoed into the completion notification.
+			if (params.completionSummary) {
+				const summaryGate = validateFieldLength(params.completionSummary, MAX_FIELD_BYTES, "completionSummary");
+				if (!summaryGate.ok) {
+					return {
+						content: [{ type: "text", text: summaryGate.message }],
+						details: goalDetails(state.goal),
+					};
+				}
+			}
+
 			const auditTarget = mergeGoalPromptFromDisk(ctx, state.goal);
 			// Append ledger: completion requested
 			try {
@@ -3009,7 +3023,7 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				state.goal = writeActiveGoalFileSafe(ctx, state.goal, ctx.ui).goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3078,7 +3092,7 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				state.goal = writeActiveGoalFileSafe(ctx, state.goal, ctx.ui).goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3240,7 +3254,7 @@ ${objective}` : objective,
 						stopReason: "agent",
 						updatedAt: nowIso(),
 					};
-					state.goal = writeActiveGoalFile(ctx, state.goal);
+					state.goal = writeActiveGoalFileSafe(ctx, state.goal, ctx.ui).goal;
 					pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 					setTurnStopped(state.goal?.id ?? null);
 					resetGetGoalNudgeState(state.goal?.id);
@@ -3346,7 +3360,7 @@ ${objective}` : objective,
 				stopReason: "agent",
 				updatedAt: nowIso(),
 			};
-			state.goal = writeActiveGoalFile(ctx, state.goal);
+			state.goal = writeActiveGoalFileSafe(ctx, state.goal, ctx.ui).goal;
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 			setTurnStopped(state.goal?.id ?? null);
 			resetGetGoalNudgeState(state.goal?.id);

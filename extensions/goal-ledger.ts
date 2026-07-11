@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { normalizeRelPath, nowIso, safeIdPart, type GoalRecord } from "./goal-record.ts";
+import { rotateLogIfNeeded } from "./storage/log-rotate.ts";
 
 export const GOAL_LEDGER_FILE = ".pi/goals/goal_events.jsonl";
 
@@ -65,6 +66,13 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
   fs.mkdirSync(dir, { recursive: true });
 
   const line = JSON.stringify(event) + "\n";
+  // G5: rotate the ledger before appending if it has grown past the cap.
+  // Cap and keep values are intentionally the same as the auditor trace so
+  // goal file rotation is predictable across the extension.
+  const LEDGER_CAP_BYTES = 10 * 1024 * 1024;
+  const LEDGER_KEEP_ROTATIONS = 3;
+  rotateLogIfNeeded({ filePath, capBytes: LEDGER_CAP_BYTES, keep: LEDGER_KEEP_ROTATIONS });
+
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   let appended = false;
   try {

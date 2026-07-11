@@ -2,6 +2,7 @@ import type { GoalTask } from "./goal-record.ts";
 import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
 import type { GoalSettings } from "./goal-settings.ts";
 import { expandContractTemplates } from "./contract-templating.ts";
+import { validateFieldLength, MAX_FIELD_BYTES } from "./goal-policy.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
 
@@ -215,6 +216,13 @@ export function validateGoalDraftProposal(input: DraftProposalInput): DraftPropo
 	const objective = input.objective.trim();
 	if (!objective) {
 		return { ok: false, message: "propose_goal_draft REJECTED: objective is empty." };
+	}
+
+	// G6: reject pathologically large objectives — they stall the auditor turn,
+	// bloat the goal file + ledger, and can OOM the process.
+	const lengthGate = validateFieldLength(objective, MAX_FIELD_BYTES, "objective");
+	if (!lengthGate.ok) {
+		return { ok: false, message: `propose_goal_draft REJECTED: ${lengthGate.message}` };
 	}
 
 	return { ok: true, objective, expectedSisyphus };

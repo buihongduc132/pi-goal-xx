@@ -16,11 +16,16 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { rotateLogIfNeeded } from "./storage/log-rotate.ts";
 
 const LOG_FILE_NAME = "auditor-trace.jsonl";
 const PROMPT_PREVIEW_BYTES = 4_000;
 const OUTPUT_PREVIEW_BYTES = 8_000;
 const MAX_OUTPUT_LOG_BYTES = 32_000;
+// G5: cap the trace file at 10MB, keep the last 3 rotations
+// (auditor-trace.jsonl.1, .2, .3) before older ones are dropped.
+const TRACE_CAP_BYTES = 10 * 1024 * 1024;
+const TRACE_KEEP_ROTATIONS = 3;
 
 export interface AuditorTraceEntry {
 	/** Monotonic timestamp (ISO). */
@@ -60,7 +65,10 @@ export function logAuditorTrace(cwd: string, entry: AuditorTraceEntry): void {
 			...entry,
 			ts: entry.ts ?? new Date().toISOString(),
 		}) + "\n";
-		fs.appendFileSync(logPath(cwd), line, { encoding: "utf8" });
+		const target = logPath(cwd);
+		// G5: rotate before appending if the file has grown past the cap.
+		rotateLogIfNeeded({ filePath: target, capBytes: TRACE_CAP_BYTES, keep: TRACE_KEEP_ROTATIONS });
+		fs.appendFileSync(target, line, { encoding: "utf8" });
 	} catch {
 		// Logging is best-effort. Never let it crash the audit.
 	}

@@ -75,8 +75,9 @@ function assertWrappedInSerializedSend(src: string, anchorStr: string, label: st
 describe("RACE — serializedSend mutex guards the 3 triggerTurn send sites", () => {
 	it("serializedSend mutex is defined in extensions/goal.ts", () => {
 		const src = readGoalSource();
-		// The mutex chain variable + the serializer function must both exist.
-		assert.match(src, /let messageSendChain\b/, "messageSendChain mutex variable must exist");
+		// G7 refactor: the chain is now encapsulated by SerializedSender, but the
+		// serializedSend function and the chain state still exist.
+		assert.match(src, /new SerializedSender\b/, "SerializedSender mutex must be instantiated");
 		assert.match(src, /function serializedSend<[\s\S]*?>\([\s\S]*?\)\s*:/, "serializedSend function must be defined");
 	});
 

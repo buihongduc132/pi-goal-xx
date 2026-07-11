@@ -237,6 +237,53 @@ export function writeActiveGoalFile(ctx: GoalFileContext, current: GoalRecord): 
 	return next;
 }
 
+/** Result of {@link writeActiveGoalFileSafe}. */
+export type WriteActiveGoalResult =
+	| { ok: true; goal: GoalRecord }
+	| { ok: false; goal: GoalRecord; error: string };
+
+/**
+ * G4 fix — crash-safe writeActiveGoalFile.
+ *
+ * `writeActiveGoalFile` throws on any fs error (disk full, EACCES, symlink
+ * guard, races). Six call sites in goal.ts previously let those throws
+ * propagate into tool `execute` bodies, which either crashed the tool turn or
+ * — worse — left the in-memory `state.goal` diverged from disk (the write
+ * threw AFTER `state.goal` was already mutated in memory). This wrapper:
+ *
+ *   1. never throws — returns `{ ok:false, error }` on failure;
+ *   2. surfaces the error to the caller's UI (`ui.notify`) when a `ui` sink
+ *      is provided, so the user/agent learns the goal file is stale; and
+ *   3. returns the in-memory goal unchanged on failure so the caller can
+ *      decide whether to retry or carry on (the in-memory copy is the most
+ *      recent truth; disk is the stale one).
+ *
+ * The danger this prevents is silent state divergence: memory says the goal
+ * was updated, disk still holds the old version, and on the next reload the
+ * update silently vanishes. By surfacing the error we make divergence loud.
+ *
+ * `notifyLevel` is typed to the concrete pi UI notify level union so this
+ * stays assignable from the real `ExtensionUIContext`.
+ */
+export function writeActiveGoalFileSafe(
+	ctx: GoalFileContext,
+	current: GoalRecord,
+	ui?: { notify?: (message: string, level?: "error" | "warning" | "info") => void },
+): WriteActiveGoalResult {
+	try {
+		const next = writeActiveGoalFile(ctx, current);
+		return { ok: true, goal: next };
+	} catch (err) {
+		const message = `Failed to write active goal file: ${err instanceof Error ? err.message : String(err)}`;
+		try {
+			ui?.notify?.(message, "error");
+		} catch {
+			// UI sink must never re-throw into the caller.
+		}
+		return { ok: false, goal: current, error: message };
+	}
+}
+
 export function archiveGoalFile(ctx: GoalFileContext, current: GoalRecord): GoalRecord {
 	const archivedPath = archivedPathForGoal(ctx, current);
 	const next = sanitizeGoalPaths(ctx, { ...current, archivedPath, updatedAt: nowIso() });
