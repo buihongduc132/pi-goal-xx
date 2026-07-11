@@ -441,3 +441,37 @@ describe("G3 — in-memory auditor state cleaned after audit", () => {
 		assert.equal(result.timedOut, undefined);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// G1 follow-up (review): fail-fast — guard error aborts the active session
+// ---------------------------------------------------------------------------
+describe("G1 follow-up — guard error aborts the session immediately", () => {
+	const SRC = fs.readFileSync(
+		path.join(import.meta.dirname, "..", "extensions", "goal-auditor.ts"),
+		"utf8",
+	);
+
+	it("source: a sessionRef holder exists so guards can reach the session", () => {
+		assert.match(SRC, /let sessionRef/, "G1 follow-up: sessionRef holder must exist");
+	});
+
+	it("source: sessionRef is set when createSession resolves", () => {
+		assert.match(SRC, /sessionRef\s*=\s*session/, "G1 follow-up: sessionRef must be assigned after createSession");
+	});
+
+	it("source: captureGuardError aborts the session on a real error (fail-fast)", () => {
+		assert.match(
+			SRC,
+			/sessionRef\?\.abort\(\)/,
+			"G1 follow-up: guard must call sessionRef?.abort() on capture (fail-fast)",
+		);
+	});
+
+	it("source: sessionRef is cleared in cleanup so late guard events are inert", () => {
+		assert.match(
+			SRC,
+			/sessionRef\s*=\s*undefined/,
+			"G1 follow-up: sessionRef must be reset to undefined in the outer finally",
+		);
+	});
+});

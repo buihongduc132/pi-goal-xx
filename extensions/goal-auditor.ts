@@ -435,6 +435,11 @@ export async function runGoalCompletionAuditor(args: {
 	let uncaughtExceptionHandler: ((err: unknown) => void) | undefined;
 	let preUnhandledRejectionListeners: ((...args: any[]) => void)[] = [];
 	let preUncaughtExceptionListeners: ((...args: any[]) => void)[] = [];
+	// G1 follow-up (review): holder so the process-level guards can abort the
+	// active session immediately on a captured error (fail-fast) instead of
+	// waiting for the timeout to fire. Undefined until createSession resolves
+	// and cleared in cleanup so a late guard event can't abort a freed session.
+	let sessionRef: { abort(): void } | undefined;
 	try {
 		const createSession = args.createSession ?? createAgentSession;
 		const patternCache = new AuditorPatternCache();
@@ -610,6 +615,11 @@ export async function runGoalCompletionAuditor(args: {
 				reason: msg,
 				stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
 			});
+			// G1 follow-up (review): fail-fast — abort the active session so the
+			// audit returns the captured error immediately instead of waiting for
+			// the timeout. No-op if the error fired during createSession (no
+			// session yet) or after cleanup (sessionRef cleared).
+			try { sessionRef?.abort(); } catch {}
 		};
 
 		// Scoped unhandledRejection guard — catches async rejections from
@@ -645,6 +655,7 @@ export async function runGoalCompletionAuditor(args: {
 			]);
 			clearTimeout(csTimeoutId!);
 			session = created.session;
+			sessionRef = session;
 		} catch (createError) {
 			if (createError instanceof Error && createError.message === "__auditor_cs_timeout__") {
 				timedOut = true;
@@ -1051,5 +1062,6 @@ export async function runGoalCompletionAuditor(args: {
 		// returns. We additionally clear the output buffer here so its memory
 		// is released before the function returns, not at the next GC sweep.
 		outputParts.length = 0;
+		sessionRef = undefined;
 	}
 }
