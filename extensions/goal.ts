@@ -3345,7 +3345,12 @@ ${objective}` : objective,
 				phase: "running",
 				elapsedMs: 0,
 			};
-			// Start animation timer for the spinner in the auditor widget
+			// Refresh timer for the auditor widget's elapsed-time display.
+			// The auditing icon is static (no spinner), so the only value that
+			// changes on its own is the elapsed duration — which is shown in whole
+			// seconds. A 500ms cadence (not 1s) guarantees the display updates
+			// promptly when a second boundary is crossed despite event-loop timer
+			// drift, while keeping redraws minimal (2/s, vs the old ~12/s storm).
 			stopAuditAnimation();
 			auditAnimationTimer = setInterval(() => {
 				if (!auditProgress) {
@@ -3354,7 +3359,7 @@ ${objective}` : objective,
 				}
 				auditProgress.elapsedMs = Date.now() - auditStartedAt;
 				goalWidgetComponent?.invalidate();
-			}, 80);
+			}, 500);
 			auditAnimationTimer.unref?.();
 
 			// Create a dedicated AbortController for the audit so it can be interrupted via Escape
