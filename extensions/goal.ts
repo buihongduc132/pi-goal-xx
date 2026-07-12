@@ -500,7 +500,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				try {
 					releaseLock(cachedCwd, prevId, { sessionId: SELF_SESSION_ID, pid: process.pid });
 				} catch (err) {
-					console.warn(`[goal] failed to release lock on goal clear/change ${prevId}:`, err);
 					logGoalTrace(cachedCwd, { level: "warn", step: "lock.release_failed", goalId: prevId, message: `failed to release lock on goal clear/change ${prevId}`, error: err instanceof Error ? err.message : String(err) });
 				}
 				stopHeartbeatTimer();
@@ -650,7 +649,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		try {
 			const initialTools = pi.getActiveTools();
 			if (!Array.isArray(initialTools)) {
-				console.error("[pi-goal] syncGoalTools: pi.getActiveTools() did not return an array, got", typeof initialTools);
 				logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "pi.getActiveTools() did not return an array", gotType: typeof initialTools });
 				return;
 			}
@@ -702,7 +700,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			for (const disabledName of disabledToolsSet) active.delete(disabledName);
 			pi.setActiveTools(Array.from(active));
 		} catch (err) {
-			console.error("[pi-goal] syncGoalTools error:", err instanceof Error ? err.message : String(err));
 			logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "syncGoalTools threw", error: err instanceof Error ? err.message : String(err) });
 		}
 	}
@@ -863,7 +860,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 					if (statusRefreshCtx) updateUI(statusRefreshCtx);
 				}
 			} catch (err) {
-				console.warn(`[goal] heartbeat refresh failed for ${goalId}:`, err);
 				logGoalTrace(cwd, { level: "warn", step: "heartbeat.refresh_failed", goalId, message: "heartbeat refresh threw", error: err instanceof Error ? err.message : String(err) });
 			}
 		}, interval);
@@ -892,9 +888,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (result.ok) {
 			startHeartbeatTimer(cwd, goalId);
 		} else if (result.heldByOther) {
-			console.warn(
-				`[goal] focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
-			);
+			logGoalTrace(cwd, {
+				level: "warn",
+				step: "lock.acquire_failed_held_by_other",
+				goalId,
+				message: `focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
+				ownerSessionId: result.heldByOther.owner.sessionId,
+				ownerPid: result.heldByOther.owner.pid,
+			});
 		}
 		return result;
 	}
@@ -1720,7 +1721,6 @@ Verification contract:
 		// on a previously-held lock (session_compact, session_tree) correctly
 		// block when the lease lapsed — auto-run is NOT fail-open (D7).
 		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
-			console.warn(`[goal] auto-run blocked: focus ${goalId} not locked by self`);
 			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.blocked", goalId, message: "continuation blocked: focus lock not held by self" });
 			return;
 		}
@@ -2394,6 +2394,7 @@ function regTool<T extends { name: string; promptSnippet?: string; promptGuideli
 	if (typeof originalExecute !== "function") return wrapped;
 	const traced = wrapExecuteWithTrace(`tool.${toolName}`, originalExecute as (...args: unknown[]) => unknown, {
 		getSink: traceSink,
+		spanKind: "CLIENT",
 		fallbackCwd: cachedCwd ?? process.cwd(),
 	});
 	(wrapped as unknown as { execute: unknown }).execute = traced;
@@ -2408,6 +2409,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 	const hookWrapped = lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd());
 	const traced = wrapExecuteWithTrace(`cmd.${name}`, hookWrapped as (...args: unknown[]) => unknown, {
 		getSink: traceSink,
+		spanKind: "SERVER",
 		fallbackCwd: cachedCwd ?? process.cwd(),
 	});
 	return { ...def, handler: traced as T["handler"] };
