@@ -4,3 +4,6 @@ coverage/
 .DS_Store
 # Runtime goal state (traces, ledger, locks, goal records) — never commit.
 .pi/goals/
+# Git worktrees (local checkouts) — never commit.
+.worktrees/
+.wt-*/
