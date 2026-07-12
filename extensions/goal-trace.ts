@@ -114,9 +114,15 @@ export function newSpanId(): string {
 	}
 }
 
-/** Timestamp-based fallback id (deterministic, never-zero, correct length). */
+// Monotonic sequence counter + random component so same-millisecond fallback
+// ids never collide (the crypto path is the norm; this only runs if it throws).
+let fallbackSeq = 0;
+
+/** Timestamp-based fallback id (never-zero, correct length, collision-safe). */
 function generateFallbackId(hexLen: number): string {
-	const base = (Date.now().toString(16) + (process.pid ?? 0).toString(16)).slice(-hexLen);
+	fallbackSeq = (fallbackSeq + 1) & 0xffffff;
+	const rand = Math.floor(Math.random() * 0x1000000).toString(16).padStart(6, "0");
+	const base = (Date.now().toString(16) + (process.pid ?? 0).toString(16) + fallbackSeq.toString(16) + rand).slice(-hexLen);
 	return base.padStart(hexLen, "0").slice(-hexLen);
 }
 
@@ -283,7 +289,8 @@ function buildAttrs(entry: GoalTraceEntry): Record<string, unknown> {
 		"traceId", "spanId", "parentSpanId", "spanName", "spanKind", "status",
 		"statusMessage", "attrs",
 	]);
-	const attrs: Record<string, unknown> = {};
+	// Preserve any caller-supplied attrs, then merge the derived ones on top.
+	const attrs: Record<string, unknown> = { ...entry.attrs };
 	if (entry.goalId !== undefined) attrs["goal.id"] = entry.goalId;
 	if (entry.durationMs !== undefined) attrs["duration.ms"] = entry.durationMs;
 	for (const k of Object.keys(entry)) {

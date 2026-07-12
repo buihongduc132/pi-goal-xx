@@ -33,11 +33,12 @@ describe("no-console guard — extensions/ routes all logging through goal-trace
 		const offenders: string[] = [];
 		for (const file of listExtensionFiles()) {
 			const src = fs.readFileSync(file, "utf8");
-			// Strip block + line comments so commented-out console calls (rare,
-			// but possible in dev notes) don't trip the guard — only real code counts.
+			// Strip block + line comments (including inline `// ...` trailing code) so
+			// commented-out console calls don't trip the guard — only real code counts.
+			// The negative lookbehind avoids matching `://` (e.g. in URLs).
 			const stripped = src
 				.replace(/\/\*[\s\S]*?\*\//g, "") // block comments
-				.replace(/^\s*\/\/.*$/gm, "");     // line comments
+				.replace(/(?<!:)\/\/.*$/gm, "");   // line + inline comments
 			const matches = stripped.match(CONSOLE_CALL);
 			if (matches && matches.length > 0) {
 				offenders.push(`${path.basename(file)}: ${matches.length} call(s)`);
