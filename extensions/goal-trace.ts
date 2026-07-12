@@ -32,6 +32,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { rotateIfNeeded } from "./storage/rotating-log.ts";
 
 const LOG_FILE_NAME = "goal-trace.jsonl";
@@ -49,9 +51,97 @@ const LEVEL_RANK: Record<GoalTraceLevel, number> = {
 };
 
 /**
+ * OTel SpanKind — mirrors @opentelemetry/api's SpanKind enum as string values.
+ * No dependency on the OTel SDK is required; consumers ingesting the JSONL
+ * recognise these by name.
+ */
+export type GoalSpanKind = "INTERNAL" | "CLIENT" | "SERVER" | "PRODUCER" | "CONSUMER";
+
+/**
+ * OTel StatusCode — mirrors @opentelemetry/api's StatusCode enum. Each span's
+ * start entry is UNSET; end is OK; error is ERROR (+ statusMessage).
+ */
+export type GoalSpanStatus = "UNSET" | "OK" | "ERROR";
+
+// ---------------------------------------------------------------------------
+// OTel span-context propagation
+// ---------------------------------------------------------------------------
+// A W3C trace context: each span has a 32-hex traceId + 16-hex spanId, and a
+// parentSpanId linking it to the enclosing span. The active span's ids are held
+// in an AsyncLocalStorage so that nested traceStep() calls (even across `await`
+// boundaries) automatically pick up their parent — this is the core feature
+// that makes the JSONL reconstructable into an OTel span tree by a downstream
+// collector/ingest script. No @opentelemetry dependency is needed.
+
+/** The context value threaded through nested spans. */
+interface SpanContext {
+	traceId: string;
+	spanId: string;
+}
+
+const spanContextStore = new AsyncLocalStorage<SpanContext>();
+
+/** The currently-active span's ids, or undefined at the top level. */
+export function getCurrentSpan(): SpanContext | undefined {
+	return spanContextStore.getStore();
+}
+
+/**
+ * Generate a W3C traceId (16 bytes / 32 lowercase hex). Never throws — on any
+ * crypto failure falls back to a timestamp-based id (still 32 hex chars) so the
+ * trace never breaks.
+ */
+export function newTraceId(): string {
+	try {
+		return randomBytes(16).toString("hex");
+	} catch {
+		return generateFallbackId(32);
+	}
+}
+
+/**
+ * Generate a W3C spanId (8 bytes / 16 lowercase hex). Same never-throw guard.
+ * All-zero spanId is invalid per W3C; the fallback guarantees non-zero.
+ */
+export function newSpanId(): string {
+	try {
+		let id = randomBytes(8).toString("hex");
+		// W3C forbids an all-zero spanId; re-roll once if so.
+		if (id === "0000000000000000") id = randomBytes(8).toString("hex");
+		return id;
+	} catch {
+		return generateFallbackId(16);
+	}
+}
+
+/** Timestamp-based fallback id (deterministic, never-zero, correct length). */
+function generateFallbackId(hexLen: number): string {
+	const base = (Date.now().toString(16) + (process.pid ?? 0).toString(16)).slice(-hexLen);
+	return base.padStart(hexLen, "0").slice(-hexLen);
+}
+
+/** True when a string is a valid W3C id of the expected length. */
+export function isValidTraceId(id: string): boolean {
+	return /^[0-9a-f]{32}$/.test(id) && id !== "0".repeat(32);
+}
+export function isValidSpanId(id: string): boolean {
+	return /^[0-9a-f]{16}$/.test(id) && id !== "0".repeat(16);
+}
+
+/**
  * One structured trace entry. `ts` and `level` and `step` are always present;
  * the rest are free-form but must be JSON-serialisable (truncate big strings
  * with `previewBytes` before passing them in).
+ */
+/**
+ * One structured trace entry. `level` and `step` are always present; the rest
+ * are optional. OTel fields (`traceId`, `spanId`, `parentSpanId`, `spanName`,
+ * `spanKind`, `status`, `statusMessage`) are stamped at emit time by
+ * `logGoalTrace` when the entry is part of a span — callers do NOT set them.
+ *
+ * The existing free-form fields (`goalId`, `message`, `error`, `durationMs`,
+ * `phase`, `[k]: unknown`) are preserved for backward compatibility; at emit
+ * time they are also copied into the `attrs` bag for OTel consumers.
  */
 export interface GoalTraceEntry {
 	/** Monotonic ISO timestamp; defaults to now() at write time. */
@@ -70,6 +160,23 @@ export interface GoalTraceEntry {
 	durationMs?: number;
 	/** Span phase: "start" | "end" | "error" | "event". Defaults to "event". */
 	phase?: "start" | "end" | "error" | "event";
+	// --- OTel span fields (stamped by logGoalTrace; callers omit these) ---
+	/** W3C trace id (32 hex). Shared by every entry of one logical span. */
+	traceId?: string;
+	/** W3C span id (16 hex). Shared by the start+end/error pair of one span. */
+	spanId?: string;
+	/** Span id of the enclosing span; links nested spans into a tree. */
+	parentSpanId?: string;
+	/** OTel span name; emitted as `spanName`. Equals `step`. */
+	spanName?: string;
+	/** OTel SpanKind. Defaults to "INTERNAL"; tools use "CLIENT", commands "SERVER". */
+	spanKind?: GoalSpanKind;
+	/** OTel StatusCode. "UNSET" on start, "OK" on end, "ERROR" on error phase. */
+	status?: GoalSpanStatus;
+	/** Human-readable status detail (e.g. the error message on ERROR). */
+	statusMessage?: string;
+	/** Semantic-convention attributes bag (assembled at emit time). */
+	attrs?: Record<string, unknown>;
 	/** Any additional serialisable context. */
 	[k: string]: unknown;
 }
@@ -153,7 +260,44 @@ function passesFloor(entry: GoalTraceEntry, sink: GoalTraceSinkConfig): boolean 
 }
 
 /**
+ * Derive the OTel StatusCode from the entry's phase. start → UNSET, end → OK,
+ * error → ERROR, event → UNSET. Callers may override `status` explicitly.
+ */
+function statusForEntry(entry: GoalTraceEntry): GoalSpanStatus {
+	if (entry.status) return entry.status;
+	const phase = entry.phase ?? "event";
+	if (phase === "end") return "OK";
+	if (phase === "error") return "ERROR";
+	return "UNSET";
+}
+
+/**
+ * Assemble the OTel `attrs` bag from the entry's free-form context fields, so
+ * an OTel consumer reading the JSONL sees standard span attributes. goalId,
+ * message, durationMs, and any extra `[k]` keys (excluding OTel/system fields)
+ * are copied in. Never throws.
+ */
+function buildAttrs(entry: GoalTraceEntry): Record<string, unknown> {
+	const reserved = new Set([
+		"ts", "level", "step", "goalId", "message", "error", "durationMs", "phase",
+		"traceId", "spanId", "parentSpanId", "spanName", "spanKind", "status",
+		"statusMessage", "attrs",
+	]);
+	const attrs: Record<string, unknown> = {};
+	if (entry.goalId !== undefined) attrs["goal.id"] = entry.goalId;
+	if (entry.durationMs !== undefined) attrs["duration.ms"] = entry.durationMs;
+	for (const k of Object.keys(entry)) {
+		if (!reserved.has(k)) attrs[k] = (entry as Record<string, unknown>)[k];
+	}
+	return attrs;
+}
+
+/**
  * Append one structured entry to the goal trace log. Never throws.
+ *
+ * Stamps OTel fields at emit time: `spanName` (= step), `status` (from phase),
+ * and the `attrs` bag (from the entry's context fields). `traceId`/`spanId`/
+ * `parentSpanId` are preserved if the caller (e.g. traceStep) set them.
  *
  * Pass an explicit `sink` (resolved from settings by the caller) to apply level
  * filtering; omit it to use the default (info) floor — used by the lock/hooks
@@ -165,10 +309,18 @@ export function logGoalTrace(cwd: string, entry: GoalTraceEntry, sink?: GoalTrac
 	try {
 		ensureLogDir(cwd);
 		const target = logPath(cwd);
+		const phase = entry.phase ?? "event";
+		const status = statusForEntry(entry);
 		const line = JSON.stringify({
 			...entry,
 			ts: entry.ts ?? new Date().toISOString(),
-			phase: entry.phase ?? "event",
+			phase,
+			// OTel fields stamped at emit time:
+			spanName: entry.spanName ?? entry.step,
+			spanKind: entry.spanKind ?? "INTERNAL",
+			status,
+			statusMessage: entry.statusMessage ?? (phase === "error" ? entry.error : undefined),
+			attrs: buildAttrs(entry),
 		}) + "\n";
 		// Cap the trace log at 10MB and keep 3 rotations before appending.
 		// Pass the incoming line length so rotation accounts for it.
@@ -185,6 +337,12 @@ export function logGoalTrace(cwd: string, entry: GoalTraceEntry, sink?: GoalTrac
 
 /**
  * Build a start entry for a span. Centralises the shape so callers stay DRY.
+ */
+/**
+ * Build a start entry for a span. Centralises the shape so callers stay DRY.
+ * Does NOT stamp traceId/spanId — those are stamped by `traceStep`, which is
+ * the only caller that establishes a span context. (Standalone `logGoalTrace`
+ * calls without a span context emit OTel fields with UNSET status but no ids.)
  */
 export function buildStartEntry(step: string, goalId?: string, extra?: Record<string, unknown>): GoalTraceEntry {
 	return {
@@ -203,41 +361,72 @@ export function buildStartEntry(step: string, goalId?: string, extra?: Record<st
  * tracing must never alter control flow. If the function rejects/throws, an
  * `error` entry is written and the error re-rethrown.
  *
+ * **OTel context:** generates a W3C `traceId` + `spanId` for the span, derives
+ * `parentSpanId` from the currently-active span (if any), and pushes the new
+ * span onto the AsyncLocalStorage store for the duration of `fn` — so nested
+ * `traceStep` calls (even across `await`) automatically chain their parent.
+ * Every entry of this span (start + end/error) shares the same ids, letting a
+ * downstream collector reconstruct the span tree.
+ *
  * Any trace-write failure is swallowed internally, so a broken trace file can
  * never cause the wrapped operation to fail.
+ *
+ * `spanKind`: OTel SpanKind (default "INTERNAL"). Tools use "CLIENT", commands
+ * "SERVER" — set via `wrapExecuteWithTrace`.
  */
 export function traceStep<T>(
 	step: string,
 	cwd: string,
 	fn: () => T | Promise<T>,
-	options?: { goalId?: string; sink?: GoalTraceSinkConfig; getSink?: () => GoalTraceSinkConfig; extra?: Record<string, unknown> },
+	options?: { goalId?: string; sink?: GoalTraceSinkConfig; getSink?: () => GoalTraceSinkConfig; spanKind?: GoalSpanKind; extra?: Record<string, unknown> },
 ): T | Promise<T> {
 	const goalId = options?.goalId;
 	const getSink = options?.getSink ?? (() => options?.sink ?? TRACE_SINK_DEFAULT);
+	const spanKind = options?.spanKind;
 	const extra = options?.extra;
+	const sinkForWrite = getSink();
+	// Early-out when tracing is OFF: zero overhead, no context push.
+	if (sinkForWrite.levelFloor === Number.POSITIVE_INFINITY) return fn();
+
+	// Generate this span's ids and resolve the parent from the active context.
+	const parent = getCurrentSpan();
+	const traceId = parent?.traceId ?? newTraceId();
+	const spanId = newSpanId();
+	const parentSpanId = parent?.spanId;
 	const startedAt = Date.now();
-	logGoalTrace(cwd, buildStartEntry(step, goalId, extra), getSink());
+
+	/** Stamp the OTel identity on an entry so the pair shares ids. */
+	const withIds = (entry: GoalTraceEntry): GoalTraceEntry => ({
+		...entry,
+		traceId,
+		spanId,
+		parentSpanId,
+		...(spanKind ? { spanKind } : {}),
+	});
+
+	logGoalTrace(cwd, withIds(buildStartEntry(step, goalId, extra)), sinkForWrite);
 	// Sync vs async detection: a thrown error from a sync fn is caught here; a
 	// rejected promise is handled in the .then/.catch chain.
 	let isPromise = false;
 	try {
-		const maybePromise = fn();
+		// Run fn inside the span context so nested traceStep calls chain to us.
+		const maybePromise = spanContextStore.run({ traceId, spanId }, fn);
 		if (maybePromise && typeof (maybePromise as Promise<unknown>).then === "function") {
 			isPromise = true;
 			return (maybePromise as Promise<T>)
 				.then((result) => {
-					logGoalTrace(cwd, {
+					logGoalTrace(cwd, withIds({
 						ts: new Date().toISOString(),
 						level: "debug",
 						phase: "end",
 						step,
 						goalId,
 						durationMs: Date.now() - startedAt,
-					}, getSink());
+					}), sinkForWrite);
 					return result;
 				})
 				.catch((err: unknown) => {
-					logGoalTrace(cwd, {
+					logGoalTrace(cwd, withIds({
 						ts: new Date().toISOString(),
 						level: "error",
 						phase: "error",
@@ -245,23 +434,23 @@ export function traceStep<T>(
 						goalId,
 						error: previewError(err),
 						durationMs: Date.now() - startedAt,
-					}, getSink());
+					}), sinkForWrite);
 					throw err;
 				});
 		}
 		// Sync success.
-		logGoalTrace(cwd, {
+		logGoalTrace(cwd, withIds({
 			ts: new Date().toISOString(),
 			level: "debug",
 			phase: "end",
 			step,
 			goalId,
 			durationMs: Date.now() - startedAt,
-		}, getSink());
+		}), sinkForWrite);
 		return maybePromise;
 	} catch (err) {
 		if (isPromise) throw err; // already handled above; unreachable
-		logGoalTrace(cwd, {
+		logGoalTrace(cwd, withIds({
 			ts: new Date().toISOString(),
 			level: "error",
 			phase: "error",
@@ -269,7 +458,7 @@ export function traceStep<T>(
 			goalId,
 			error: previewError(err),
 			durationMs: Date.now() - startedAt,
-		}, getSink());
+		}), sinkForWrite);
 		throw err;
 	}
 }
@@ -311,9 +500,9 @@ function safeStringify(value: unknown): string {
 export function wrapExecuteWithTrace(
 	step: string,
 	originalExecute: (...args: unknown[]) => unknown,
-	options: { sink?: GoalTraceSinkConfig; getSink?: () => GoalTraceSinkConfig; fallbackCwd: string },
+	options: { sink?: GoalTraceSinkConfig; getSink?: () => GoalTraceSinkConfig; spanKind?: GoalSpanKind; fallbackCwd: string },
 ): (...args: unknown[]) => unknown {
-	const { sink, getSink, fallbackCwd } = options;
+	const { sink, getSink, spanKind, fallbackCwd } = options;
 	return function (this: unknown, ...args: unknown[]) {
 		// Recover cwd: tools pass ctx as the 5th arg; commands may pass ctx as
 		// the 2nd. Be defensive — never throw from cwd recovery.
@@ -328,7 +517,7 @@ export function wrapExecuteWithTrace(
 		} catch {
 			// keep fallbackCwd
 		}
-		return traceStep(step, cwd, () => originalExecute.apply(this, args), { sink, getSink }) as unknown;
+		return traceStep(step, cwd, () => originalExecute.apply(this, args), { sink, getSink, spanKind }) as unknown;
 	};
 }
 
