@@ -2646,7 +2646,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 			syncGoalTools();
 			replaceGoal({ objective, autoContinue, sisyphus }, ctx, true, verificationContract);
 			return {
-				content: [{ type: "text", text: buildGoalCreatedReport({ objective, detailedSummary: detailedSummary(state.goal) }) }],
+				content: [{ type: "text", text: buildGoalCreatedReport({ objective: raw, detailedSummary: detailedSummary(state.goal) }) }],
 				details: goalDetails(state.goal),
 			};
 		},

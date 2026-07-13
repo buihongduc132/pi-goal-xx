@@ -118,14 +118,15 @@ describe("start_goal tool — subagent hiding contract", () => {
 	it("create_goal also does NOT appear in any setActiveTools snapshot after execute", async () => {
 		const cwd = tmpCwd();
 		const beforeCount = h.activeToolSnapshots.length;
-		// create_goal.execute triggers syncGoalTools internally (via regTool wrapping).
+		// create_goal.execute does not trigger syncGoalTools on its own, so manually
+		// trigger turn_start to force syncGoalTools and capture a real setActiveTools snapshot.
 		await h.tools.get("create_goal")!.execute(
 			"t", { objective: "trigger sync" },
 			undefined, undefined, makeCtx(cwd),
 		);
+		await h.handlers.get("turn_start")!({}, makeCtx(cwd));
 		const afterCount = h.activeToolSnapshots.length;
-		// Even if create_goal doesn't trigger setActiveTools itself, any snapshots
-		// captured during this test must not contain create_goal.
+		assert.ok(afterCount > beforeCount, "turn_start should have triggered setActiveTools via syncGoalTools");
 		for (let i = beforeCount; i < afterCount; i++) {
 			const snapshot = h.activeToolSnapshots[i]!;
 			assert.ok(
