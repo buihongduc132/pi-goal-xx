@@ -755,9 +755,9 @@ export async function runGoalCompletionAuditor(args: {
 				logAuditorTrace(args.ctx.cwd, {
 					ts: new Date().toISOString(),
 					phase: "timeout",
-					goalId: args.goal.id,
-					timeoutMs,
-					source: "createSession",
+						goalId: args.goal.id,
+						timeoutMs: effectiveTimeoutMs,
+						source: "createSession",
 				});
 				return {
 					approved: false,
@@ -765,7 +765,7 @@ export async function runGoalCompletionAuditor(args: {
 					output: "",
 					model: modelLabel(model),
 					thinkingLevel,
-					error: `Auditor timeout during session creation after ${timeoutMs}ms`,
+					error: `Auditor timeout during session creation after ${effectiveTimeoutMs}ms`,
 					timedOut: true,
 				};
 			}
@@ -1008,10 +1008,10 @@ export async function runGoalCompletionAuditor(args: {
 				logAuditorTrace(args.ctx.cwd, {
 					ts: new Date().toISOString(),
 					phase: "timeout",
-					goalId: args.goal.id,
-					timeoutMs,
-				});
-				safeAbort();
+						goalId: args.goal.id,
+						timeoutMs: effectiveTimeoutMs,
+					});
+					safeAbort();
 				// Reject the race so prompt unblocks even if abort() threw.
 				if (timeoutReject) {
 					const err = new Error("__auditor_prompt_timeout__");
@@ -1053,7 +1053,7 @@ export async function runGoalCompletionAuditor(args: {
 			}
 			if (timedOut) {
 				const timeoutOutput = outputParts.join("\n\n").trim();
-				const timeoutError = `Auditor timeout after ${timeoutMs}ms`;
+				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
 				logAuditorTrace(args.ctx.cwd, buildEndEntry({
 					goalId: args.goal.id,
 					approved: false,
@@ -1114,7 +1114,7 @@ export async function runGoalCompletionAuditor(args: {
 			// Check timeout BEFORE generic error handling
 			if (timedOut) {
 				const timeoutOutput = outputParts.join("\n\n").trim();
-				const timeoutError = `Auditor timeout after ${timeoutMs}ms`;
+				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
 				logAuditorTrace(args.ctx.cwd, buildEndEntry({
 					goalId: args.goal.id,
 					approved: false,

@@ -171,7 +171,7 @@ describe("Fix 1 (Zone 4) — async session.abort() rejection is captured, not es
 		// NOT throw out of runGoalCompletionAuditor or kill the process.
 		assert.equal(result.timedOut, true);
 		assert.equal(result.approved, false);
-		assert.match(result.error ?? "", /Auditor timeout after 50ms/);
+			assert.match(result.error ?? "", /Auditor timeout after 1000ms/);
 	});
 });
 
@@ -303,7 +303,7 @@ describe("Fix 1 (Zone 5) — second audit after a previous timeout (no leaked st
 			});
 			assert.equal(second.timedOut, true, "second audit must also time out cleanly");
 			assert.equal(second.approved, false);
-			assert.match(second.error ?? "", /Auditor timeout after 50ms/);
+			assert.match(second.error ?? "", /Auditor timeout after 1000ms/);
 			// Settle any trailing abort rejections before restoring listeners.
 			await new Promise<void>((r) => setTimeout(r, 150));
 		});
