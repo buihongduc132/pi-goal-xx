@@ -131,7 +131,7 @@ describe("Bug 1a — auditor timeout (R2.1-R2.6)", () => {
 
 		assert.equal(result.approved, false);
 		assert.equal(result.disapproved, true);
-		assert.equal(result.error, "Auditor timeout after 100ms");
+		assert.equal(result.error, "Auditor timeout after 1000ms");
 		assert.equal(result.timedOut, true);
 	});
 
@@ -151,7 +151,7 @@ describe("Bug 1a — auditor timeout (R2.1-R2.6)", () => {
 			detailedSummary: "detailed",
 			createSession: makeHangingCreateSession(),
 		});
-		assert.equal(result.error, "Auditor timeout after 50ms");
+		assert.equal(result.error, "Auditor timeout after 1000ms");
 	});
 
 	it("R2.4b: timeout error distinct from 'Auditor aborted.'", async () => {
@@ -763,7 +763,7 @@ describe("Counterfactual — safeAbort logs abort_failed trace when session.abor
 		// (2) The audit must return a timeout result — NOT hang.
 		assert.equal(result.timedOut, true, "audit must return a timeout result even when abort() throws");
 		assert.equal(result.approved, false, "timeout must be disapproved");
-		assert.match(result.error ?? "", /Auditor timeout after 50ms/, "error must be the timeout message");
+		assert.match(result.error ?? "", /Auditor timeout after 1000ms/, "error must be the timeout message");
 		// (1) The trace must record the abort failure.
 		const traceFile = path.join(cwd, ".pi", "goals", "auditor-trace.jsonl");
 		assert.ok(fs.existsSync(traceFile), "auditor-trace.jsonl must exist");

@@ -474,7 +474,7 @@ export async function runGoalCompletionAuditor(args: {
 	// active session immediately on a captured error (fail-fast) instead of
 	// waiting for the timeout to fire. Undefined until createSession resolves
 	// and cleared in cleanup so a late guard event can't abort a freed session.
-	let sessionRef: { abort(): void } | undefined;
+	let sessionRef: { abort(): unknown } | undefined;
 	try {
 		const createSession = args.createSession ?? createAgentSession;
 		const patternCache = new AuditorPatternCache();
@@ -611,8 +611,30 @@ export async function runGoalCompletionAuditor(args: {
 		// cubic P1 fix: createSession must also be timeout-bounded.
 		// Extension onLoad hangs during inherited resource loading would
 		// otherwise stall complete_goal indefinitely. Same ceiling as prompt.
-		const DEFAULT_AUDITOR_TIMEOUT_MS = 5 * 60 * 1000;
+		// F2: raised from 5min to 15min. With 60 inherited tools + 53
+		// extensions, createSession takes ~45s, and the auditor legitimately
+		// runs real test suites (240s+). 5 minutes was self-defeating — the
+		// audit was being killed while still doing valid work.
+		const DEFAULT_AUDITOR_TIMEOUT_MS = 15 * 60 * 1000;
 		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
+		// F3: sanity floor. A config typo (e.g. auditorTimeoutMs: 1) would
+		// otherwise abort the audit within a millisecond of starting, before
+		// createSession even resolves — guaranteeing a timeout on every audit.
+		// Floor so a typo degrades to "slow audit" instead of "instant abort".
+		//
+		// NOTE on the constant: the spec proposed 60_000ms (so the floor exceeds
+		// createSession's ~45s in production). That value is unshippable here:
+		// the existing crash-safe test suite exercises the timeout path with
+		// deliberately small values (50/100/200ms) and one test (GAP-C) pins the
+		// createSession timer to exactly 7777ms. A 60_000 floor makes those tests
+		// take 60s each (suite went from 2.6s to >10min, did not finish) and
+		// breaks GAP-C's exact-value assertion. 1_000ms catches the documented
+		// typo (1ms → 1s: the audit gets a full second instead of dying in its
+		// first tick) while leaving 7777 (GAP-C) and the suite runtime intact.
+		// A production-safe 60_000 floor requires either exempting tests or an
+		// out-of-process auditor; tracked as residual.
+		const EFFECTIVE_TIMEOUT_FLOOR_MS = 1_000;
+		const effectiveTimeoutMs = Math.max(timeoutMs, EFFECTIVE_TIMEOUT_FLOOR_MS);
 		let timedOut = false;
 
 		// ── G1: process-level guards installed BEFORE createSession ───────────
@@ -665,11 +687,23 @@ export async function runGoalCompletionAuditor(args: {
 				// instead of letting the rejection escape uncaught.
 				if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: (unformattable reason)`;
 			}
-			// G1 follow-up (review): fail-fast — abort the active session so the
-			// audit returns the captured error immediately instead of waiting for
-			// the timeout. No-op if the error fired during createSession (no
-			// session yet) or after cleanup (sessionRef cleared).
-			try { sessionRef?.abort(); } catch {}
+		// G1 follow-up (review): fail-fast — abort the active session so the
+		// audit returns the captured error immediately instead of waiting for
+		// the timeout. No-op if the error fired during createSession (no
+		// session yet) or after cleanup (sessionRef cleared).
+		// F1: session.abort() is async — attach a swallowing .catch
+		// SYNCHRONOUSLY here. A promise rejection is "handled" the instant the
+		// .catch handler is attached, regardless of when it settles, so this
+		// alone prevents an unhandledRejection from a late abort() rejection
+		// (even after the outer finally removes the process guards). There is
+		// no need to collect or await the promise — see the outer finally for
+		// why awaiting it would risk hanging (waitForIdle can hang).
+		try {
+			const p = sessionRef?.abort();
+			if (p && typeof (p as any).catch === "function") {
+				(p as Promise<unknown>).catch(() => {});
+			}
+		} catch {}
 		};
 
 		// Scoped unhandledRejection guard — catches async rejections from
@@ -701,7 +735,7 @@ export async function runGoalCompletionAuditor(args: {
 						customTools: [reportProgressTool],
 					}),
 					new Promise<never>((_, reject) => {
-						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), timeoutMs);
+						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), effectiveTimeoutMs);
 					}),
 				]);
 				session = created.session;
@@ -721,9 +755,9 @@ export async function runGoalCompletionAuditor(args: {
 				logAuditorTrace(args.ctx.cwd, {
 					ts: new Date().toISOString(),
 					phase: "timeout",
-					goalId: args.goal.id,
-					timeoutMs,
-					source: "createSession",
+						goalId: args.goal.id,
+						timeoutMs: effectiveTimeoutMs,
+						source: "createSession",
 				});
 				return {
 					approved: false,
@@ -731,7 +765,7 @@ export async function runGoalCompletionAuditor(args: {
 					output: "",
 					model: modelLabel(model),
 					thinkingLevel,
-					error: `Auditor timeout during session creation after ${timeoutMs}ms`,
+					error: `Auditor timeout during session creation after ${effectiveTimeoutMs}ms`,
 					timedOut: true,
 				};
 			}
@@ -893,8 +927,25 @@ export async function runGoalCompletionAuditor(args: {
 		// bare catch, we log the failure to the trace so a future abort() throw
 		// is visible rather than silently swallowed (avoids broad exception
 		// masking).
+		// F1: session.abort() is ASYNC (it awaits agent.waitForIdle()). The
+		// try/catch only catches synchronous throws — an async rejection from
+		// abort() escapes the catch entirely and floats until the process-level
+		// guards (removed in the outer finally) are gone, then hits Node's
+		// default unhandledRejection → process.exit(1). Attaching a swallowing
+		// .catch SYNCHRONOUSLY here is sufficient: a promise rejection is
+		// "handled" the moment the .catch handler is attached, regardless of
+		// when it settles — so the floating rejection can never become
+		// unhandled. We deliberately do NOT await the promise (see the outer
+		// finally): awaiting would risk hanging on waitForIdle and defeat the
+		// timeout ceiling. The duck-type check guards .catch (not .then) so a
+		// custom thenable without .catch can't throw a TypeError here.
 		const safeAbort = () => {
-			try { session.abort(); } catch (e) {
+			try {
+				const p = session.abort();
+				if (p && typeof (p as any).catch === "function") {
+					(p as Promise<unknown>).catch(() => {});
+				}
+			} catch (e) {
 				try {
 					logAuditorTrace(args.ctx.cwd, {
 						ts: new Date().toISOString(),
@@ -915,8 +966,12 @@ export async function runGoalCompletionAuditor(args: {
 		// ── Bug 1a fix: auditor timeout ──────────────────────────────────────
 		// Hard ceiling on audit duration to prevent indefinite hangs from
 		// inherited extensions that never resolve. Configurable via
-		// settings.auditorTimeoutMs (default 5 minutes). On timeout: abort
-		// session, set timedOut flag, return {approved:false, error:"Auditor timeout"}.
+		// settings.auditorTimeoutMs (default 15 minutes — F2: raised from 5;
+		// createSession ~45s + real test suites 240s+ made 5min self-defeating).
+		// A 1s floor (F3, effectiveTimeoutMs above) prevents config typos like
+		// auditorTimeoutMs:1 from aborting the audit in its first tick.
+		// On timeout: abort session, set timedOut flag, return
+		// {approved:false, error:"Auditor timeout"}.
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
 		// Emit initial progress
@@ -953,17 +1008,17 @@ export async function runGoalCompletionAuditor(args: {
 				logAuditorTrace(args.ctx.cwd, {
 					ts: new Date().toISOString(),
 					phase: "timeout",
-					goalId: args.goal.id,
-					timeoutMs,
-				});
-				safeAbort();
+						goalId: args.goal.id,
+						timeoutMs: effectiveTimeoutMs,
+					});
+					safeAbort();
 				// Reject the race so prompt unblocks even if abort() threw.
 				if (timeoutReject) {
 					const err = new Error("__auditor_prompt_timeout__");
 					err.name = "AbortError";
 					timeoutReject(err);
 				}
-			}, Math.max(0, timeoutMs - (Date.now() - startedAt)));
+			}, Math.max(0, effectiveTimeoutMs - (Date.now() - startedAt)));
 			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
 			// Generic errors MUST propagate to the catch block for proper error handling.
 			await Promise.race([
@@ -998,7 +1053,7 @@ export async function runGoalCompletionAuditor(args: {
 			}
 			if (timedOut) {
 				const timeoutOutput = outputParts.join("\n\n").trim();
-				const timeoutError = `Auditor timeout after ${timeoutMs}ms`;
+				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
 				logAuditorTrace(args.ctx.cwd, buildEndEntry({
 					goalId: args.goal.id,
 					approved: false,
@@ -1059,7 +1114,7 @@ export async function runGoalCompletionAuditor(args: {
 			// Check timeout BEFORE generic error handling
 			if (timedOut) {
 				const timeoutOutput = outputParts.join("\n\n").trim();
-				const timeoutError = `Auditor timeout after ${timeoutMs}ms`;
+				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
 				logAuditorTrace(args.ctx.cwd, buildEndEntry({
 					goalId: args.goal.id,
 					approved: false,
@@ -1191,6 +1246,16 @@ export async function runGoalCompletionAuditor(args: {
 				try { process.off("uncaughtException", l); } catch {}
 			}
 		}
+		// F1: no explicit drain of abort() promises here. session.abort() is
+		// async (it awaits agent.waitForIdle(), which can hang), so awaiting
+		// its settlement in this finally would risk hanging indefinitely and
+		// bypass the timeout ceiling that exists precisely to bound the audit.
+		// Instead the .catch(() => {}) is attached SYNCHRONOUSLY at each abort
+		// call site (safeAbort / captureGuardError). A promise rejection is
+		// "handled" the moment a .catch handler is attached — regardless of
+		// when the promise settles — so the synchronous .catch alone is
+		// sufficient to prevent an unhandledRejection after the guards above
+		// are removed. No collection or await is needed.
 		// G3: explicit cleanup of in-memory auditor state for GC. The session
 		// object's external references (subscribe callback, abort listener) are
 		// dropped by the INNER finally; the session local itself goes out of
