@@ -475,14 +475,6 @@ export async function runGoalCompletionAuditor(args: {
 	// waiting for the timeout to fire. Undefined until createSession resolves
 	// and cleared in cleanup so a late guard event can't abort a freed session.
 	let sessionRef: { abort(): unknown } | undefined;
-	// F1: pending aborts. `session.abort()` is async (it awaits
-	// `agent.waitForIdle()`). `safeAbort` and `captureGuardError` fire it
-	// fire-and-forget, but a try/catch is a NO-OP for an async rejection — the
-	// floating rejection escapes AFTER the outer finally removes the process
-	// guards, hitting Node's default unhandledRejection → pi's crash handler →
-	// process.exit(1). Capturing the returned promise here and draining it in
-	// the outer finally (with a swallowing .catch) closes that exit vector.
-	const pendingAborts: Promise<unknown>[] = [];
 	try {
 		const createSession = args.createSession ?? createAgentSession;
 		const patternCache = new AuditorPatternCache();
@@ -695,19 +687,23 @@ export async function runGoalCompletionAuditor(args: {
 				// instead of letting the rejection escape uncaught.
 				if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: (unformattable reason)`;
 			}
-			// G1 follow-up (review): fail-fast — abort the active session so the
-			// audit returns the captured error immediately instead of waiting for
-			// the timeout. No-op if the error fired during createSession (no
-			// session yet) or after cleanup (sessionRef cleared).
-			// F1: session.abort() is async — capture its returned promise into
-			// pendingAborts so the outer finally can drain it. A bare fire-and-
-			// forget here lets a late rejection escape past guard removal.
-			try {
-				const p = sessionRef?.abort();
-				if (p && typeof (p as any).then === "function") {
-					pendingAborts.push((p as Promise<unknown>).catch(() => {}));
-				}
-			} catch {}
+		// G1 follow-up (review): fail-fast — abort the active session so the
+		// audit returns the captured error immediately instead of waiting for
+		// the timeout. No-op if the error fired during createSession (no
+		// session yet) or after cleanup (sessionRef cleared).
+		// F1: session.abort() is async — attach a swallowing .catch
+		// SYNCHRONOUSLY here. A promise rejection is "handled" the instant the
+		// .catch handler is attached, regardless of when it settles, so this
+		// alone prevents an unhandledRejection from a late abort() rejection
+		// (even after the outer finally removes the process guards). There is
+		// no need to collect or await the promise — see the outer finally for
+		// why awaiting it would risk hanging (waitForIdle can hang).
+		try {
+			const p = sessionRef?.abort();
+			if (p && typeof (p as any).catch === "function") {
+				(p as Promise<unknown>).catch(() => {});
+			}
+		} catch {}
 		};
 
 		// Scoped unhandledRejection guard — catches async rejections from
@@ -935,14 +931,19 @@ export async function runGoalCompletionAuditor(args: {
 		// try/catch only catches synchronous throws — an async rejection from
 		// abort() escapes the catch entirely and floats until the process-level
 		// guards (removed in the outer finally) are gone, then hits Node's
-		// default unhandledRejection → process.exit(1). Capture the returned
-		// promise into pendingAborts (with a swallowing .catch) so the outer
-		// finally can await it before the guards come down.
+		// default unhandledRejection → process.exit(1). Attaching a swallowing
+		// .catch SYNCHRONOUSLY here is sufficient: a promise rejection is
+		// "handled" the moment the .catch handler is attached, regardless of
+		// when it settles — so the floating rejection can never become
+		// unhandled. We deliberately do NOT await the promise (see the outer
+		// finally): awaiting would risk hanging on waitForIdle and defeat the
+		// timeout ceiling. The duck-type check guards .catch (not .then) so a
+		// custom thenable without .catch can't throw a TypeError here.
 		const safeAbort = () => {
 			try {
 				const p = session.abort();
 				if (p && typeof (p as any).catch === "function") {
-					pendingAborts.push((p as Promise<unknown>).catch(() => {}));
+					(p as Promise<unknown>).catch(() => {});
 				}
 			} catch (e) {
 				try {
@@ -1245,16 +1246,16 @@ export async function runGoalCompletionAuditor(args: {
 				try { process.off("uncaughtException", l); } catch {}
 			}
 		}
-		// F1: drain pending aborts. session.abort() is async and may still be
-		// settling when we reach here. The guards above are now removed, so a
-		// floating rejection from any captured abort() would escape to Node's
-		// default unhandledRejection handler → process.exit(1). The captured
-		// promises already carry a swallowing .catch (so they can't reject
-		// themselves), but we MUST await their settlement here so the audit
-		// does not return (and yield control) before abort() finishes —
-		// otherwise the rejection lands in a microtask after this function has
-		// unwound. allSettled never rejects; the catch is belt-and-braces.
-		try { await Promise.allSettled(pendingAborts); } catch {}
+		// F1: no explicit drain of abort() promises here. session.abort() is
+		// async (it awaits agent.waitForIdle(), which can hang), so awaiting
+		// its settlement in this finally would risk hanging indefinitely and
+		// bypass the timeout ceiling that exists precisely to bound the audit.
+		// Instead the .catch(() => {}) is attached SYNCHRONOUSLY at each abort
+		// call site (safeAbort / captureGuardError). A promise rejection is
+		// "handled" the moment a .catch handler is attached — regardless of
+		// when the promise settles — so the synchronous .catch alone is
+		// sufficient to prevent an unhandledRejection after the guards above
+		// are removed. No collection or await is needed.
 		// G3: explicit cleanup of in-memory auditor state for GC. The session
 		// object's external references (subscribe callback, abort listener) are
 		// dropped by the INNER finally; the session local itself goes out of

@@ -10,10 +10,15 @@
  * `process.exit(1)`.
  *
  * Fix (4 changes):
- *  F1: `safeAbort` captures the async `abort()` return value into a
- *      `pendingAborts` array (with a swallowing `.catch`); the OUTER finally
- *      drains it via `Promise.allSettled`. Same treatment for the
- *      `sessionRef?.abort()` fail-fast site. (Closes the exit vector.)
+ *  F1: `safeAbort` (and the `sessionRef?.abort()` fail-fast site) attach a
+ *      swallowing `.catch(() => {})` SYNCHRONOUSLY to the async `abort()`
+ *      return value. A promise rejection is "handled" the instant the
+ *      `.catch` handler is attached — regardless of when it settles — so the
+ *      late rejection can never become unhandled, even after the OUTER
+ *      finally removes the process guards. (A `Promise.allSettled` drain in
+ *      the finally was rejected: `abort()` awaits `waitForIdle()`, which can
+ *      hang, and awaiting it would bypass the timeout ceiling.) Closes the
+ *      exit vector without any collection/await.
  *  F2: default timeout ceiling 5min → 15min (createSession ~45s + real test
  *      suites 240s+ make 5min self-defeating).
  *  F3: `effectiveTimeoutMs = Math.max(timeoutMs, 60_000)` sanity floor so a
@@ -35,11 +40,6 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { runGoalCompletionAuditor } from "../extensions/goal-auditor.ts";
 import type { GoalRecord } from "../extensions/goal-record.ts";
-
-const SRC = fs.readFileSync(
-	path.join(import.meta.dirname, "..", "extensions", "goal-auditor.ts"),
-	"utf8",
-);
 
 function makeGoal(over: Partial<GoalRecord> = {}): GoalRecord {
 	return {
@@ -156,37 +156,6 @@ describe("Fix 1 (Zone 4) — async session.abort() rejection is captured, not es
 	beforeEach(() => { cwd = makeTmpCwd(); });
 	afterEach(() => { fs.rmSync(cwd, { recursive: true, force: true }); });
 
-	it("source: a pendingAborts holder is declared in function scope", () => {
-		assert.match(SRC, /const pendingAborts/, "Fix 1: a pendingAborts holder must be declared");
-	});
-
-	it("source: the outer finally drains pendingAborts via Promise.allSettled", () => {
-		assert.match(
-			SRC,
-			/Promise\.allSettled\(pendingAborts\)/,
-			"Fix 1: outer finally must drain pendingAborts (await Promise.allSettled)",
-		);
-	});
-
-	it("source: safeAbort captures session.abort() into a promise and pushes a swallowing .catch", () => {
-		assert.match(SRC, /const p = session\.abort\(\)/, "Fix 1: safeAbort must capture session.abort() return value");
-		assert.match(
-			SRC,
-			/pendingAborts\.push\(\(p as Promise<unknown>\)\.catch\(/,
-			"Fix 1: captured abort promise must be pushed to pendingAborts with a swallowing .catch",
-		);
-	});
-
-	it("source: the sessionRef?.abort() fail-fast site also captures its promise", () => {
-		// captureGuardError's `sessionRef?.abort()` had the same fire-and-forget
-		// bug; it must capture its return value too.
-		assert.match(
-			SRC,
-			/const p = sessionRef\?\.abort\(\)/,
-			"Fix 1: captureGuardError must capture sessionRef?.abort() return value",
-		);
-	});
-
 	it("behavioral: audit returns a clean timeout result even when abort() rejects asynchronously", async () => {
 		fs.writeFileSync(
 			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
@@ -252,17 +221,6 @@ describe("Fix 3 (Zone 2) — auditorTimeoutMs is floored to prevent instant-abor
 	let cwd: string;
 	beforeEach(() => { cwd = makeTmpCwd(); });
 	afterEach(() => { fs.rmSync(cwd, { recursive: true, force: true }); });
-
-	it("source: an effectiveTimeoutMs floor exists via Math.max", () => {
-		// The floor's constant is sized to catch typo-class values (1ms) without
-		// breaking the existing crash-safe suite (which uses 50–7777ms). See the
-		// NOTE in the source for why the spec's proposed 60_000 was infeasible.
-		assert.match(
-			SRC,
-			/const effectiveTimeoutMs = Math\.max\(timeoutMs,/,
-			"Fix 3: an effectiveTimeoutMs floor (Math.max) must exist",
-		);
-	});
 
 	it("behavioral: auditorTimeoutMs=1 does not schedule a ~1ms timer (floored)", async () => {
 		fs.writeFileSync(
@@ -333,10 +291,10 @@ describe("Fix 1 (Zone 5) — second audit after a previous timeout (no leaked st
 				createSession: cs,
 			});
 			assert.equal(first.timedOut, true, "first audit must time out");
-			// Second run must start cleanly: no leaked pendingAborts, listeners,
-			// or session references from the first run poisoning it. If the
-			// first run's abort() rejection had killed the process (the bug),
-			// this second call would never execute.
+			// Second run must start cleanly: no leaked listeners or session
+			// references from the first run poisoning it. If the first run's
+			// abort() rejection had killed the process (the bug), this second
+			// call would never execute.
 			const second = await runGoalCompletionAuditor({
 				ctx: makeCtx(cwd),
 				goal: makeGoal(),
