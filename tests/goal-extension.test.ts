@@ -71,13 +71,13 @@ let h: Harness;
 before(() => { h = makeHarness(); });
 
 describe("goal.ts extension — registration surface", () => {
-	it("registers all 13 tools", () => {
+	it("registers all 14 tools", () => {
 		const names = Array.from(h.tools.keys()).sort();
 		assert.deepEqual(names, [
 			"abort_goal", "complete_goal", "complete_task", "create_goal",
 			"get_goal", "goal_question", "goal_questionnaire", "pause_goal",
 			"propose_goal_draft", "propose_goal_tweak", "propose_task_list",
-			"skip_task", "step_complete",
+			"skip_task", "start_goal", "step_complete",
 		]);
 	});
 
@@ -366,5 +366,53 @@ describe("goal.ts — event handlers", () => {
 			const r = await h.handlers.get("context")!({ messages: [] }, makeCtx(cwd));
 			void r;
 		});
+	});
+});
+
+describe("goal.ts — start_goal tool", () => {
+	it("start_goal is registered", () => {
+		assert.ok(h.tools.has("start_goal"), "start_goal should be in the tool registry");
+	});
+
+	it("start_goal with valid objective creates a goal", async () => {
+		const cwd = tmpCwd();
+		const res = await h.tools.get("start_goal")!.execute(
+			"t", { objective: "Objective: ship feature X. Success criteria: shipped." },
+			undefined, undefined, makeCtx(cwd),
+		);
+		assert.ok(res.content[0]?.text !== undefined, "start_goal should return content");
+		// Verify the goal was actually created by checking get_goal
+		const get = await h.tools.get("get_goal")!.execute("t", {}, undefined, undefined, makeCtx(cwd));
+		assert.match(get.content[0].text, /ship feature X/i);
+	});
+
+	it("start_goal with sisyphus=true creates a sisyphus goal", async () => {
+		const cwd = tmpCwd();
+		await h.tools.get("start_goal")!.execute(
+			"t", { objective: "Objective: sisyphus task. Success criteria: done.", sisyphus: true },
+			undefined, undefined, makeCtx(cwd),
+		);
+		const get = await h.tools.get("get_goal")!.execute("t", {}, undefined, undefined, makeCtx(cwd));
+		assert.match(get.content[0].text, /sisyphus/i);
+	});
+
+	it("start_goal with empty objective is handled gracefully", async () => {
+		const cwd = tmpCwd();
+		await assert.doesNotReject(async () => {
+			await h.tools.get("start_goal")!.execute(
+				"t", { objective: "" },
+				undefined, undefined, makeCtx(cwd),
+			);
+		});
+	});
+
+	it("start_goal rejects objective over 50KB limit", async () => {
+		const cwd = tmpCwd();
+		const huge = "x".repeat(60_000);
+		const res = await h.tools.get("start_goal")!.execute(
+			"t", { objective: huge },
+			undefined, undefined, makeCtx(cwd),
+		);
+		assert.match(res.content[0].text, /exceed|limit|50|too long/i);
 	});
 });

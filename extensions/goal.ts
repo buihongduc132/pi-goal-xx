@@ -56,6 +56,7 @@ import {
 	ACTIVE_GOAL_TOOL_NAMES,
 	COMPLETE_TASK_TOOL_NAME,
 	CREATE_GOAL_TOOL_NAME,
+	START_GOAL_TOOL_NAME,
 	POST_STOP_ALLOWED_TOOLS,
 	PROPOSE_DRAFT_TOOL_NAME,
 	PROPOSE_TASK_LIST_TOOL_NAME,
@@ -685,6 +686,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			active.add(PROPOSE_DRAFT_TOOL_NAME);
 			// create_goal stays hidden — hard invariant: user must confirm via propose_goal_draft.
 			active.delete(CREATE_GOAL_TOOL_NAME);
+			// start_goal stays hidden from the LLM and subagents by default. It is the
+			// agent-facing equivalent of /goals-set (create + start auto-run). The
+			// knowledge of how/when to call it is provided via prompt/skill context (TBD).
+			// Because it is absent from the active set, it does not leak to subagents
+			// (the goal-auditor inherits tools via pi.getActiveTools()).
+			active.delete(START_GOAL_TOOL_NAME);
 			if (confirmationIntent !== null) {
 				active.add(QUESTION_TOOL_NAME);
 				active.add(QUESTIONNAIRE_TOOL_NAME);
@@ -2586,6 +2593,65 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		},
 		renderCall(args, theme) {
 			const prefix = args?.sisyphus ? "create_goal sisyphus " : "create_goal ";
+			return new Text(theme.fg("toolTitle", prefix) + theme.fg("muted", args?.objective ?? ""), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			return renderGoalResult(result, theme);
+		},
+	})))
+
+	// start_goal: the agent-facing equivalent of /goals-set. Creates a goal AND
+	// immediately starts the auto-run enforcement loop (startNow=true). Unlike
+	// create_goal (which is hard-locked to reject), start_goal actually creates
+	// and starts the goal. It is HIDDEN from the active tool set by default —
+	// see syncGoalTools where active.delete(START_GOAL_TOOL_NAME) is called.
+	// The knowledge of how/when to call it is provided via prompt/skill context
+	// (TBD — not implemented in this change). Because it is absent from the
+	// active set, it does not leak to subagents (goal-auditor inherits via
+	// pi.getActiveTools()).
+	// No promptSnippet: intentionally not advertised in the system prompt.
+	pi.registerTool(regTool(defineTool({
+		name: START_GOAL_TOOL_NAME,
+		label: "Start Goal",
+		description: "Create a new active pi goal, focus it, and immediately start the auto-run enforcement loop. Hidden from subagents by default; surfaced only via explicit prompt/skill context.",
+		parameters: Type.Object({
+			objective: Type.String({ description: "Concrete objective to pursue. For Sisyphus goals this MUST be the full plan including numbered steps and per-step done criteria." }),
+			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Defaults to true." })),
+			sisyphus: Type.Optional(Type.Boolean({ description: "When true, mark this as a Sisyphus goal: the agent must execute strictly step-by-step. Default false." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const raw = (params.objective ?? "").trim();
+			if (!raw) {
+				return {
+					content: [{ type: "text", text: "start_goal REJECTED: no objective provided. Pass a concrete objective." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			if (raw.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{ type: "text", text: `start_goal REJECTED: objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.` }],
+					details: goalDetails(state.goal),
+				};
+			}
+			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
+			const autoContinue = params.autoContinue ?? true;
+			const sisyphus = params.sisyphus ?? false;
+			clearContinuationState();
+			clearActiveAccounting();
+			confirmationIntent = null;
+			syncGoalTools();
+			replaceGoal({ objective, autoContinue, sisyphus }, ctx, true, verificationContract);
+			return {
+				content: [{ type: "text", text: buildGoalCreatedReport({ objective: raw, detailedSummary: detailedSummary(state.goal) }) }],
+				details: goalDetails(state.goal),
+			};
+		},
+		renderCall(args, theme) {
+			const prefix = args?.sisyphus ? "start_goal sisyphus " : "start_goal ";
 			return new Text(theme.fg("toolTitle", prefix) + theme.fg("muted", args?.objective ?? ""), 0, 0);
 		},
 		renderResult(result, _options, theme) {
