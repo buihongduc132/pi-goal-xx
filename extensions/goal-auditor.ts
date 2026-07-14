@@ -327,6 +327,64 @@ export function isGoalSelfExtension(extPath: string | undefined): boolean {
 	);
 }
 
+/**
+ * A+ content-scan: detect an inherited extension whose source calls
+ * `process.exit`. The in-process auditor child shares the host's Node
+ * process, so any inherited extension that deliberately calls process.exit
+ * (e.g. pi-print-clean-exit's hang-mitigation timer) will kill the HOST TUI
+ * when the child's `agent_end` fires in headless ctx.mode. The G1/G2/G3
+ * unhandledRejection/uncaughtException guards cannot intercept a deliberate
+ * process.exit, so the resource loader must exclude such extensions before
+ * they are inherited.
+ *
+ * Content-scan (not a static name list) so newly added process.exit
+ * extensions are caught automatically without anyone updating a list.
+ *
+ * Fail-closed: an unreadable or oversized (>2MB) source is treated as a
+ * match — a killer we cannot read is more dangerous than a false exclude of
+ * an unreadable extension.
+ */
+const PROCESS_EXIT_TOKEN = "process.exit";
+const MAX_EXIT_SCAN_BYTES = 2 * 1024 * 1024;
+
+export function extensionCallsProcessExit(extPath: string | undefined): boolean {
+	// No path → cannot scan → do NOT exclude by this rule (isGoalSelfExtension
+	// handles the goal.ts self-exclusion; an extension with no path is likely
+	// an in-memory/test stub, not the killer).
+	if (!extPath) return false;
+	try {
+		// Only scan paths that resolve to a real file on disk. A non-file path
+		// (test fixture name like "cc-safety-net", in-memory stub) cannot be the
+		// killer extension on disk — skip this rule; other exclusion rules still
+		// apply. A path that EXISTS but is unreadable or oversized is suspicious
+		// → fail-closed exclude below.
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(extPath);
+		} catch {
+			return false; // not a real file on disk → skip this rule
+		}
+		if (!stat.isFile() && !stat.isSymbolicLink()) return false;
+		if (stat.size > MAX_EXIT_SCAN_BYTES) return true; // oversized → fail-closed exclude
+		const src = fs.readFileSync(extPath, "utf8");
+		return src.includes(PROCESS_EXIT_TOKEN);
+	} catch {
+		return true; // exists but unreadable → fail-closed exclude (defense-in-depth)
+	}
+}
+
+/**
+ * B+ sentinel name. Set on `globalThis` for the duration of the in-process
+ * audit window `[createSession-start, outer-finally]` so any inherited
+ * process.exit-calling extension (notably pi-print-clean-exit) can self-skip.
+ * globalThis (not env) — env is inherited by the host shell and would leak;
+ * globalThis is scoped to this process and this window. Race-free within
+ * single-threaded JS: set synchronously before `await createSession(...)`,
+ * read synchronously in the child's `agent_end` handler, deleted in the outer
+ * finally after `session.prompt()` has settled.
+ */
+export const AUDITOR_IN_PROCESS_SENTINEL = "__PI_GOAL_AUDITOR_IN_PROCESS__";
+
 function makeAuditorResourceLoader(
 	resolved: ResolvedAuditorResources,
 	mainResourceLoader?: ResourceLoader,
@@ -346,6 +404,16 @@ function makeAuditorResourceLoader(
 				// B3: never inherit the goal extension itself — re-instantiating
 				// it inside the auditor causes double state/locks/timers/hooks.
 				if (isGoalSelfExtension(e.path) || isGoalSelfExtension(e.resolvedPath)) {
+					return false;
+				}
+				// A+: never inherit any extension whose source calls process.exit.
+				// The in-process auditor child shares the host's Node process; a
+				// deliberate process.exit in an inherited extension (e.g.
+				// pi-print-clean-exit's hang-mitigation timer) kills the host TUI
+				// ~1.5s after every goal completion. Content-scan (not a name
+				// list) so newly added process.exit extensions are caught
+				// automatically. See flow/bugs/2026-07-14_pi-process-exits-after-completion.md.
+				if (extensionCallsProcessExit(e.path) || extensionCallsProcessExit(e.resolvedPath)) {
 					return false;
 				}
 				return extAllow.has(e.path) || extAllow.has(e.resolvedPath);
@@ -612,6 +680,11 @@ export async function runGoalCompletionAuditor(args: {
 			toolsCount: resolved.tools.length,
 			extensionsCount: resolved.extensions.length,
 			extensions: resolved.extensions,
+			// A+ forensic: record which inherited extensions were dropped by the
+			// process.exit content-scan so a future regression is visible.
+			excludedProcessExit: mainExtensions
+				? mainExtensions.filter((p) => extensionCallsProcessExit(p))
+				: [],
 		});
 		// cubic P1 fix: createSession must also be timeout-bounded.
 		// Extension onLoad hangs during inherited resource loading would
@@ -729,6 +802,16 @@ export async function runGoalCompletionAuditor(args: {
 
 		process.on("unhandledRejection", unhandledRejectionHandler);
 		process.on("uncaughtException", uncaughtExceptionHandler);
+
+		// B+: mark the in-process audit window so any inherited process.exit-
+		// calling extension (notably pi-print-clean-exit) can self-skip. Set
+		// synchronously BEFORE createSession so the child's agent_end handler —
+		// which runs on this same single-threaded event loop, strictly after —
+		// observes it. Cleared in the OUTER finally on every path. globalThis
+		// (not env): env is inherited by the host shell and would leak; this is
+		// scoped to this process and this window only. See
+		// flow/bugs/2026-07-14_pi-process-exits-after-completion.md.
+		(globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL] = true;
 
 		let session: Awaited<ReturnType<typeof createSession>>["session"];
 		let csTimeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1237,6 +1320,11 @@ export async function runGoalCompletionAuditor(args: {
 			error: errorMsg,
 		};
 	} finally {
+		// B+: clear the in-process sentinel FIRST, before listener removal, so
+		// even if a later cleanup line throws the sentinel is already cleared.
+		// Must run on EVERY path (success, timeout, abort, throw). `delete` (not
+		// `= false`) so an `in` check is unambiguous.
+		try { delete (globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL]; } catch {}
 		// ── G1/G2/G3: process-guard removal + inherited-listener cleanup + session cleanup
 		//
 		// G1: remove the auditor's own unhandledRejection / uncaughtException

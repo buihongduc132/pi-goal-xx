@@ -175,6 +175,16 @@ describe("A+ content-scan — process.exit-calling extension excluded from audit
 		assert.equal(extensionCallsProcessExit(benign), false, "benign source must pass");
 	});
 
+	it("extensionCallsProcessExit: returns false for non-file paths (test fixtures, stubs) without excluding them", () => {
+		// Real extensions always have on-disk file paths. A bare name like
+		// "cc-safety-net" is a test-fixture / in-memory stub, never a killer
+		// extension on disk — must NOT be excluded by this rule. Other rules
+		// (isGoalSelfExtension, allow-list) still apply.
+		assert.equal(extensionCallsProcessExit(undefined), false);
+		assert.equal(extensionCallsProcessExit("cc-safety-net"), false);
+		assert.equal(extensionCallsProcessExit("/nonexistent/path/index.ts"), false);
+	});
+
 	it("auditor inherits benign ext but EXCLUDES killer ext (A+ filter fires in makeAuditorResourceLoader)", async () => {
 		const killerPath = writeKillerExtension(cwd);
 		const benignPath = writeBenignExtension(cwd);
@@ -260,15 +270,15 @@ describe("B+ sentinel — set before createSession, cleared on every path", () =
 	});
 
 	it("sentinel is deleted even when session.prompt REJECTS (outer finally clears it)", async () => {
-		await assert.rejects(
-			() => runGoalCompletionAuditor({
-				ctx: makeCtx(cwd),
-				goal: makeGoal(),
-				detailedSummary: "detailed",
-				createSession: makeRejectingCreateSession(10),
-			}),
-			/prompt-boom/,
-		);
+		// The auditor catches prompt rejections internally and returns an error
+		// result rather than throwing, so we don't assert.rejects — we just
+		// verify the OUTER finally cleared the sentinel on this path too.
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: makeRejectingCreateSession(10),
+		});
 		assert.equal(
 			(globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL],
 			undefined,
