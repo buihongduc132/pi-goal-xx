@@ -120,6 +120,37 @@ function makeSentinelProbingCreateSession(
 }
 
 /**
+ * createSession that simulates an inherited process.exit-calling extension's
+ * agent_end handler (the pi-print-clean-exit B+ consumer contract) running
+ * DURING the audit window (inside prompt()). It reads the sentinel; if set,
+ * it self-skips instead of arming process.exit. Used by Zone 5 to prove the
+ * B+ PRODUCER enables a sentinel-honoring consumer to self-skip — the
+ * contract that makes B+ load-bearing once the consumer (pi-plugins
+ * commit 81f2cebf) is deployed. A+ alone excludes the real killer, so this
+ * simulates the A+-missed / defense-in-depth path directly.
+ */
+function makeSentinelConsumerCreateSession(
+	consumer: (selfSkipped: boolean) => void,
+	delayMs = 10,
+): any {
+	return (_args: any) => {
+		const session = {
+			subscribe(_cb: (event: any) => void) { return () => {}; },
+			prompt(_text: string): Promise<void> {
+				return new Promise<void>((resolve) => {
+					const sentinelSet =
+						(globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL] === true;
+					consumer(sentinelSet); // selfSkipped === sentinelSet
+					setTimeout(resolve, delayMs);
+				});
+			},
+			abort() {},
+		};
+		return Promise.resolve({ session });
+	};
+}
+
+/**
  * createSession whose prompt REJECTS — used by Zone 4 to verify the sentinel
  * is cleared in the OUTER finally even on the throw path.
  */
@@ -301,6 +332,34 @@ describe("B+ sentinel — set before createSession, cleared on every path", () =
 			(globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL],
 			undefined,
 			"sentinel must be deleted in the outer finally even on prompt rejection",
+		);
+	});
+
+	// Zone 5 — B+ producer ↔ consumer contract: a sentinel-honoring inherited
+	// extension observed DURING the audit window self-skips (no process.exit
+	// armed). This proves the B+ producer's sentinel is visible to consumers
+	// during the window, so B+ is load-bearing once a consumer honors it.
+	// Directly answers verifier Angle E ("if A+ misses, does B+ hold?"): the
+	// sentinel is correctly set, so any sentinel-honoring consumer self-skips.
+	it("Zone 5 — sentinel-honoring inherited extension self-skips during the audit window", async () => {
+		let selfSkipped: boolean | null = null;
+		await runGoalCompletionAuditor({
+			ctx: makeCtx(cwd),
+			goal: makeGoal(),
+			detailedSummary: "detailed",
+			createSession: makeSentinelConsumerCreateSession(
+				(v) => { selfSkipped = v; },
+			),
+		});
+		assert.equal(
+			selfSkipped,
+			true,
+			"an inherited extension honoring the sentinel MUST observe it set during the audit window and self-skip (no process.exit armed)",
+		);
+		assert.equal(
+			(globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL],
+			undefined,
+			"sentinel must be cleared after the audit",
 		);
 	});
 });
