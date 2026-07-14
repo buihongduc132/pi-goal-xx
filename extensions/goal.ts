@@ -775,8 +775,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				// statusRefreshCtx's .ui getter calls assertActive() which throws once
 			// the session is replaced. Stop the timer and log; NEVER let a stale-ctx
 				// throw escape a timer callback (that crashes the host process).
+				const _staleCwd = statusRefreshCtx?.cwd ?? cachedCwd ?? process.cwd();
 				stopStatusRefresh();
-				console.warn("[pi-goal] status refresh timer stopped (ctx likely stale):", err instanceof Error ? err.message : String(err));
+				logGoalTrace(_staleCwd, { level: "warn", step: "statusRefresh.stopped_stale_ctx", message: "status refresh timer stopped (ctx likely stale)", error: err instanceof Error ? err.message : String(err) });
 			}
 		}, STATUS_REFRESH_MS);
 		statusRefreshTimer.unref?.();
