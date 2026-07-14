@@ -2218,6 +2218,8 @@ Verification contract:
 		if (key === "hooksDir") return config.hooksDir ?? ".pi/pi-goal-xx/hooks/";
 		if (key === "contractTemplates") return config.contractTemplates === false ? "false" : "true";
 		if (key === "contractsDir") return config.contractsDir ?? ".pi/pi-goal-xx/contracts/";
+		if (key === "auditorTimeoutMs") return config.auditorTimeoutMs !== undefined ? String(config.auditorTimeoutMs) : "900000 (15min)";
+		if (key === "auditorTimeoutFloorMs") return config.auditorTimeoutFloorMs !== undefined ? String(config.auditorTimeoutFloorMs) : "1000 (1s)";
 		const fallback = config[key as keyof GoalSettings];
 		return typeof fallback === "string" ? fallback : "(default)";
 	}
@@ -2236,6 +2238,8 @@ Verification contract:
 			`auditorPrompt: ${settingsValue(config, "auditorPrompt")}`,
 			`auditorExclude: ${settingsValue(config, "auditorExclude")}`,
 			`auditorInclude: ${settingsValue(config, "auditorInclude")}`,
+			`auditorTimeoutMs: ${settingsValue(config, "auditorTimeoutMs")}`,
+			`auditorTimeoutFloorMs: ${settingsValue(config, "auditorTimeoutFloorMs")}`,
 		];
 		// Unified prompt config (group 5). Legacy auditor keys are aliases of
 		// prompts.auditor — surface a migration hint when only legacy keys are set.

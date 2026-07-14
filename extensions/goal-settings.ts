@@ -7,6 +7,8 @@
  *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
  *   PI_GOAL_SETTINGS_FILE     — alternative settings file path (relative to cwd or absolute)
  *   PI_GOAL_LOG_LEVEL         — trace log level override: off|error|warn|info|debug
+ *   PI_GOAL_AUDITOR_TIMEOUT_MS       — auditor timeout in ms (default 900000 = 15min)
+ *   PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS — minimum auditor timeout floor in ms (default 1000 = 1s)
  *
  * The file may contain:
  *   disableTasks, disableContracts, subtaskDepth,
@@ -17,7 +19,8 @@
  *   auditorPromptMode ("global-local" | "local" | "global-local-merge"),
  *   auditorPrompt (inline string override),
  *   goalPromptMode ("global-local" | "local" | "global-local-merge"),
- *   goalPrompt (inline string override — injected into runtime goal/continuation prompts)
+ *   goalPrompt (inline string override — injected into runtime goal/continuation prompts),
+ *   auditorTimeoutMs (number), auditorTimeoutFloorMs (number)
  *
  * additionalProperties: false — unknown keys are rejected.
  */
@@ -117,6 +120,8 @@ export interface GoalSettings {
 	contractsDir?: string;
 	/** Auditor timeout in milliseconds. Default 300000 (5 minutes). */
 	auditorTimeoutMs?: number;
+	/** Auditor timeout floor in milliseconds. Prevents config typos from instant-aborting. Default 1000 (1s). */
+	auditorTimeoutFloorMs?: number;
 	/**
 	 * Operational trace logging. Controls the rotating `goal-trace.jsonl`
 	 * (tool/command spans, focus-lock ops, heartbeat, hook dispatch). Default
@@ -141,6 +146,10 @@ export interface GoalLoggingConfig {
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
 /** Env override for the trace log level: off|error|warn|info|debug. Takes precedence over file config. */
 export const PI_GOAL_LOG_LEVEL_ENV = "PI_GOAL_LOG_LEVEL";
+/** Env override for auditor timeout in ms. */
+export const PI_GOAL_AUDITOR_TIMEOUT_MS_ENV = "PI_GOAL_AUDITOR_TIMEOUT_MS";
+/** Env override for auditor timeout floor in ms. */
+export const PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV = "PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -171,6 +180,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"contractTemplates",
 	"contractsDir",
 	"auditorTimeoutMs",
+	"auditorTimeoutFloorMs",
 	"logging",
 ]);
 
@@ -508,6 +518,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	settings.heartbeatMs = heartbeatMs;
 	const auditorTimeoutMsRaw = asPositiveInt(record.auditorTimeoutMs);
 	if (auditorTimeoutMsRaw !== undefined) settings.auditorTimeoutMs = auditorTimeoutMsRaw;
+	const auditorTimeoutFloorMsRaw = asPositiveInt(record.auditorTimeoutFloorMs);
+	if (auditorTimeoutFloorMsRaw !== undefined) settings.auditorTimeoutFloorMs = auditorTimeoutFloorMsRaw;
 	const logging = asLoggingConfig(record.logging);
 	if (logging) settings.logging = logging;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
@@ -574,7 +586,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 			? false
 			: (fileConfig.contractTemplates ?? true),
 		contractsDir: fileConfig.contractsDir,
-		auditorTimeoutMs: fileConfig.auditorTimeoutMs,
+		auditorTimeoutMs: asPositiveInt(env[PI_GOAL_AUDITOR_TIMEOUT_MS_ENV]) ?? fileConfig.auditorTimeoutMs,
+		auditorTimeoutFloorMs: asPositiveInt(env[PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV]) ?? fileConfig.auditorTimeoutFloorMs,
 		logging: resolveLoggingFromEnv(env, fileConfig.logging),
 	};
 }
@@ -631,6 +644,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	// (e.g. a /goal-settings edit) would silently delete the user's auditor
 	// timeout, falling back to the 5min default. Round-trip it like leaseMs.
 	const auditorTimeoutMs = asPositiveInt(settings.auditorTimeoutMs);
+	const auditorTimeoutFloorMs = asPositiveInt(settings.auditorTimeoutFloorMs);
 	if (provider) clean.provider = provider;
 	if (model) clean.model = model;
 	if (thinkingLevel) clean.thinkingLevel = thinkingLevel;
@@ -658,6 +672,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	const logging = settings.logging ? asLoggingConfig(settings.logging) : undefined;
 	if (logging) clean.logging = logging;
 	if (auditorTimeoutMs !== undefined) clean.auditorTimeoutMs = auditorTimeoutMs;
+	if (auditorTimeoutFloorMs !== undefined) clean.auditorTimeoutFloorMs = auditorTimeoutFloorMs;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -687,6 +702,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
 	if (clean.logging) persisted.logging = clean.logging;
 	if (clean.auditorTimeoutMs !== undefined) persisted.auditorTimeoutMs = clean.auditorTimeoutMs;
+	if (clean.auditorTimeoutFloorMs !== undefined) persisted.auditorTimeoutFloorMs = clean.auditorTimeoutFloorMs;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }

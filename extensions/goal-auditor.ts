@@ -615,6 +615,8 @@ export async function runGoalCompletionAuditor(args: {
 		// extensions, createSession takes ~45s, and the auditor legitimately
 		// runs real test suites (240s+). 5 minutes was self-defeating — the
 		// audit was being killed while still doing valid work.
+		// Configurable via the `auditorTimeoutMs` setting or
+		// `PI_GOAL_AUDITOR_TIMEOUT_MS` env var (env wins).
 		const DEFAULT_AUDITOR_TIMEOUT_MS = 15 * 60 * 1000;
 		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
 		// F3: sanity floor. A config typo (e.g. auditorTimeoutMs: 1) would
@@ -633,7 +635,9 @@ export async function runGoalCompletionAuditor(args: {
 		// first tick) while leaving 7777 (GAP-C) and the suite runtime intact.
 		// A production-safe 60_000 floor requires either exempting tests or an
 		// out-of-process auditor; tracked as residual.
-		const EFFECTIVE_TIMEOUT_FLOOR_MS = 1_000;
+		// Configurable via the `auditorTimeoutFloorMs` setting or
+		// `PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS` env var (env wins).
+		const EFFECTIVE_TIMEOUT_FLOOR_MS = config.auditorTimeoutFloorMs ?? 1_000;
 		const effectiveTimeoutMs = Math.max(timeoutMs, EFFECTIVE_TIMEOUT_FLOOR_MS);
 		let timedOut = false;
 
