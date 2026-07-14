@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import { logGoalTrace, previewError } from "./goal-trace.ts";
 
 export interface GoalFocusLock {
 	goalId: string;
@@ -43,7 +44,7 @@ function ensureLockDir(cwd: string): void {
 	try {
 		fs.mkdirSync(lockDir(cwd), { recursive: true });
 	} catch (err) {
-		console.warn(`[goal-lock] failed to ensure lock dir ${lockDir(cwd)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.ensureDir", message: `failed to ensure lock dir ${lockDir(cwd)}`, error: previewError(err) });
 	}
 }
 
@@ -256,7 +257,7 @@ export function writeLockAtomic(cwd: string, goalId: string, lock: GoalFocusLock
 		fs.writeFileSync(tmp, JSON.stringify(lock));
 		fs.renameSync(tmp, final);
 	} catch (err) {
-		console.warn(`[goal-lock] failed to write lock ${final}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.write", goalId, message: `failed to write lock ${final}`, error: previewError(err) });
 		try {
 			fs.unlinkSync(tmp);
 		} catch {
@@ -326,7 +327,7 @@ export function releaseLock(cwd: string, goalId: string, self?: LockOwner): void
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return;
-		console.warn(`[goal-lock] failed to release lock ${lockPath(cwd, goalId)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.release", goalId, message: `failed to release lock ${lockPath(cwd, goalId)}`, error: previewError(err) });
 	}
 }
 
@@ -347,7 +348,7 @@ export function reapOrphanedLocks(cwd: string, activeGoalIds: Set<string>): void
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return; // no .locks dir → no-op
-		console.warn(`[goal-lock] failed to read lock dir ${dir}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.reapOrphaned", message: `failed to read lock dir ${dir}`, error: previewError(err) });
 		return;
 	}
 	for (const entry of entries) {
@@ -359,7 +360,7 @@ export function reapOrphanedLocks(cwd: string, activeGoalIds: Set<string>): void
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException | undefined)?.code;
 			if (code === "ENOENT") continue;
-			console.warn(`[goal-lock] failed to reap orphaned lock ${entry}:`, err);
+			logGoalTrace(cwd, { level: "warn", step: "lock.reapOrphaned", goalId, message: `failed to reap orphaned lock ${entry}`, error: previewError(err) });
 		}
 	}
 }
@@ -387,7 +388,7 @@ export function reapStaleLock(cwd: string, goalId: string): void {
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return;
-		console.warn(`[goal-lock] failed to reap stale lock ${lockPath(cwd, goalId)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.reapStale", goalId, message: `failed to reap stale lock ${lockPath(cwd, goalId)}`, error: previewError(err) });
 	}
 }
 
@@ -429,7 +430,7 @@ export function refreshLease(
 		writeLockAtomic(cwd, goalId, updated);
 		return { refreshed: true };
 	} catch (err) {
-		console.warn(`[goal-lock] failed to refresh lease ${lockPath(cwd, goalId)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.refreshLease", goalId, message: `failed to refresh lease ${lockPath(cwd, goalId)}`, error: previewError(err) });
 		return { refreshed: false };
 	}
 }

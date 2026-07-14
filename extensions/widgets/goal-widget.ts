@@ -130,20 +130,17 @@ function headingMeta(goal: GoalWidgetRecord, otherOpenGoalCount = 0, disableTask
 	return bits.join(" · ");
 }
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-function spinnerFrame(): string {
-	return SPINNER[Math.floor(Date.now() / 80) % SPINNER.length]!;
-}
-
 export function renderAuditorWidgetLines(progress: AuditorWidgetProgress, theme: Theme, width: number): string[] {
 	const safeWidth = Math.max(1, width);
 	const isActive = progress.phase !== "done";
 	const isThinking = progress.phase === "thinking";
+	// Static (non-animated) icon while auditing. A spinning frame here forced the
+	// widget to redraw ~12×/s purely to advance the glyph — noisy and wasteful.
+	// The elapsed-time display only changes once per second (see auditAnimationTimer).
 	const icon = isActive
 		? isThinking
 			? theme.fg("muted", "⟡")
-			: theme.fg("accent", spinnerFrame())
+			: theme.fg("accent", "●")
 		: theme.fg("success", "✓");
 	const label = isActive
 		? isThinking

@@ -11,6 +11,8 @@ export interface GoalConfirmationIntentLike {
 	startedAt?: number;
 }
 
+export const MAX_OBJECTIVE_LENGTH = 50_000;
+
 export interface DraftProposalInput {
 	intent: GoalConfirmationIntentLike | null;
 	hasUnfinishedGoal: boolean;
@@ -216,6 +218,12 @@ export function validateGoalDraftProposal(input: DraftProposalInput): DraftPropo
 	if (!objective) {
 		return { ok: false, message: "propose_goal_draft REJECTED: objective is empty." };
 	}
+	if (objective.length > MAX_OBJECTIVE_LENGTH) {
+		return {
+			ok: false,
+			message: `propose_goal_draft REJECTED: objective is ${objective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective before confirming.`,
+		};
+	}
 
 	return { ok: true, objective, expectedSisyphus };
 }
@@ -234,7 +242,7 @@ function resolveGoalDraftingOverride(settings: GoalSettings | undefined, cwd: st
 	return resolved.source === "none" ? undefined : resolved.final;
 }
 
-function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
+export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
 	if (!settings?.prompts) return "";
 	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
 	if (!cfg) return "";

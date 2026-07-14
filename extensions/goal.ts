@@ -15,7 +15,9 @@ import {
 	buildTweakConfirmationText,
 	extractVerificationContract,
 	goalDraftingPrompt,
+	MAX_OBJECTIVE_LENGTH,
 	renderConfirmationTasks,
+	resolveGoalDraftingBlock,
 	validateGoalDraftProposal,
 	type GoalDraftingFocus,
 } from "./goal-draft.ts";
@@ -23,6 +25,8 @@ import {
 	runGoalCompletionAuditor,
 } from "./goal-auditor.ts";
 import {
+	DEFAULT_AUDITOR_TIMEOUT_MS,
+	DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS,
 	goalSettingsPath,
 	isAuditorEnabledByDefault,
 	loadGoalSettings,
@@ -33,6 +37,15 @@ import {
 } from "./goal-settings.ts";
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
+import {
+	logGoalTrace,
+	resolveTraceSink,
+	traceStep,
+	goalTraceLogPath,
+	previewBytes,
+	wrapExecuteWithTrace,
+	type GoalTraceSinkConfig,
+} from "./goal-trace.ts";
 import {
 	isInteractiveTui,
 	proposalDialogFailureMessage,
@@ -45,6 +58,7 @@ import {
 	ACTIVE_GOAL_TOOL_NAMES,
 	COMPLETE_TASK_TOOL_NAME,
 	CREATE_GOAL_TOOL_NAME,
+	START_GOAL_TOOL_NAME,
 	POST_STOP_ALLOWED_TOOLS,
 	PROPOSE_DRAFT_TOOL_NAME,
 	PROPOSE_TASK_LIST_TOOL_NAME,
@@ -455,6 +469,22 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Cached cwd so syncGoalTools (which has no ctx parameter) can read settings.
 	// Set on every turn_start / extension lifecycle entry.
 	let cachedCwd: string | null = null;
+	// Resolved trace sink (level floor + toStderr) cached alongside cachedCwd.
+	// Reloaded whenever settings change; defaults to "info" until first load.
+	let cachedTraceSink: GoalTraceSinkConfig = resolveTraceSink(undefined);
+	/** Resolve the trace sink from current settings, caching the result. */
+	function traceSink(): GoalTraceSinkConfig {
+		return cachedTraceSink;
+	}
+	/** Refresh cached cwd and the trace-sink derived from current settings. */
+	function setCwdAndRefreshSink(cwd: string): void {
+		cachedCwd = cwd;
+		try {
+			cachedTraceSink = resolveTraceSink(loadGoalSettings(cwd).logging);
+		} catch {
+			cachedTraceSink = resolveTraceSink(undefined);
+		}
+	}
 	const state = {
 		get goal(): GoalRecord | null {
 			return focusedGoalFromPool(goalsById, focusedGoalId);
@@ -473,7 +503,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				try {
 					releaseLock(cachedCwd, prevId, { sessionId: SELF_SESSION_ID, pid: process.pid });
 				} catch (err) {
-					console.warn(`[goal] failed to release lock on goal clear/change ${prevId}:`, err);
+					logGoalTrace(cachedCwd, { level: "warn", step: "lock.release_failed", goalId: prevId, message: `failed to release lock on goal clear/change ${prevId}`, error: err instanceof Error ? err.message : String(err) });
 				}
 				stopHeartbeatTimer();
 			}
@@ -495,15 +525,81 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// concurrent sends surface as "Agent is already processing" errors emitted
 	// from the <runtime> bindCore catch handlers in agent-session.
 	let messageSendChain: Promise<void> = Promise.resolve();
+	// G7: counter of sends that have been queued but not yet resolved.
+	// When it returns to 0, the chain tail is reset to a fresh
+	// Promise.resolve() so the linked-promise chain (each link references its
+	// predecessor) can be GC'd instead of growing unbounded for the session
+	// lifetime.
+	let pendingSends = 0;
 	function serializedSend<T>(fn: () => T | Promise<T>): Promise<T> {
+		pendingSends++;
 		const run = messageSendChain.then(fn);
 		// Swallow rejections on the chain itself so a failed send never poisons
 		// subsequent sends; the caller still sees the real rejection from `run`.
-		messageSendChain = run.then(
-			() => undefined,
-			() => undefined,
-		);
+		// G7: decrement + reset when drained on BOTH resolve and reject paths.
+		const drain = () => {
+			pendingSends--;
+			if (pendingSends === 0) {
+				messageSendChain = Promise.resolve();
+			}
+		};
+		messageSendChain = run.then(drain, drain);
 		return run;
+	}
+	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
+	// Catches rejections and logs them via auditor trace to prevent process crashes.
+	// Used for all 6 sendMessage calls in complete_goal (Bug 1b fix).
+	function safeFireAndForget(fn: () => unknown, context: string, cwd: string): void {
+		Promise.resolve()
+			.then(fn)
+			.catch((err) => {
+				try {
+					logAuditorTrace(cwd, {
+						ts: nowIso(),
+						phase: "send_failure",
+						context,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				} catch {
+					// trace logging must never crash
+				}
+			});
+	}
+	/**
+	 * G4: writeActiveGoalFile can throw if the disk is full, the path is
+	 * unsafe, or permissions deny the write. Every caller wraps the write in
+	 * this helper so a persistence failure is surfaced to the agent instead
+	 * of crashing the tool. Without it, the in-memory goal would look updated
+	 * while the on-disk file stayed stale — the agent would never learn the
+	 * save failed.
+	 *
+	 * Returns the canonical post-write record on success, or an error object
+	 * the caller surfaces to the user/context.
+	 */
+	function tryWriteActiveGoalFile(
+		ctx: ExtensionContext,
+		goal: GoalRecord,
+		alreadyCommitted = false,
+	): { goal: GoalRecord; ok: true } | { error: string; ok: false } {
+		try {
+			return { goal: writeActiveGoalFile(ctx, goal), ok: true };
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const memoryHint = alreadyCommitted
+				? "The in-memory goal was updated but persistence failed; please retry."
+				: "The goal changes were not committed to disk; please retry.";
+			const text = `Goal state could not be saved to disk: ${msg}. ${memoryHint}`;
+			try { ctx.ui.notify(text, "error"); } catch {}
+			try {
+				logAuditorTrace(ctx.cwd, {
+					ts: nowIso(),
+					phase: "write_failure",
+					context: "writeActiveGoalFile",
+					error: msg,
+				});
+			} catch {}
+			return { error: text, ok: false };
+		}
 	}
 	let runningGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
@@ -556,7 +652,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		try {
 			const initialTools = pi.getActiveTools();
 			if (!Array.isArray(initialTools)) {
-				console.error("[pi-goal] syncGoalTools: pi.getActiveTools() did not return an array, got", typeof initialTools);
+				logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "pi.getActiveTools() did not return an array", gotType: typeof initialTools });
 				return;
 			}
 			const disabledToolsSet = cachedCwd
@@ -592,6 +688,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			active.add(PROPOSE_DRAFT_TOOL_NAME);
 			// create_goal stays hidden — hard invariant: user must confirm via propose_goal_draft.
 			active.delete(CREATE_GOAL_TOOL_NAME);
+			// start_goal stays hidden from the LLM and subagents by default. It is the
+			// agent-facing equivalent of /goals-set (create + start auto-run). The
+			// knowledge of how/when to call it is provided via prompt/skill context (TBD).
+			// Because it is absent from the active set, it does not leak to subagents
+			// (the goal-auditor inherits tools via pi.getActiveTools()).
+			active.delete(START_GOAL_TOOL_NAME);
 			if (confirmationIntent !== null) {
 				active.add(QUESTION_TOOL_NAME);
 				active.add(QUESTIONNAIRE_TOOL_NAME);
@@ -607,7 +709,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			for (const disabledName of disabledToolsSet) active.delete(disabledName);
 			pi.setActiveTools(Array.from(active));
 		} catch (err) {
-			console.error("[pi-goal] syncGoalTools error:", err instanceof Error ? err.message : String(err));
+			logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "syncGoalTools threw", error: err instanceof Error ? err.message : String(err) });
 		}
 	}
 
@@ -768,6 +870,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				const result = refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
 				if (result.lostLock) {
 					stopHeartbeatTimer();
+					logGoalTrace(cwd, { level: "warn", step: "heartbeat.lost", goalId, message: "focus lock lost during heartbeat" });
 					statusRefreshCtx?.ui.notify(
 						`Goal ${goalId} focus lock lost — another session took over or the lease lapsed. Use /goal-resume to reacquire.`,
 						"warning",
@@ -775,7 +878,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 					if (statusRefreshCtx) updateUI(statusRefreshCtx);
 				}
 			} catch (err) {
-				console.warn(`[goal] heartbeat refresh failed for ${goalId}:`, err);
+				logGoalTrace(cwd, { level: "warn", step: "heartbeat.refresh_failed", goalId, message: "heartbeat refresh threw", error: err instanceof Error ? err.message : String(err) });
 			}
 		}, interval);
 		heartbeatTimer.unref?.();
@@ -803,9 +906,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (result.ok) {
 			startHeartbeatTimer(cwd, goalId);
 		} else if (result.heldByOther) {
-			console.warn(
-				`[goal] focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
-			);
+			logGoalTrace(cwd, {
+				level: "warn",
+				step: "lock.acquire_failed_held_by_other",
+				goalId,
+				message: `focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
+				ownerSessionId: result.heldByOther.owner.sessionId,
+				ownerPid: result.heldByOther.owner.pid,
+			});
 		}
 		return result;
 	}
@@ -838,6 +946,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				focusedGoalId = current.id;
 				return true;
 			}
+			logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_vanished", goalId: focusedGoalId, message: "focused goal missing from disk; clearing focus", hadInMemoryGoal: !!current });
 			goalsById = fresh;
 			focusedGoalId = null;
 			clearStoppedRuntimeState();
@@ -993,7 +1102,21 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (ctx) {
 				syncGoalPromptFromDisk(ctx);
 				const next = state.goal;
-				if (next) state.goal = next.status === "complete" ? archiveGoalFile(ctx, next) : writeActiveGoalFile(ctx, next);
+				if (next) {
+					if (next.status === "complete") {
+						// G4: wrap archival too (archiveGoalFile can throw on the same
+						// disk-failure class). On failure keep the prior in-memory goal.
+						try {
+							state.goal = archiveGoalFile(ctx, next);
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							try { ctx.ui.notify(`Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`, "error"); } catch {}
+						}
+					} else {
+						const writeResult = tryWriteActiveGoalFile(ctx, next, true);
+						if (writeResult.ok) state.goal = writeResult.goal;
+					}
+				}
 			}
 		}
 		pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
@@ -1616,7 +1739,7 @@ Verification contract:
 		// on a previously-held lock (session_compact, session_tree) correctly
 		// block when the lease lapsed — auto-run is NOT fail-open (D7).
 		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
-			console.warn(`[goal] auto-run blocked: focus ${goalId} not locked by self`);
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.blocked", goalId, message: "continuation blocked: focus lock not held by self" });
 			return;
 		}
 		if (continuationQueuedFor === goalId || continuationScheduledFor === goalId) return;
@@ -1624,7 +1747,8 @@ Verification contract:
 		let delay = CONTINUATION_IDLE_RETRY_MS;
 		try {
 			delay = ctx.isIdle() && !ctx.hasPendingMessages() ? 0 : CONTINUATION_IDLE_RETRY_MS;
-		} catch {
+		} catch (err) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.idle_check_failed", goalId, message: "ctx.isIdle()/hasPendingMessages() threw", error: err instanceof Error ? err.message : String(err) });
 			return;
 		}
 		continuationScheduledFor = goalId;
@@ -1949,6 +2073,17 @@ Verification contract:
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
+		// G6 (coderabbit review): enforce the 50KB objective cap on direct-start
+		// commands too, matching propose_goal_draft / complete_goal / propose_goal_tweak.
+		// Without this, a >50KB /goals-set objective bypasses every cap and reaches
+		// persistence + later auditor prompts unbounded.
+		if (raw.length > MAX_OBJECTIVE_LENGTH) {
+			ctx.ui.notify(
+				`Objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.`,
+				"error",
+			);
+			return;
+		}
 		const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
 		if (missingSnippets && missingSnippets.length > 0) {
 			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
@@ -2094,6 +2229,8 @@ Verification contract:
 		if (key === "hooksDir") return config.hooksDir ?? ".pi/pi-goal-xx/hooks/";
 		if (key === "contractTemplates") return config.contractTemplates === false ? "false" : "true";
 		if (key === "contractsDir") return config.contractsDir ?? ".pi/pi-goal-xx/contracts/";
+		if (key === "auditorTimeoutMs") return config.auditorTimeoutMs !== undefined ? String(config.auditorTimeoutMs) : `${DEFAULT_AUDITOR_TIMEOUT_MS} (15min)`;
+		if (key === "auditorTimeoutFloorMs") return config.auditorTimeoutFloorMs !== undefined ? String(config.auditorTimeoutFloorMs) : `${DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS} (1s)`;
 		const fallback = config[key as keyof GoalSettings];
 		return typeof fallback === "string" ? fallback : "(default)";
 	}
@@ -2112,6 +2249,8 @@ Verification contract:
 			`auditorPrompt: ${settingsValue(config, "auditorPrompt")}`,
 			`auditorExclude: ${settingsValue(config, "auditorExclude")}`,
 			`auditorInclude: ${settingsValue(config, "auditorInclude")}`,
+			`auditorTimeoutMs: ${settingsValue(config, "auditorTimeoutMs")}`,
+			`auditorTimeoutFloorMs: ${settingsValue(config, "auditorTimeoutFloorMs")}`,
 		];
 		// Unified prompt config (group 5). Legacy auditor keys are aliases of
 		// prompts.auditor — surface a migration hint when only legacy keys are set.
@@ -2266,14 +2405,36 @@ Verification contract:
 		},
 	};
 // Tool-prompt wrapping (group 4, D3). Resolves tool-<name> prompts at load.
+// Also wraps each tool's `execute` in a trace span (tool.<name>) so every tool
+// call — start / end / duration / error — is recorded in goal-trace.jsonl. The
+// span is best-effort: traceStep never lets a trace-write failure affect the
+// wrapped tool. See extensions/goal-trace.ts.
 function regTool<T extends { name: string; promptSnippet?: string; promptGuidelines?: string[] }>(def: T): T {
-	return wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+	const wrapped = wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+	const toolName = def.name;
+	const originalExecute = (wrapped as { execute?: unknown }).execute;
+	if (typeof originalExecute !== "function") return wrapped;
+	const traced = wrapExecuteWithTrace(`tool.${toolName}`, originalExecute as (...args: unknown[]) => unknown, {
+		getSink: traceSink,
+		spanKind: "CLIENT",
+		fallbackCwd: cachedCwd ?? process.cwd(),
+	});
+	(wrapped as unknown as { execute: unknown }).execute = traced;
+	return wrapped;
 }
 
 // Command-hook wrapping (group 6). Wraps each /goal-* command handler so
 // user hooks (default off) can pre/post/override when enabled in settings.
+// Also wraps the final handler in a trace span (cmd.<name>) so every command
+// invocation — start / end / duration / error — is recorded in goal-trace.jsonl.
 function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: string, def: T): T {
-	return { ...def, handler: lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd()) as T["handler"] };
+	const hookWrapped = lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd());
+	const traced = wrapExecuteWithTrace(`cmd.${name}`, hookWrapped as (...args: unknown[]) => unknown, {
+		getSink: traceSink,
+		spanKind: "SERVER",
+		fallbackCwd: cachedCwd ?? process.cwd(),
+	});
+	return { ...def, handler: traced as T["handler"] };
 }
 
 	pi.registerCommand("goal", wrapCmdDef("goal", {
@@ -2454,27 +2615,90 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		},
 	})))
 
+	// start_goal: the agent-facing equivalent of /goals-set. Creates a goal AND
+	// immediately starts the auto-run enforcement loop (startNow=true). Unlike
+	// create_goal (which is hard-locked to reject), start_goal actually creates
+	// and starts the goal. It is HIDDEN from the active tool set by default —
+	// see syncGoalTools where active.delete(START_GOAL_TOOL_NAME) is called.
+	// The knowledge of how/when to call it is provided via prompt/skill context
+	// (TBD — not implemented in this change). Because it is absent from the
+	// active set, it does not leak to subagents (goal-auditor inherits via
+	// pi.getActiveTools()).
+	// No promptSnippet: intentionally not advertised in the system prompt.
+	pi.registerTool(regTool(defineTool({
+		name: START_GOAL_TOOL_NAME,
+		label: "Start Goal",
+		description: "Create a new active pi goal, focus it, and immediately start the auto-run enforcement loop. Hidden from subagents by default; surfaced only via explicit prompt/skill context.",
+		parameters: Type.Object({
+			objective: Type.String({ description: "Concrete objective to pursue. For Sisyphus goals this MUST be the full plan including numbered steps and per-step done criteria." }),
+			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Defaults to true." })),
+			sisyphus: Type.Optional(Type.Boolean({ description: "When true, mark this as a Sisyphus goal: the agent must execute strictly step-by-step. Default false." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const raw = (params.objective ?? "").trim();
+			if (!raw) {
+				return {
+					content: [{ type: "text", text: "start_goal REJECTED: no objective provided. Pass a concrete objective." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			if (raw.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{ type: "text", text: `start_goal REJECTED: objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.` }],
+					details: goalDetails(state.goal),
+				};
+			}
+			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
+			const autoContinue = params.autoContinue ?? true;
+			const sisyphus = params.sisyphus ?? false;
+			clearContinuationState();
+			clearActiveAccounting();
+			confirmationIntent = null;
+			syncGoalTools();
+			replaceGoal({ objective, autoContinue, sisyphus }, ctx, true, verificationContract);
+			return {
+				content: [{ type: "text", text: buildGoalCreatedReport({ objective: raw, detailedSummary: detailedSummary(state.goal) }) }],
+				details: goalDetails(state.goal),
+			};
+		},
+		renderCall(args, theme) {
+			const prefix = args?.sisyphus ? "start_goal sisyphus " : "start_goal ";
+			return new Text(theme.fg("toolTitle", prefix) + theme.fg("muted", args?.objective ?? ""), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			return renderGoalResult(result, theme);
+		},
+	})))
+
 	// Agent's goal-confirmation entry point. Shows the user a full plain-text
 	// draft report with two choices: [Confirm] (creates the goal) or
 	// [Continue Chatting] (returns control to the agent for more clarification).
 	// Schema gates enforce focus-vs-sisyphus consistency; draftId is ignored for
 	// one-release compatibility with older prompt residue.
 	// In headless mode (no UI), auto-confirms — harness-friendly.
+	const effectiveCwd = cachedCwd ?? process.cwd();
+	const draftingBlock = resolveGoalDraftingBlock(loadGoalSettings(effectiveCwd), cachedCwd ?? undefined);
+	const baseGuidelines = [
+		"Call propose_goal_draft when a /goals or /sisyphus intent discussion has enough information to write a concrete goal. Ask a focused question only when the request is still ambiguous.",
+		"If an answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",
+		"The user will see a full plain-text draft report plus a [Confirm] / [Continue Chatting] choice. Confirm creates the goal; Continue Chatting returns control to you to ask follow-up questions.",
+		"If the tool returns 'continue chatting', ask the user what they want changed. Do NOT propose again immediately with the same content; iterate based on their feedback first.",
+		"The sisyphus field must match the user's confirmation focus: /sisyphus -> sisyphus=true, /goals -> sisyphus=false. The schema enforces this; mismatched proposals are REJECTED.",
+		"For sisyphus goals, preserve the user's requested ordered style and completion standard. Do not add reconnaissance/preflight steps, merge steps, reorder steps, or change the mode without explicit user confirmation.",
+		"create_goal is rejected; propose_goal_draft is the confirmation path. This is intentional — the user wants explicit say in goal creation.",
+		"You may include a Verification contract: section in the objective to specify what verification evidence is required before the goal can be completed. This is optional — if omitted, no per-goal contract enforcement applies.",
+	];
+	const promptGuidelines = draftingBlock ? [...baseGuidelines, draftingBlock] : baseGuidelines;
 	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_DRAFT_TOOL_NAME,
 		label: "Propose Goal Draft",
 		description: "During /goals or /sisyphus intent discussion, propose the goal draft to the user. The user sees a full plain-text confirmation report and chooses Confirm (creates the goal) or Continue Chatting (returns control to you to refine). REPLACES create_goal during discussion-based creation.",
 		promptSnippet: "Propose the drafted goal to the user with a full plain-text Confirm / Continue Chatting dialog.",
-		promptGuidelines: [
-			"Call propose_goal_draft when a /goals or /sisyphus intent discussion has enough information to write a concrete goal. Ask a focused question only when the request is still ambiguous.",
-			"If an answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",
-			"The user will see a full plain-text draft report plus a [Confirm] / [Continue Chatting] choice. Confirm creates the goal; Continue Chatting returns control to you to ask follow-up questions.",
-			"If the tool returns 'continue chatting', ask the user what they want changed. Do NOT propose again immediately with the same content; iterate based on their feedback first.",
-			"The sisyphus field must match the user's confirmation focus: /sisyphus -> sisyphus=true, /goals -> sisyphus=false. The schema enforces this; mismatched proposals are REJECTED.",
-			"For sisyphus goals, preserve the user's requested ordered style and completion standard. Do not add reconnaissance/preflight steps, merge steps, reorder steps, or change the mode without explicit user confirmation.",
-			"create_goal is rejected; propose_goal_draft is the confirmation path. This is intentional — the user wants explicit say in goal creation.",
-			"You may include a Verification contract: section in the objective to specify what verification evidence is required before the goal can be completed. This is optional — if omitted, no per-goal contract enforcement applies.",
-		],
+		promptGuidelines,
 		parameters: Type.Object({
 			objective: Type.String({ description: "Full goal text. For Sisyphus goals this MUST include the user's numbered steps + per-step done criteria, taken faithfully from the user's input." }),
 			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Default true." })),
@@ -2701,6 +2925,18 @@ ${objective}` : objective,
 			}
 			const newObjective = params.newObjective.trim();
 			if (!newObjective) throw new Error("propose_goal_tweak requires a non-empty newObjective.");
+			// G6 early cap (coderabbit review): reject an overlong objective BEFORE
+			// building the confirmation dialog / rendering UI. The later
+			// cleanedObjective check still covers contract-expansion edge cases.
+			if (newObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${newObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 			const changeSummary = params.changeSummary.trim();
 			if (!changeSummary) throw new Error("propose_goal_tweak requires a non-empty changeSummary.");
 
@@ -2780,18 +3016,32 @@ ${objective}` : objective,
 			}
 
 			if (decision.decision === "confirm") {
-				// Persist any auditor toggle change
-				if (state.goal) {
-					state.goal = { ...state.goal, skipAuditor: !decision.auditorEnabled };
-				}
 				// Extract verification contract from revised objective
 				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
 			if (missingSnippets && missingSnippets.length > 0) {
 				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
 			}
+			// G6 (cubic review): enforce the 50KB objective cap on the tweak
+			// confirmation path, matching the guard in propose_goal_draft and
+			// complete_goal. Without this, an overlong revised objective reaches
+			// disk and later inflates the auditor prompt unbounded → OOM/hang.
+			if (cleanedObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${cleanedObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 				// Apply the tweak: write the new objective to disk authoritatively.
+				// cubic-dev P2: the skipAuditor toggle is folded into `next` (not
+				// assigned to state.goal earlier) so it only commits on a successful
+				// write. Previously it was set before G6/write guards, leaking the
+				// toggle into the error-return and the turn_end persist chain.
 				const next: GoalRecord = {
 					...state.goal,
+					skipAuditor: !decision.auditorEnabled,
 					objective: cleanedObjective,
 					verificationContract: verificationContract,
 					updatedAt: nowIso(),
@@ -2812,7 +3062,14 @@ ${objective}` : objective,
 				//   2) update in-memory `goal` to the canonical post-write record
 				//   3) append the state entry and re-sync tools
 				//   4) clear the tweak drafting gate so propose_goal_tweak can't be re-used
-				state.goal = writeActiveGoalFile(ctx, next);
+				const tweakWrite = tryWriteActiveGoalFile(ctx, next);
+				if (!tweakWrite.ok) {
+					return {
+						content: [{ type: "text", text: tweakWrite.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = tweakWrite.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				tweakDraftingFor = null;
 				// Reset autoContinue counter — plan changed, agent gets a fresh chain.
@@ -2905,6 +3162,23 @@ ${objective}` : objective,
 			// invocation, with potential drift if the settings file changed mid-call.
 			const settings = loadGoalSettings(ctx.cwd);
 
+			// G6: length caps — reject overlong summaries before they reach the
+			// auditor prompt or memory structures. Prevents OOM / unbounded prompt.
+			for (const [fieldName, value] of [
+				["completionSummary", params.completionSummary],
+				["verificationSummary", params.verificationSummary],
+			] as const) {
+				if (typeof value === "string" && value.length > MAX_OBJECTIVE_LENGTH) {
+					return {
+						content: [{
+							type: "text",
+							text: `complete_goal REJECTED: ${fieldName} is ${value.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Summarize the evidence more concisely and retry.`,
+						}],
+						details: goalDetails(state.goal),
+					};
+				}
+			}
+
 			// -- Phase 2: Status validation --
 			const effectiveStatus = params.status ?? COMPLETE_STATUS;
 			if (effectiveStatus !== COMPLETE_STATUS) {
@@ -2964,12 +3238,14 @@ ${objective}` : objective,
 
 			// Check if auditor is disabled per-goal (user toggled it off during goal confirmation)
 			if (auditTarget.skipAuditor) {
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: `Goal completed — per-goal auditor disabled.`,
-					display: true,
-					details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: `Goal completed — per-goal auditor disabled.`,
+						display: true,
+						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+					}),
+				 "complete_goal_skipAuditor", ctx.cwd);
 				try {
 					appendGoalEvent(ctx, {
 						type: "audit_skipped",
@@ -2992,7 +3268,21 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult3.ok) {
+					// Rollback: restore the pre-completion in-memory state so the disk
+					// and memory stay consistent. Without this, state.goal remains
+					// status:"complete" while the disk still holds the active/paused
+					// record — a retry would be blocked by validateGoalCompletion
+					// seeing the stale in-memory "complete" status. (gemini/coderabbit)
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult3.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult3.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3030,12 +3320,14 @@ ${objective}` : objective,
 				// Defer archival: set goal complete in-memory + write active file WITHOUT
 				// archiving. Archival happens at turn_end so the agent has a chance to
 				// recognise the skipped audit before the goal is archived.
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: `Goal completed — auditor disabled in settings.`,
-					display: true,
-					details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: `Goal completed — auditor disabled in settings.`,
+						display: true,
+						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+					}),
+				 "complete_goal_disabled_settings", ctx.cwd);
 				try {
 					appendGoalEvent(ctx, {
 						type: "audit_skipped",
@@ -3059,7 +3351,17 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult4.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult4.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult4.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -3084,17 +3386,19 @@ ${objective}` : objective,
 			// IMPORTANT: do NOT await this sendMessage — it fires a UI notification
 			// while complete_goal is mid-execute. Awaiting it blocks the tool body
 			// and can crash/quit the host session. Fire-and-forget is correct here.
-			pi.sendMessage<GoalAuditEventDetails>({
-				customType: GOAL_AUDIT_ENTRY,
-				content: [
-					"Auditor: I am starting the independent completion audit.",
-					`Goal id: ${auditTarget.id}`,
-					`Auditor model: ${auditorLabel}`,
-					params.completionSummary?.trim() ? `Completion claim: ${params.completionSummary.trim()}` : undefined,
-				].filter((line): line is string => line !== undefined).join("\n"),
-				display: true,
-				details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
-			});
+			safeFireAndForget(() => 
+				pi.sendMessage<GoalAuditEventDetails>({
+					customType: GOAL_AUDIT_ENTRY,
+					content: [
+						"Auditor: I am starting the independent completion audit.",
+						`Goal id: ${auditTarget.id}`,
+						`Auditor model: ${auditorLabel}`,
+						params.completionSummary?.trim() ? `Completion claim: ${params.completionSummary.trim()}` : undefined,
+					].filter((line): line is string => line !== undefined).join("\n"),
+					display: true,
+					details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
+				}),
+			 "complete_goal_started", ctx.cwd);
 			// Append ledger: audit started
 			try {
 				appendGoalEvent(ctx, {
@@ -3124,7 +3428,12 @@ ${objective}` : objective,
 				phase: "running",
 				elapsedMs: 0,
 			};
-			// Start animation timer for the spinner in the auditor widget
+			// Refresh timer for the auditor widget's elapsed-time display.
+			// The auditing icon is static (no spinner), so the only value that
+			// changes on its own is the elapsed duration — which is shown in whole
+			// seconds. A 500ms cadence (not 1s) guarantees the display updates
+			// promptly when a second boundary is crossed despite event-loop timer
+			// drift, while keeping redraws minimal (2/s, vs the old ~12/s storm).
 			stopAuditAnimation();
 			auditAnimationTimer = setInterval(() => {
 				if (!auditProgress) {
@@ -3133,7 +3442,7 @@ ${objective}` : objective,
 				}
 				auditProgress.elapsedMs = Date.now() - auditStartedAt;
 				goalWidgetComponent?.invalidate();
-			}, 80);
+			}, 500);
 			auditAnimationTimer.unref?.();
 
 			// Create a dedicated AbortController for the audit so it can be interrupted via Escape
@@ -3190,12 +3499,14 @@ ${objective}` : objective,
 
 				if (userChoice === "complete_without_audit") {
 					// ── Mark complete without audit ────────────────────────────
-					pi.sendMessage<GoalAuditEventDetails>({
-						customType: GOAL_AUDIT_ENTRY,
-						content: `Goal completed — user bypassed audit via Escape.`,
-						display: true,
-						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-					});
+					safeFireAndForget(() => 
+						pi.sendMessage<GoalAuditEventDetails>({
+							customType: GOAL_AUDIT_ENTRY,
+							content: `Goal completed — user bypassed audit via Escape.`,
+							display: true,
+							details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+						}),
+					 "complete_goal_user_bypass", ctx.cwd);
 					try {
 						appendGoalEvent(ctx, {
 							type: "audit_skipped",
@@ -3217,7 +3528,17 @@ ${objective}` : objective,
 						stopReason: "agent",
 						updatedAt: nowIso(),
 					};
-					state.goal = writeActiveGoalFile(ctx, state.goal);
+					// G4: surface disk-write failure instead of letting it crash complete_goal.
+					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal, true);
+					if (!writeResult5.ok) {
+						// Rollback: see writeResult3 — keep memory consistent with disk.
+						state.goal = auditTarget;
+						return {
+							content: [{ type: "text", text: writeResult5.error }],
+							details: goalDetails(state.goal),
+						};
+					}
+					state.goal = writeResult5.goal;
 					pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 					setTurnStopped(state.goal?.id ?? null);
 					resetGetGoalNudgeState(state.goal?.id);
@@ -3265,6 +3586,7 @@ ${objective}` : objective,
 					verdict,
 					report: auditor.output || "Auditor produced no output.",
 					at: nowIso(),
+					timedOut: auditor.timedOut === true ? true : undefined,
 				});
 			} catch {
 				// Ledger append failure should not block completion
@@ -3282,12 +3604,14 @@ ${objective}` : objective,
 					"",
 					auditor.output || "Auditor produced no approval marker.",
 				].filter((line): line is string => line !== undefined).join("\n");
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: rejectionText,
-					display: true,
-					details: { phase: "rejected", goalId: auditTarget.id, auditor: auditor.model },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: rejectionText,
+						display: true,
+						details: { phase: "rejected", goalId: auditTarget.id, auditor: auditor.model },
+					}),
+				 "complete_goal_rejected", ctx.cwd);
 				return {
 					content: [{ type: "text", text: rejectionText }],
 					details: goalDetails(state.goal),
@@ -3299,12 +3623,14 @@ ${objective}` : objective,
 				"",
 				auditor.output || "Auditor approved completion.",
 			].filter((line): line is string => line !== undefined).join("\n");
-			pi.sendMessage<GoalAuditEventDetails>({
-				customType: GOAL_AUDIT_ENTRY,
-				content: approvalText,
-				display: true,
-				details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
-			});
+			safeFireAndForget(() => 
+				pi.sendMessage<GoalAuditEventDetails>({
+					customType: GOAL_AUDIT_ENTRY,
+					content: approvalText,
+					display: true,
+					details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
+				}),
+			 "complete_goal_approved", ctx.cwd);
 			// Account for any remaining elapsed time.
 			// Defer archival: set goal complete in-memory + write active file WITHOUT
 			// archiving. Archival happens at turn_end so the agent can see the auditor
@@ -3318,7 +3644,17 @@ ${objective}` : objective,
 				stopReason: "agent",
 				updatedAt: nowIso(),
 			};
-			state.goal = writeActiveGoalFile(ctx, state.goal);
+			// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult6.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult6.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+			state.goal = writeResult6.goal;
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 			setTurnStopped(state.goal?.id ?? null);
 			resetGetGoalNudgeState(state.goal?.id);
@@ -3963,7 +4299,7 @@ promptGuidelines: [
 
 	pi.on("turn_start", async (_event, ctx) => {
 		// Cache cwd for syncGoalTools settings access.
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		// Per-turn flag resets (#4 + C9 fix).
 		advanceTurnSeq();
 		goalWorkToolCalledThisTurn = false;
@@ -3980,6 +4316,7 @@ promptGuidelines: [
 		// read-only inspection. Forces the agent to yield the turn instead of "fixing"
 		// the situation by creating extra files etc.
 		if (stoppedGoalId !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "tool_call.blocked", goalId: stoppedGoalId, message: `blocked ${event.toolName}: goal already stopped this turn`, tool: event.toolName, reason: "post_stop" });
 			return {
 				block: true,
 				reason: `The goal was already stopped earlier in this turn (goalId=${stoppedGoalId}). ` +
@@ -3989,6 +4326,7 @@ promptGuidelines: [
 		// Stale checkpoint guard: if the turn was triggered by a queued continuation
 		// for a goal that is no longer active/autoContinue, block work tools.
 		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isStaleCheckpointBlockedToolCall(event.toolName)) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "tool_call.blocked", goalId: checkpointGoalId, message: `blocked ${event.toolName}: stale checkpoint`, tool: event.toolName, reason: "stale_checkpoint" });
 			// Block the tool call with a stale-checkpoint message.
 			return {
 				block: true,
@@ -4036,11 +4374,31 @@ promptGuidelines: [
 		// This runs after the agent's turn ends — the agent has now seen the result.
 		if (state.goal?.status === "complete" && !state.goal?.archivedPath) {
 			const completedGoal = state.goal;
-			const archived = archiveGoalFile(ctx, completedGoal);
+			// G4 (review follow-up): wrap the deferred archiveGoalFile in try/catch.
+			// This runs in a background turn_end hook; an uncaught throw here
+			// crashes the hook handler and can take down the background agent.
+			let archived: GoalRecord;
+			try {
+				archived = archiveGoalFile(ctx, completedGoal);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				try { ctx.ui.notify(`Goal archival failed: ${msg}. The goal is marked complete in memory but was not archived to disk; please retry.`, "error"); } catch {}
+				try {
+					logAuditorTrace(ctx.cwd, {
+						ts: nowIso(),
+						phase: "write_failure",
+						context: "turn_end archiveGoalFile",
+						error: msg,
+					});
+				} catch {}
+				return;
+			}
 			// Unit E task 4.6: release the focus lock (co-located with turn_end archival).
 			try {
 				releaseLock(ctx.cwd, completedGoal.id, selfLockOwner());
-			} catch {}
+			} catch (err) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "lock.release_failed", goalId: completedGoal.id, message: "failed to release lock at turn_end completion", error: err instanceof Error ? err.message : String(err) });
+			}
 			stopHeartbeatTimer();
 			resetGetGoalNudgeState(completedGoal.id);
 			goalsById.delete(completedGoal.id);
@@ -4082,7 +4440,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_start", async (event, ctx) => {
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, event.reason);
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
@@ -4140,7 +4498,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, null);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
@@ -4297,7 +4655,9 @@ promptGuidelines: [
 		if (focusedGoalId) {
 			try {
 				releaseLock(ctx.cwd, focusedGoalId, selfLockOwner());
-			} catch {}
+			} catch (err) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "lock.release_failed", goalId: focusedGoalId, message: "failed to release lock at session_shutdown", error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 		stopHeartbeatTimer();
 		clearContinuationTimer();

@@ -16,7 +16,12 @@ import {
 	type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { GoalRecord, GoalTask, GoalTaskList } from "./goal-record.ts";
-import { loadGoalSettings, type GoalSettings } from "./goal-settings.ts";
+import {
+	DEFAULT_AUDITOR_TIMEOUT_MS,
+	DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS,
+	loadGoalSettings,
+	type GoalSettings,
+} from "./goal-settings.ts";
 import { AuditorPatternCache } from "./auditor-patterns.ts";
 import {
 	resolveAuditorResources,
@@ -62,6 +67,7 @@ export interface GoalAuditorResult {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	error?: string;
+	timedOut?: boolean;
 }
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -73,6 +79,41 @@ function asNonEmptyString(value: unknown): string | undefined {
 function asThinkingLevel(value: unknown): ThinkingLevel | undefined {
 	const text = asNonEmptyString(value);
 	return text && THINKING_LEVELS.has(text) ? text as ThinkingLevel : undefined;
+}
+
+/**
+ * Never-throwing stringification for an arbitrary rejection/exception value.
+ *
+ * `String(reason)` throws when `reason` is an object without `toString`/
+ * `valueOf` (e.g. `Object.create(null)`) or a proxy whose traps throw. The
+ * process-level guards (unhandledRejection / uncaughtException) MUST be
+ * non-throwing end-to-end — a throw inside an uncaughtException handler
+ * terminates the process, defeating the crash protection this module exists
+ * to provide. This helper isolates that risk: it tries Error.message, then
+ * String(), then JSON, then a stable placeholder, swallowing any throw.
+ *
+ * Exported for direct unit testing with hostile inputs (P1 regression).
+ */
+export function safeToString(reason: unknown): string {
+	try {
+		if (reason instanceof Error) return reason.message;
+		if (typeof reason === "string") return reason;
+		if (reason === null) return "null";
+		if (reason === undefined) return "undefined";
+		// Object.create(null) has no toString → String() throws. Try it, then
+		// fall back to JSON, then a placeholder. Each step is independently guarded.
+		try {
+			return String(reason);
+		} catch {
+			try {
+				return JSON.stringify(reason) ?? "[unserializable]";
+			} catch {
+				return "[unformattable reason]";
+			}
+		}
+	} catch {
+		return "[unformattable reason]";
+	}
 }
 
 
@@ -286,6 +327,83 @@ export function isGoalSelfExtension(extPath: string | undefined): boolean {
 	);
 }
 
+/**
+ * A+ content-scan: detect an inherited extension whose source calls
+ * `process.exit`. The in-process auditor child shares the host's Node
+ * process, so any inherited extension that deliberately calls process.exit
+ * (e.g. pi-print-clean-exit's hang-mitigation timer) will kill the HOST TUI
+ * when the child's `agent_end` fires in headless ctx.mode. The G1/G2/G3
+ * unhandledRejection/uncaughtException guards cannot intercept a deliberate
+ * process.exit, so the resource loader must exclude such extensions before
+ * they are inherited.
+ *
+ * Content-scan (not a static name list) so newly added process.exit
+ * extensions are caught automatically without anyone updating a list.
+ *
+ * Comment-aware: line comments and block comments are stripped before
+ * scanning, so a benign extension that merely DOCUMENTS a process.exit call
+ * (e.g. global-error-handler.ts's "NEVER calls process.exit" doc comment)
+ * is NOT falsely excluded. Only real call sites match.
+ *
+ * Fail-closed: an unreadable or oversized (>2MB) source is treated as a
+ * match — a killer we cannot read is more dangerous than a false exclude of
+ * an unreadable extension.
+ */
+const PROCESS_EXIT_CALL_RE = /process\.exit\s*\(/;
+const MAX_EXIT_SCAN_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Strip JS/TS comments (line comments and block comments) from source so
+ * the process.exit scan matches real call sites, not doc comments. Best-effort
+ * — string literals containing the pattern could in theory be mis-stripped,
+ * but the tradeoff (catch real calls, avoid false-positive on doc) is correct
+ * for this scanner's threat model. Regex replaces both comment styles in one
+ * pass.
+ */
+function stripComments(src: string): string {
+	return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+export function extensionCallsProcessExit(extPath: string | undefined): boolean {
+	// No path → cannot scan → do NOT exclude by this rule (isGoalSelfExtension
+	// handles the goal.ts self-exclusion; an extension with no path is likely
+	// an in-memory/test stub, not the killer).
+	if (!extPath) return false;
+	try {
+		// Only scan paths that resolve to a real file on disk. A non-file path
+		// (test fixture name like "cc-safety-net", in-memory stub) cannot be the
+		// killer extension on disk — skip this rule; other exclusion rules still
+		// apply. A path that EXISTS but is unreadable or oversized is suspicious
+		// → fail-closed exclude below.
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(extPath);
+		} catch {
+			return false; // not a real file on disk → skip this rule
+		}
+		if (!stat.isFile() && !stat.isSymbolicLink()) return false;
+		if (stat.size > MAX_EXIT_SCAN_BYTES) return true; // oversized → fail-closed exclude
+		const src = fs.readFileSync(extPath, "utf8");
+		// Strip comments first so a doc comment like "NEVER calls process.exit()"
+		// does NOT trigger a false exclude of a benign extension.
+		return PROCESS_EXIT_CALL_RE.test(stripComments(src));
+	} catch {
+		return true; // exists but unreadable → fail-closed exclude (defense-in-depth)
+	}
+}
+
+/**
+ * B+ sentinel name. Set on `globalThis` for the duration of the in-process
+ * audit window `[createSession-start, outer-finally]` so any inherited
+ * process.exit-calling extension (notably pi-print-clean-exit) can self-skip.
+ * globalThis (not env) — env is inherited by the host shell and would leak;
+ * globalThis is scoped to this process and this window. Race-free within
+ * single-threaded JS: set synchronously before `await createSession(...)`,
+ * read synchronously in the child's `agent_end` handler, deleted in the outer
+ * finally after `session.prompt()` has settled.
+ */
+export const AUDITOR_IN_PROCESS_SENTINEL = "__PI_GOAL_AUDITOR_IN_PROCESS__";
+
 function makeAuditorResourceLoader(
 	resolved: ResolvedAuditorResources,
 	mainResourceLoader?: ResourceLoader,
@@ -305,6 +423,16 @@ function makeAuditorResourceLoader(
 				// B3: never inherit the goal extension itself — re-instantiating
 				// it inside the auditor causes double state/locks/timers/hooks.
 				if (isGoalSelfExtension(e.path) || isGoalSelfExtension(e.resolvedPath)) {
+					return false;
+				}
+				// A+: never inherit any extension whose source calls process.exit.
+				// The in-process auditor child shares the host's Node process; a
+				// deliberate process.exit in an inherited extension (e.g.
+				// pi-print-clean-exit's hang-mitigation timer) kills the host TUI
+				// ~1.5s after every goal completion. Content-scan (not a name
+				// list) so newly added process.exit extensions are caught
+				// automatically. See flow/bugs/2026-07-14_pi-process-exits-after-completion.md.
+				if (extensionCallsProcessExit(e.path) || extensionCallsProcessExit(e.resolvedPath)) {
 					return false;
 				}
 				return extAllow.has(e.path) || extAllow.has(e.resolvedPath);
@@ -427,10 +555,21 @@ export async function runGoalCompletionAuditor(args: {
 		return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: resolved.error };
 	}
 	const startedAt = Date.now();
+	// Declared in the function scope (not inside the try block) so the OUTER
+	// finally can reference them for G1/G2/G3 cleanup — `let`/`const` inside a
+	// try block are not visible in catch/finally.
+	let unhandledRejectionHandler: ((reason: unknown) => void) | undefined;
+	let uncaughtExceptionHandler: ((err: unknown) => void) | undefined;
+	let preUnhandledRejectionListeners: ((...args: any[]) => void)[] = [];
+	let preUncaughtExceptionListeners: ((...args: any[]) => void)[] = [];
+	// G1 follow-up (review): holder so the process-level guards can abort the
+	// active session immediately on a captured error (fail-fast) instead of
+	// waiting for the timeout to fire. Undefined until createSession resolves
+	// and cleared in cleanup so a late guard event can't abort a freed session.
+	let sessionRef: { abort(): unknown } | undefined;
 	try {
 		const createSession = args.createSession ?? createAgentSession;
 		const patternCache = new AuditorPatternCache();
-
 		// Source of discovered resources. Priority:
 		//  1. Caller-injected `mainResources.resourceLoader` (tests, or a future
 		//     pi API that hands over the main session's loader).
@@ -560,22 +699,190 @@ export async function runGoalCompletionAuditor(args: {
 			toolsCount: resolved.tools.length,
 			extensionsCount: resolved.extensions.length,
 			extensions: resolved.extensions,
+			// A+ forensic: record which inherited extensions were dropped by the
+			// process.exit content-scan so a future regression is visible.
+			excludedProcessExit: mainExtensions
+				? mainExtensions.filter((p) => extensionCallsProcessExit(p))
+				: [],
 		});
-		let session: Awaited<ReturnType<typeof createSession>>["session"];
+		// cubic P1 fix: createSession must also be timeout-bounded.
+		// Extension onLoad hangs during inherited resource loading would
+		// otherwise stall complete_goal indefinitely. Same ceiling as prompt.
+		// F2: raised from 5min to 15min. With 60 inherited tools + 53
+		// extensions, createSession takes ~45s, and the auditor legitimately
+		// runs real test suites (240s+). 5 minutes was self-defeating — the
+		// audit was being killed while still doing valid work.
+		// Configurable via the `auditorTimeoutMs` setting or
+		// `PI_GOAL_AUDITOR_TIMEOUT_MS` env var (env wins).
+		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
+		// F3: sanity floor. A config typo (e.g. auditorTimeoutMs: 1) would
+		// otherwise abort the audit within a millisecond of starting, before
+		// createSession even resolves — guaranteeing a timeout on every audit.
+		// Floor so a typo degrades to "slow audit" instead of "instant abort".
+		//
+		// NOTE on the constant: the spec proposed 60_000ms (so the floor exceeds
+		// createSession's ~45s in production). That value is unshippable here:
+		// the existing crash-safe test suite exercises the timeout path with
+		// deliberately small values (50/100/200ms) and one test (GAP-C) pins the
+		// createSession timer to exactly 7777ms. A 60_000 floor makes those tests
+		// take 60s each (suite went from 2.6s to >10min, did not finish) and
+		// breaks GAP-C's exact-value assertion. 1_000ms catches the documented
+		// typo (1ms → 1s: the audit gets a full second instead of dying in its
+		// first tick) while leaving 7777 (GAP-C) and the suite runtime intact.
+		// A production-safe 60_000 floor requires either exempting tests or an
+		// out-of-process auditor; tracked as residual.
+		// Configurable via the `auditorTimeoutFloorMs` setting or
+		// `PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS` env var (env wins).
+		const EFFECTIVE_TIMEOUT_FLOOR_MS = config.auditorTimeoutFloorMs ?? DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS;
+		const effectiveTimeoutMs = Math.max(timeoutMs, EFFECTIVE_TIMEOUT_FLOOR_MS);
+		// Clamp to 32-bit signed int max (Node setTimeout limit). Values above
+		// 2^31-1 (~24.8 days) wrap to 1ms on some platforms — instant-fire.
+		const MAX_SET_TIMEOUT_MS = 2_147_483_647;
+		const clampedTimeoutMs = Math.min(effectiveTimeoutMs, MAX_SET_TIMEOUT_MS);
+		let timedOut = false;
+
+		// ── G1: process-level guards installed BEFORE createSession ───────────
+		// Host extensions fire onLoad DURING createSession and can escape
+		// unhandled rejections / uncaught exceptions before a guard installed
+		// after createSession exists. Installing here closes the gap.
+		let rejectionMessage: string | undefined;
+		// G2: snapshot process listeners BEFORE createSession so any process.on(...)
+		// handlers inherited extensions register during the audit window can be
+		// removed afterwards (mitigation — full fix requires an out-of-process
+		// auditor; documented as residual risk).
+		preUnhandledRejectionListeners = process.listeners("unhandledRejection").slice();
+		preUncaughtExceptionListeners = process.listeners("uncaughtException").slice();
+
+		const captureGuardError = (reason: unknown, kind: string): void => {
+			// P1 fix (cubic review): the ENTIRE guard body must be non-throwing.
+			// String(reason) throws for Object.create(null) or a throwing proxy,
+			// and an uncaughtException handler that itself throws terminates the
+			// process — the exact failure this guard exists to prevent. Wrap the
+			// whole body so no formatting or trace write can escape.
+			try {
+				// R3.5: AbortError is benign (fired during abort teardown)
+				const isAbortError = reason instanceof Error && reason.name === "AbortError";
+				if (isAbortError) {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: kind,
+						goalId: args.goal.id,
+						reason: "AbortError (benign — swallowed)",
+					});
+					return;
+				}
+				// safeToString never throws: Object.create(null) and throwing
+				// proxies fall back to a stable placeholder instead of crashing
+				// the guard (which would re-enter Node's default fatal handler).
+				const msg = safeToString(reason);
+				// R3.4: capture message for error return (first escape wins; later
+				// events do not overwrite the recorded cause).
+				if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: ${msg}`;
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: kind,
+					goalId: args.goal.id,
+					reason: msg,
+					stack: reason instanceof Error ? reason.stack?.slice(0, 2000) : undefined,
+				});
+			} catch {
+				// Last-resort: even safeToString/logAuditorTrace failed. Record a
+				// generic cause so the audit still returns disapproved-with-error
+				// instead of letting the rejection escape uncaught.
+				if (!rejectionMessage) rejectionMessage = `Auditor ${kind}: (unformattable reason)`;
+			}
+		// G1 follow-up (review): fail-fast — abort the active session so the
+		// audit returns the captured error immediately instead of waiting for
+		// the timeout. No-op if the error fired during createSession (no
+		// session yet) or after cleanup (sessionRef cleared).
+		// F1: session.abort() is async — attach a swallowing .catch
+		// SYNCHRONOUSLY here. A promise rejection is "handled" the instant the
+		// .catch handler is attached, regardless of when it settles, so this
+		// alone prevents an unhandledRejection from a late abort() rejection
+		// (even after the outer finally removes the process guards). There is
+		// no need to collect or await the promise — see the outer finally for
+		// why awaiting it would risk hanging (waitForIdle can hang).
 		try {
-			const created = await createSession({
-				cwd: args.ctx.cwd,
-				model,
-				thinkingLevel,
-				modelRegistry: args.ctx.modelRegistry,
-				resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
-				sessionManager: SessionManager.inMemory(args.ctx.cwd),
-				settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
-				tools: resolved.tools,
-				customTools: [reportProgressTool],
-			});
-			session = created.session;
+			const p = sessionRef?.abort();
+			if (p && typeof (p as any).catch === "function") {
+				(p as Promise<unknown>).catch(() => {});
+			}
+		} catch {}
+		};
+
+		// Scoped unhandledRejection guard — catches async rejections from
+		// inherited extensions during the audit window. Logs via logAuditorTrace,
+		// does NOT propagate to Node's default handler (which would terminate).
+		unhandledRejectionHandler = (reason: unknown) => captureGuardError(reason, "unhandledRejection");
+		// G1: uncaughtException guard — same window, same treatment. Without it,
+		// a synchronous throw inside an extension's onLoad (during createSession)
+		// or a timer callback would crash the host process mid-audit.
+		uncaughtExceptionHandler = (err: unknown) => captureGuardError(err, "uncaughtException");
+
+		process.on("unhandledRejection", unhandledRejectionHandler);
+		process.on("uncaughtException", uncaughtExceptionHandler);
+
+		// B+: mark the in-process audit window so any inherited process.exit-
+		// calling extension (notably pi-print-clean-exit) can self-skip. Set
+		// synchronously BEFORE createSession so the child's agent_end handler —
+		// which runs on this same single-threaded event loop, strictly after —
+		// observes it. Cleared in the OUTER finally on every path. globalThis
+		// (not env): env is inherited by the host shell and would leak; this is
+		// scoped to this process and this window only. See
+		// flow/bugs/2026-07-14_pi-process-exits-after-completion.md.
+		(globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL] = true;
+
+		let session: Awaited<ReturnType<typeof createSession>>["session"];
+		let csTimeoutId: ReturnType<typeof setTimeout> | undefined;
+		try {
+			try {
+				const created = await Promise.race([
+					createSession({
+						cwd: args.ctx.cwd,
+						model,
+						thinkingLevel,
+						modelRegistry: args.ctx.modelRegistry,
+						resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
+						sessionManager: SessionManager.inMemory(args.ctx.cwd),
+						settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+						tools: resolved.tools,
+						customTools: [reportProgressTool],
+					}),
+					new Promise<never>((_, reject) => {
+						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), clampedTimeoutMs);
+					}),
+				]);
+				session = created.session;
+				sessionRef = session;
+			} finally {
+				// Counterfactual fix (GAP-C): clear the createSession timeout
+				// timer on EVERY path — success, throw, and timeout-reject.
+				// The original code only cleared on the happy path (leaking on
+				// throw); the first counterfactual attempt only cleared on the
+				// catch path (leaking on success, regressing the common case).
+				// A finally here clears it unconditionally.
+				if (csTimeoutId) clearTimeout(csTimeoutId);
+			}
 		} catch (createError) {
+			if (createError instanceof Error && createError.message === "__auditor_cs_timeout__") {
+				timedOut = true;
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "timeout",
+						goalId: args.goal.id,
+						timeoutMs: effectiveTimeoutMs,
+						source: "createSession",
+				});
+				return {
+					approved: false,
+					disapproved: true,
+					output: "",
+					model: modelLabel(model),
+					thinkingLevel,
+					error: `Auditor timeout during session creation after ${effectiveTimeoutMs}ms`,
+					timedOut: true,
+				};
+			}
 			// createSession itself threw — almost certainly an extension onLoad
 			// failure in the auditor's inherited resource loader. Log it.
 			logAuditorTrace(args.ctx.cwd, {
@@ -587,6 +894,31 @@ export async function runGoalCompletionAuditor(args: {
 				source: "createSession",
 			});
 			throw createError;
+		}
+		// cubic-dev P2: if a process guard captured an error DURING createSession
+		// (e.g. an extension onLoad rejection), sessionRef was still undefined so
+		// the fail-fast abort could not fire. createSession may still succeed and
+		// reach session.prompt(). Short-circuit here — before subscribe/prompt —
+		// so a guard-captured error returns immediately instead of running a full
+		// (potentially timeout-length) LLM prompt.
+		if (rejectionMessage) {
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: false,
+				disapproved: true,
+				model: modelLabel(model),
+				error: rejectionMessage,
+				output: "",
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return {
+				approved: false,
+				disapproved: true,
+				output: "",
+				model: modelLabel(model),
+				thinkingLevel,
+				error: rejectionMessage,
+			};
 		}
 		const unsubscribe = session.subscribe((event) => {
 			// Forensic trace: record every session event with a bounded preview.
@@ -622,6 +954,21 @@ export async function runGoalCompletionAuditor(args: {
 					}
 				}
 				logAuditorTrace(args.ctx.cwd, buildEventEntry(event.type, summary));
+				// OTEL trace: when the auditor child session emits agent_end, the
+				// inherited pi-print-clean-exit extension arms its exit timer in
+				// this SAME process (the host). Correlate this pid/ppid with the
+				// arm_clean_exit line in print-clean-exit-trace.jsonl to prove the
+				// in-process auditor inheritance bug.
+				if (event.type === "agent_end") {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "auditor_agent_end",
+						source: "goal-auditor",
+						goalId: args.goal.id,
+						pid: process.pid,
+						ppid: process.ppid,
+					});
+				}
 			} catch {
 				// trace logging must never crash the audit
 			}
@@ -700,8 +1047,61 @@ export async function runGoalCompletionAuditor(args: {
 		// the session (which may fire after session.abort() returns) would
 		// resurrect the nulled auditProgress in the caller.
 		let aborted = args.signal?.aborted ?? false;
-		const abortSession = () => { aborted = true; session.abort(); };
+		// Counterfactual fix: wrap session.abort() in try/catch for
+		// defense-in-depth. abort() is non-throwing today (pi-agent-core),
+		// but a future refactor could throw — and a throw inside an
+		// AbortSignal listener or setTimeout callback surfaces as
+		// uncaughtException. captureGuardError already wraps its abort()
+		// (line ~672); these two sites should match. Unlike captureGuardError's
+		// bare catch, we log the failure to the trace so a future abort() throw
+		// is visible rather than silently swallowed (avoids broad exception
+		// masking).
+		// F1: session.abort() is ASYNC (it awaits agent.waitForIdle()). The
+		// try/catch only catches synchronous throws — an async rejection from
+		// abort() escapes the catch entirely and floats until the process-level
+		// guards (removed in the outer finally) are gone, then hits Node's
+		// default unhandledRejection → process.exit(1). Attaching a swallowing
+		// .catch SYNCHRONOUSLY here is sufficient: a promise rejection is
+		// "handled" the moment the .catch handler is attached, regardless of
+		// when it settles — so the floating rejection can never become
+		// unhandled. We deliberately do NOT await the promise (see the outer
+		// finally): awaiting would risk hanging on waitForIdle and defeat the
+		// timeout ceiling. The duck-type check guards .catch (not .then) so a
+		// custom thenable without .catch can't throw a TypeError here.
+		const safeAbort = () => {
+			try {
+				const p = session.abort();
+				if (p && typeof (p as any).catch === "function") {
+					(p as Promise<unknown>).catch(() => {});
+				}
+			} catch (e) {
+				try {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "abort_failed",
+						goalId: args.goal.id,
+						// safeToString (not String(e)) — String() throws for
+						// Object.create(null) / throwing proxies, which would
+						// escape the inner catch and lose the trace. Same
+						// rationale as captureGuardError's use of safeToString.
+						error: safeToString(e),
+					});
+				} catch { /* trace logging must never crash */ }
+			}
+		};
+		const abortSession = () => { aborted = true; safeAbort(); };
 		args.signal?.addEventListener("abort", abortSession, { once: true });
+
+		// ── Bug 1a fix: auditor timeout ──────────────────────────────────────
+		// Hard ceiling on audit duration to prevent indefinite hangs from
+		// inherited extensions that never resolve. Configurable via
+		// settings.auditorTimeoutMs (default 15 minutes — F2: raised from 5;
+		// createSession ~45s + real test suites 240s+ made 5min self-defeating).
+		// A 1s floor (F3, effectiveTimeoutMs above) prevents config typos like
+		// auditorTimeoutMs:1 from aborting the audit in its first tick.
+		// On timeout: abort session, set timedOut flag, return
+		// {approved:false, error:"Auditor timeout"}.
+		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
 		// Emit initial progress
 		progress.label = "Starting audit...";
@@ -720,8 +1120,196 @@ export async function runGoalCompletionAuditor(args: {
 				}));
 				return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: "Auditor aborted." };
 			}
-			await session.prompt(resolvedPrompt.prompt);
+			// Install timeout guard before prompt. (G1: the unhandledRejection /
+			// uncaughtException guards are installed before createSession, not here.)
+			// cubic P2 fix: race the prompt against the timeout directly. Previously
+			// the timeout only called session.abort() to unblock prompt — but if
+			// abort() throws (safeAbort swallows it), prompt() never resolves and
+			// the audit hangs forever despite the timeout having fired. By racing
+			// prompt against a rejecting timeout promise, the await unblocks on the
+			// timeout path regardless of whether abort() succeeded.
+			let timeoutReject: ((err: Error) => void) | null = null;
+			const timeoutPromise = new Promise<never>((_, reject) => {
+				timeoutReject = reject;
+			});
+			timeoutId = setTimeout(() => {
+				timedOut = true;
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "timeout",
+						goalId: args.goal.id,
+						timeoutMs: effectiveTimeoutMs,
+					});
+					safeAbort();
+				// Reject the race so prompt unblocks even if abort() threw.
+				if (timeoutReject) {
+					const err = new Error("__auditor_prompt_timeout__");
+					err.name = "AbortError";
+					timeoutReject(err);
+				}
+			}, Math.max(0, clampedTimeoutMs - (Date.now() - startedAt)));
+			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
+			// Generic errors MUST propagate to the catch block for proper error handling.
+			await Promise.race([
+				session.prompt(resolvedPrompt.prompt),
+				timeoutPromise,
+			]).catch((err: unknown) => {
+				// Only swallow AbortError (from abort/timeout). All other errors propagate.
+				if (err instanceof Error && err.name === "AbortError") return;
+				throw err;
+			});
+			// Check timeout BEFORE checking aborted (timeout sets aborted via session.abort())
+			// Also check rejectionMessage — R3.4 says return rejection error if guard caught one
+			if (rejectionMessage) {
+				const rejOutput = outputParts.join("\n\n").trim();
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: rejectionMessage,
+					output: rejOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: rejOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: rejectionMessage,
+				};
+			}
+			if (timedOut) {
+				const timeoutOutput = outputParts.join("\n\n").trim();
+				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: timeoutError,
+					output: timeoutOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: timeoutOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: timeoutError,
+					timedOut: true,
+				};
+			}
+			// session.abort() does NOT throw — the agent loop returns normally with
+			// whatever output was captured before the abort. Check BOTH the local
+			// `aborted` flag (set synchronously before session.abort()) AND the
+			// signal's aborted state for defense-in-depth. The local flag catches
+			// the race where abort fires during prompt resolution but the signal
+			// check hasn't propagated yet.
+			if (aborted || args.signal?.aborted) {
+				const abortedOutput = outputParts.join("\n\n").trim();
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: "Auditor aborted.",
+					output: abortedOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: abortedOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: "Auditor aborted.",
+				};
+			}
+			const output = outputParts.join("\n\n").trim();
+			const decision = parseAuditorDecision(output);
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: decision.approved,
+				disapproved: decision.disapproved,
+				model: modelLabel(model),
+				output,
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return { ...decision, output, model: modelLabel(model), thinkingLevel };
+		} catch (error) {
+			// Check timeout BEFORE generic error handling
+			if (timedOut) {
+				const timeoutOutput = outputParts.join("\n\n").trim();
+				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: timeoutError,
+					output: timeoutOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: timeoutOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: timeoutError,
+					timedOut: true,
+				};
+			}
+			// Check rejectionMessage (from unhandledRejection guard)
+			if (rejectionMessage) {
+				const rejOutput = outputParts.join("\n\n").trim();
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: true,
+					model: modelLabel(model),
+					error: rejectionMessage,
+					output: rejOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					approved: false,
+					disapproved: true,
+					output: rejOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					error: rejectionMessage,
+				};
+			}
+			const isAborted = args.signal?.aborted || (error instanceof Error && error.name === "AbortError");
+			const errorMsg = isAborted ? "Auditor aborted." : (error instanceof Error ? error.message : String(error));
+			const errOutput = outputParts.join("\n\n").trim();
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: false,
+				disapproved: true,
+				model: modelLabel(model),
+				error: errorMsg,
+				output: errOutput,
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return {
+				approved: false,
+				disapproved: true,
+				output: errOutput,
+				model: modelLabel(model),
+				thinkingLevel,
+				error: errorMsg,
+			};
 		} finally {
+			// Remove timeout + abortSession listener. The process-level guards
+			// (unhandledRejection / uncaughtException) + G2 inherited-listener
+			// cleanup + G3 session cleanup happen in the OUTER finally so they
+			// run even if createSession failed and we never reached this inner try.
+			if (timeoutId) clearTimeout(timeoutId);
 			args.signal?.removeEventListener("abort", abortSession);
 			progress.phase = "done";
 			progress.label = "Audit complete.";
@@ -729,46 +1317,9 @@ export async function runGoalCompletionAuditor(args: {
 			emitProgress();
 			unsubscribe();
 		}
-		// session.abort() does NOT throw — the agent loop returns normally with
-		// whatever output was captured before the abort. Check BOTH the local
-		// `aborted` flag (set synchronously before session.abort()) AND the
-		// signal's aborted state for defense-in-depth. The local flag catches
-		// the race where abort fires during prompt resolution but the signal
-		// check hasn't propagated yet.
-		if (aborted || args.signal?.aborted) {
-			const abortedOutput = outputParts.join("\n\n").trim();
-			logAuditorTrace(args.ctx.cwd, buildEndEntry({
-				goalId: args.goal.id,
-				approved: false,
-				disapproved: true,
-				model: modelLabel(model),
-				error: "Auditor aborted.",
-				output: abortedOutput,
-				elapsedMs: Date.now() - startedAt,
-			}));
-			return {
-				approved: false,
-				disapproved: true,
-				output: abortedOutput,
-				model: modelLabel(model),
-				thinkingLevel,
-				error: "Auditor aborted.",
-			};
-		}
-		const output = outputParts.join("\n\n").trim();
-		const decision = parseAuditorDecision(output);
-		logAuditorTrace(args.ctx.cwd, buildEndEntry({
-			goalId: args.goal.id,
-				approved: decision.approved,
-				disapproved: decision.disapproved,
-				model: modelLabel(model),
-				output,
-				elapsedMs: Date.now() - startedAt,
-			}));
-		return { ...decision, output, model: modelLabel(model), thinkingLevel };
 	} catch (error) {
-		const isAborted = args.signal?.aborted || (error instanceof Error && error.name === "AbortError");
-		const errorMsg = isAborted ? "Auditor aborted." : (error instanceof Error ? error.message : String(error));
+		// Outer catch for the entire audit function
+		const errorMsg = error instanceof Error ? error.message : String(error);
 		const errOutput = outputParts.join("\n\n").trim();
 		logAuditorTrace(args.ctx.cwd, buildEndEntry({
 			goalId: args.goal.id,
@@ -787,5 +1338,65 @@ export async function runGoalCompletionAuditor(args: {
 			thinkingLevel,
 			error: errorMsg,
 		};
+	} finally {
+		// B+: clear the in-process sentinel FIRST, before listener removal, so
+		// even if a later cleanup line throws the sentinel is already cleared.
+		// Must run on EVERY path (success, timeout, abort, throw). `delete` (not
+		// `= false`) so an `in` check is unambiguous.
+		try { delete (globalThis as any)[AUDITOR_IN_PROCESS_SENTINEL]; } catch {}
+		// ── G1/G2/G3: process-guard removal + inherited-listener cleanup + session cleanup
+		//
+		// G1: remove the auditor's own unhandledRejection / uncaughtException
+		//     guards. These MUST be removed even if createSession threw, otherwise
+		//     they'd leak into the host process for the rest of the session.
+		//
+		// G2: remove any process.on('unhandledRejection'/'uncaughtException')
+		//     handlers inherited extensions registered DURING the audit window
+		//     (i.e. present now but absent from the pre-createSession snapshot).
+		//     This is a mitigation, not a full fix: an out-of-process auditor is
+		//     the only way to fully isolate side effects (timers, globalThis
+		//     mutations, other event names). Residual risk documented.
+		//
+		//     KNOWN LIMITATION (concurrent audits): if two runGoalCompletionAuditor
+		//     calls overlap, the snapshot-based diff can remove a listener the
+		//     OTHER concurrent audit legitimately owns, because process listeners
+		//     are global. Audits are not designed to run concurrently (a single
+		//     complete_goal holds the goal lock), so this is accepted as residual
+		//     risk. A proper fix requires either serializing audit windows or the
+		//     out-of-process auditor noted above.
+		//
+		// G3: explicitly clear the in-memory output buffer and drop references so
+		//     the auditor session can be garbage-collected promptly after the
+		//     audit ends, instead of lingering until the next GC sweep.
+		try { if (unhandledRejectionHandler) process.off("unhandledRejection", unhandledRejectionHandler); } catch {}
+		try { if (uncaughtExceptionHandler) process.off("uncaughtException", uncaughtExceptionHandler); } catch {}
+		for (const l of process.listeners("unhandledRejection")) {
+			if (unhandledRejectionHandler && l !== unhandledRejectionHandler && !preUnhandledRejectionListeners.includes(l)) {
+				try { process.off("unhandledRejection", l); } catch {}
+			}
+		}
+		for (const l of process.listeners("uncaughtException")) {
+			if (uncaughtExceptionHandler && l !== uncaughtExceptionHandler && !preUncaughtExceptionListeners.includes(l)) {
+				try { process.off("uncaughtException", l); } catch {}
+			}
+		}
+		// F1: no explicit drain of abort() promises here. session.abort() is
+		// async (it awaits agent.waitForIdle(), which can hang), so awaiting
+		// its settlement in this finally would risk hanging indefinitely and
+		// bypass the timeout ceiling that exists precisely to bound the audit.
+		// Instead the .catch(() => {}) is attached SYNCHRONOUSLY at each abort
+		// call site (safeAbort / captureGuardError). A promise rejection is
+		// "handled" the moment a .catch handler is attached — regardless of
+		// when the promise settles — so the synchronous .catch alone is
+		// sufficient to prevent an unhandledRejection after the guards above
+		// are removed. No collection or await is needed.
+		// G3: explicit cleanup of in-memory auditor state for GC. The session
+		// object's external references (subscribe callback, abort listener) are
+		// dropped by the INNER finally; the session local itself goes out of
+		// scope with this try block, so it is GC-eligible once the function
+		// returns. We additionally clear the output buffer here so its memory
+		// is released before the function returns, not at the next GC sweep.
+		outputParts.length = 0;
+		sessionRef = undefined;
 	}
 }

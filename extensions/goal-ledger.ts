@@ -13,7 +13,7 @@ export type GoalLedgerEvent =
   | { type: "goal_tweaked"; goalId: string; changeSummary: string; at: string }
   | { type: "completion_requested"; goalId: string; summary?: string; at: string }
   | { type: "audit_started"; goalId: string; provider?: string; model?: string; thinkingLevel?: string; at: string }
-  | { type: "audit_result"; goalId: string; verdict: "approved" | "disapproved" | "error"; report: string; at: string }
+  | { type: "audit_result"; goalId: string; verdict: "approved" | "disapproved" | "error"; report: string; at: string; timedOut?: boolean }
   | { type: "audit_skipped"; goalId: string; reason: "disabled" | "user_aborted"; provider?: string; model?: string; thinkingLevel?: string; at: string }
   | { type: "goal_completed"; goalId: string; archivePath?: string; at: string }
   | { type: "goal_aborted"; goalId: string; reason: string; archivePath?: string; at: string }
@@ -65,7 +65,18 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
   fs.mkdirSync(dir, { recursive: true });
 
   const line = JSON.stringify(event) + "\n";
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+
+  // NOTE: the goal ledger is an event-sourced log — readGoalLedger replays it
+  // to reconstruct goal state (goal_created → goal_focused → goal_paused …).
+  // Rotating it would move older goal_created events into .1/.2/.3 archives
+  // that readGoalLedger does NOT read, silently dropping later events for
+  // those goals (cubic-dev P1). Rotation is only safe for the auditor trace
+  // log (auditor-log.ts), which is append-only forensic data. The ledger
+  // relies on compaction via goal archival instead.
+
+  // Include a random suffix so two calls within the same millisecond (same pid)
+  // don't collide on the "wx" exclusive-create flag. (gemini review)
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   let appended = false;
   try {
     fs.writeFileSync(tempPath, line, { flag: "wx", encoding: "utf8" });

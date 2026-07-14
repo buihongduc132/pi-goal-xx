@@ -15,7 +15,9 @@ import {
 	SKIP_TASK_TOOL_NAME,
 	SISYPHUS_STEP_TOOL_NAME,
 	CREATE_GOAL_TOOL_NAME,
+	START_GOAL_TOOL_NAME,
 	PROPOSE_DRAFT_TOOL_NAME,
+	GOAL_WORK_TOOL_NAMES,
 } from "../extensions/goal-tool-names.ts";
 
 describe("tool name constants", () => {
@@ -29,6 +31,7 @@ describe("tool name constants", () => {
 		assert.equal(SKIP_TASK_TOOL_NAME, "skip_task");
 		assert.equal(SISYPHUS_STEP_TOOL_NAME, "step_complete");
 		assert.equal(CREATE_GOAL_TOOL_NAME, "create_goal");
+		assert.equal(START_GOAL_TOOL_NAME, "start_goal");
 		assert.equal(PROPOSE_DRAFT_TOOL_NAME, "propose_goal_draft");
 	});
 
@@ -116,5 +119,22 @@ describe("isQuestionLikeToolName", () => {
 		assert.equal(isQuestionLikeToolName("write"), false);
 		assert.equal(isQuestionLikeToolName("bash"), false);
 		assert.equal(isQuestionLikeToolName(""), false);
+	});
+});
+
+describe("start_goal tool name", () => {
+	it("exports START_GOAL_TOOL_NAME as start_goal", () => {
+		assert.equal(START_GOAL_TOOL_NAME, "start_goal");
+	});
+
+	it("start_goal is a member of GOAL_WORK_TOOL_NAMES", () => {
+		assert.ok(GOAL_WORK_TOOL_NAMES.includes("start_goal"), "start_goal should be in GOAL_WORK_TOOL_NAMES");
+	});
+
+	it("start_goal is NOT in any lifecycle surface set", () => {
+		// Hidden from active/paused/no-focused tool surfaces — never surfaced to the LLM.
+		assert.ok(!ACTIVE_GOAL_TOOL_NAMES.includes("start_goal"));
+		assert.ok(!PAUSED_GOAL_TOOL_NAMES.includes("start_goal"));
+		assert.ok(!NO_FOCUSED_GOAL_TOOL_NAMES.includes("start_goal"));
 	});
 });

@@ -422,4 +422,108 @@ describe("loadGoalSettings / saveGoalSettingsFileConfig — auditor round trip",
 		assert.equal(loaded.auditorPromptMode, undefined);
 		assert.equal(loaded.auditorPrompt, undefined);
 	});
+
+	it("counterfactual: auditorTimeoutMs round-trips through saveGoalSettingsFileConfig (was silently dropped)", () => {
+		// Counterfactual fix: saveGoalSettingsFileConfig previously persisted
+		// every auditor field EXCEPT auditorTimeoutMs. A settings rewrite
+		// (e.g. a /goal-settings edit) would silently delete the user's
+		// auditor timeout, falling back to the 5min default. Verify it now
+		// round-trips: save → reload → value preserved.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-timeout-"));
+		try {
+			const original: GoalSettings = { auditorTimeoutMs: 42_000 };
+			saveGoalSettingsFileConfig(tmp, original);
+			const loaded = loadGoalSettingsFileConfig(tmp, {});
+			assert.equal(loaded.auditorTimeoutMs, 42_000, "auditorTimeoutMs must survive a save→load round-trip");
+			// Also confirm it landed in the JSON file (not just the clean object).
+			const raw = JSON.parse(fs.readFileSync(path.join(tmp, ".pi", "pi-goal-xx-settings.json"), "utf8"));
+			assert.equal(raw.auditorTimeoutMs, 42_000, "auditorTimeoutMs must be persisted to the settings file");
+		} finally {
+			// cubic P3: try/finally so cleanup runs even if an assert throws
+			// (previously rmSync was unreachable on assertion failure → temp dir leak).
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("parseGoalSettings / loadGoalSettings — logging block", () => {
+	it("parses a valid logging block", () => {
+		const s = parseGoalSettings({ logging: { level: "debug", toStderr: true } });
+		assert.deepEqual(s.logging, { level: "debug", toStderr: true });
+	});
+
+	it("parses level only (toStderr omitted)", () => {
+		const s = parseGoalSettings({ logging: { level: "warn" } });
+		assert.deepEqual(s.logging, { level: "warn" });
+	});
+
+	it("parses toStderr only (level omitted)", () => {
+		const s = parseGoalSettings({ logging: { toStderr: false } });
+		assert.deepEqual(s.logging, { toStderr: false });
+	});
+
+	it("accepts level 'off'", () => {
+		const s = parseGoalSettings({ logging: { level: "off" } });
+		assert.equal(s.logging?.level, "off");
+	});
+
+	it("normalizes level to lowercase", () => {
+		const s = parseGoalSettings({ logging: { level: "ERROR" } });
+		assert.equal(s.logging?.level, "error");
+	});
+
+	it("rejects an invalid level", () => {
+		assert.throws(() => parseGoalSettings({ logging: { level: "trace" } }), /Invalid logging.level/);
+	});
+
+	it("rejects an unknown nested key", () => {
+		assert.throws(() => parseGoalSettings({ logging: { color: true } }), /Unknown logging nested key/);
+	});
+
+	it("loadGoalSettings defaults logging to undefined (no block → info sink resolved by caller)", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-log-"));
+		const s = loadGoalSettings(tmp, {});
+		assert.equal(s.logging, undefined);
+	});
+
+	it("loadGoalSettings reads logging from file config", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-log-"));
+		fs.mkdirSync(path.join(tmp, ".pi"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ logging: { level: "error", toStderr: true } }),
+		);
+		const s = loadGoalSettings(tmp, {});
+		assert.deepEqual(s.logging, { level: "error", toStderr: true });
+	});
+
+	it("PI_GOAL_LOG_LEVEL env overrides file config", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-log-"));
+		fs.mkdirSync(path.join(tmp, ".pi"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ logging: { level: "info" } }),
+		);
+		const s = loadGoalSettings(tmp, { PI_GOAL_LOG_LEVEL: "debug" });
+		assert.equal(s.logging?.level, "debug");
+	});
+
+	it("PI_GOAL_LOG_LEVEL env enables logging when file has none", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-log-"));
+		const s = loadGoalSettings(tmp, { PI_GOAL_LOG_LEVEL: "warn" });
+		assert.equal(s.logging?.level, "warn");
+	});
+
+	it("invalid PI_GOAL_LOG_LEVEL env value is ignored (falls back to file/none)", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-log-"));
+		const s = loadGoalSettings(tmp, { PI_GOAL_LOG_LEVEL: "trace" });
+		assert.equal(s.logging, undefined);
+	});
+
+	it("saveGoalSettingsFileConfig round-trips logging", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-log-"));
+		saveGoalSettingsFileConfig(tmp, { logging: { level: "debug", toStderr: true } });
+		const loaded = loadGoalSettingsFileConfig(tmp, {});
+		assert.deepEqual(loaded.logging, { level: "debug", toStderr: true });
+	});
 });
