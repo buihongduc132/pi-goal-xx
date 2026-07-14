@@ -175,6 +175,24 @@ describe("A+ content-scan — process.exit-calling extension excluded from audit
 		assert.equal(extensionCallsProcessExit(benign), false, "benign source must pass");
 	});
 
+	it("extensionCallsProcessExit: does NOT false-positive on a COMMENT-only process.exit mention (global-error-handler pattern)", () => {
+		// Regression for verifier-loop MUST-FIX: a benign extension whose only
+		// 'process.exit' occurrence is a doc comment (e.g. global-error-handler.ts
+		// line 11: 'NEVER calls process.exit() — pi manages its own lifecycle')
+		// must NOT be excluded. The naive substring scan would wrongly drop it;
+		// the comment-stripping scanner must return false.
+		const commentOnlyPath = `${cwd}/comment-only-ext.ts`;
+		fs.writeFileSync(commentOnlyPath, [
+			"/**",
+			" * - NEVER calls process.exit() — pi manages its own lifecycle.",
+			" */",
+			"// line comment: process.exit(0) is forbidden here",
+			"export default function () { console.log('benign'); }",
+			"",
+		].join("\n"));
+		assert.equal(extensionCallsProcessExit(commentOnlyPath), false, "comment-only process.exit mention must NOT be flagged");
+	});
+
 	it("extensionCallsProcessExit: returns false for non-file paths (test fixtures, stubs) without excluding them", () => {
 		// Real extensions always have on-disk file paths. A bare name like
 		// "cc-safety-net" is a test-fixture / in-memory stub, never a killer

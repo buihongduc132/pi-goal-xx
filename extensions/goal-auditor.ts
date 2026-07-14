@@ -340,12 +340,29 @@ export function isGoalSelfExtension(extPath: string | undefined): boolean {
  * Content-scan (not a static name list) so newly added process.exit
  * extensions are caught automatically without anyone updating a list.
  *
+ * Comment-aware: line comments and block comments are stripped before
+ * scanning, so a benign extension that merely DOCUMENTS a process.exit call
+ * (e.g. global-error-handler.ts's "NEVER calls process.exit" doc comment)
+ * is NOT falsely excluded. Only real call sites match.
+ *
  * Fail-closed: an unreadable or oversized (>2MB) source is treated as a
  * match — a killer we cannot read is more dangerous than a false exclude of
  * an unreadable extension.
  */
-const PROCESS_EXIT_TOKEN = "process.exit";
+const PROCESS_EXIT_CALL_RE = /process\.exit\s*\(/;
 const MAX_EXIT_SCAN_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Strip JS/TS comments (line comments and block comments) from source so
+ * the process.exit scan matches real call sites, not doc comments. Best-effort
+ * — string literals containing the pattern could in theory be mis-stripped,
+ * but the tradeoff (catch real calls, avoid false-positive on doc) is correct
+ * for this scanner's threat model. Regex replaces both comment styles in one
+ * pass.
+ */
+function stripComments(src: string): string {
+	return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
 
 export function extensionCallsProcessExit(extPath: string | undefined): boolean {
 	// No path → cannot scan → do NOT exclude by this rule (isGoalSelfExtension
@@ -367,7 +384,9 @@ export function extensionCallsProcessExit(extPath: string | undefined): boolean 
 		if (!stat.isFile() && !stat.isSymbolicLink()) return false;
 		if (stat.size > MAX_EXIT_SCAN_BYTES) return true; // oversized → fail-closed exclude
 		const src = fs.readFileSync(extPath, "utf8");
-		return src.includes(PROCESS_EXIT_TOKEN);
+		// Strip comments first so a doc comment like "NEVER calls process.exit()"
+		// does NOT trigger a false exclude of a benign extension.
+		return PROCESS_EXIT_CALL_RE.test(stripComments(src));
 	} catch {
 		return true; // exists but unreadable → fail-closed exclude (defense-in-depth)
 	}
