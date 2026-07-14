@@ -12,6 +12,11 @@ Source of truth: `extensions/`. Tests: `tests/`. Config: `.pi/pi-goal-xx-setting
 ## flow/ bugs
 
 - `flow/bugs/2026-07-11_complete-goal-crash-and-reject-exit.md` — `complete_goal` bug 1: auditor `inheritFromCwd` loads host resources into in-process child → hang/exit. Bug 2: bare `pi.sendMessage` (no `.catch()`) in all 6 sends → exit-on-reject. Both open. Fix: keep inheritance, harden with timeout + unhandledRejection guard.
+- `flow/bugs/2026-07-14_pi-process-exits-after-completion.md` — pi exits `process.exit(0)` ~1.5s after auditor approves. Root cause: inherited `pi-print-clean-exit` extension arms 1.5s timer in headless-mode in-process auditor child → kills host. Proven via `--trace-exit` (3 repros, code 0, ~1s Δ).
+
+## flow/ findings
+
+- `flow/findings/2026-07-14_pi-process-exit-after-completion-timeline.md` — WHEN the bug became visible: collision of pi-plugins `9fa16754` (pi-print-clean-exit, 2026-06-19) + pi-goal-xx `043c16e` (inheritFromCwd, 2026-07-03) + pi-plugins `e0cfab97` (pi-goal-xx swap, 2026-07-04). Bug active since 2026-07-04 (~10 days "plague").
 
 ## flow/ requirements
 

@@ -852,6 +852,21 @@ export async function runGoalCompletionAuditor(args: {
 					}
 				}
 				logAuditorTrace(args.ctx.cwd, buildEventEntry(event.type, summary));
+				// OTEL trace: when the auditor child session emits agent_end, the
+				// inherited pi-print-clean-exit extension arms its exit timer in
+				// this SAME process (the host). Correlate this pid/ppid with the
+				// arm_clean_exit line in print-clean-exit-trace.jsonl to prove the
+				// in-process auditor inheritance bug.
+				if (event.type === "agent_end") {
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "auditor_agent_end",
+						source: "goal-auditor",
+						goalId: args.goal.id,
+						pid: process.pid,
+						ppid: process.ppid,
+					});
+				}
 			} catch {
 				// trace logging must never crash the audit
 			}
