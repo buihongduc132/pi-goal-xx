@@ -16,7 +16,12 @@ import {
 	type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { GoalRecord, GoalTask, GoalTaskList } from "./goal-record.ts";
-import { loadGoalSettings, type GoalSettings } from "./goal-settings.ts";
+import {
+	DEFAULT_AUDITOR_TIMEOUT_MS,
+	DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS,
+	loadGoalSettings,
+	type GoalSettings,
+} from "./goal-settings.ts";
 import { AuditorPatternCache } from "./auditor-patterns.ts";
 import {
 	resolveAuditorResources,
@@ -615,7 +620,8 @@ export async function runGoalCompletionAuditor(args: {
 		// extensions, createSession takes ~45s, and the auditor legitimately
 		// runs real test suites (240s+). 5 minutes was self-defeating — the
 		// audit was being killed while still doing valid work.
-		const DEFAULT_AUDITOR_TIMEOUT_MS = 15 * 60 * 1000;
+		// Configurable via the `auditorTimeoutMs` setting or
+		// `PI_GOAL_AUDITOR_TIMEOUT_MS` env var (env wins).
 		const timeoutMs = config.auditorTimeoutMs ?? DEFAULT_AUDITOR_TIMEOUT_MS;
 		// F3: sanity floor. A config typo (e.g. auditorTimeoutMs: 1) would
 		// otherwise abort the audit within a millisecond of starting, before
@@ -633,8 +639,14 @@ export async function runGoalCompletionAuditor(args: {
 		// first tick) while leaving 7777 (GAP-C) and the suite runtime intact.
 		// A production-safe 60_000 floor requires either exempting tests or an
 		// out-of-process auditor; tracked as residual.
-		const EFFECTIVE_TIMEOUT_FLOOR_MS = 1_000;
+		// Configurable via the `auditorTimeoutFloorMs` setting or
+		// `PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS` env var (env wins).
+		const EFFECTIVE_TIMEOUT_FLOOR_MS = config.auditorTimeoutFloorMs ?? DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS;
 		const effectiveTimeoutMs = Math.max(timeoutMs, EFFECTIVE_TIMEOUT_FLOOR_MS);
+		// Clamp to 32-bit signed int max (Node setTimeout limit). Values above
+		// 2^31-1 (~24.8 days) wrap to 1ms on some platforms — instant-fire.
+		const MAX_SET_TIMEOUT_MS = 2_147_483_647;
+		const clampedTimeoutMs = Math.min(effectiveTimeoutMs, MAX_SET_TIMEOUT_MS);
 		let timedOut = false;
 
 		// ── G1: process-level guards installed BEFORE createSession ───────────
@@ -735,7 +747,7 @@ export async function runGoalCompletionAuditor(args: {
 						customTools: [reportProgressTool],
 					}),
 					new Promise<never>((_, reject) => {
-						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), effectiveTimeoutMs);
+						csTimeoutId = setTimeout(() => reject(new Error("__auditor_cs_timeout__")), clampedTimeoutMs);
 					}),
 				]);
 				session = created.session;
@@ -1018,7 +1030,7 @@ export async function runGoalCompletionAuditor(args: {
 					err.name = "AbortError";
 					timeoutReject(err);
 				}
-			}, Math.max(0, effectiveTimeoutMs - (Date.now() - startedAt)));
+			}, Math.max(0, clampedTimeoutMs - (Date.now() - startedAt)));
 			// R2.4a: catch AbortError from abort teardown so it doesn't escape as unhandled.
 			// Generic errors MUST propagate to the catch block for proper error handling.
 			await Promise.race([
