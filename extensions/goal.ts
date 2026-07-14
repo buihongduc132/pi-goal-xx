@@ -25,6 +25,8 @@ import {
 	runGoalCompletionAuditor,
 } from "./goal-auditor.ts";
 import {
+	DEFAULT_AUDITOR_TIMEOUT_MS,
+	DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS,
 	goalSettingsPath,
 	isAuditorEnabledByDefault,
 	loadGoalSettings,
@@ -2218,8 +2220,8 @@ Verification contract:
 		if (key === "hooksDir") return config.hooksDir ?? ".pi/pi-goal-xx/hooks/";
 		if (key === "contractTemplates") return config.contractTemplates === false ? "false" : "true";
 		if (key === "contractsDir") return config.contractsDir ?? ".pi/pi-goal-xx/contracts/";
-		if (key === "auditorTimeoutMs") return config.auditorTimeoutMs !== undefined ? String(config.auditorTimeoutMs) : "900000 (15min)";
-		if (key === "auditorTimeoutFloorMs") return config.auditorTimeoutFloorMs !== undefined ? String(config.auditorTimeoutFloorMs) : "1000 (1s)";
+		if (key === "auditorTimeoutMs") return config.auditorTimeoutMs !== undefined ? String(config.auditorTimeoutMs) : `${DEFAULT_AUDITOR_TIMEOUT_MS} (15min)`;
+		if (key === "auditorTimeoutFloorMs") return config.auditorTimeoutFloorMs !== undefined ? String(config.auditorTimeoutFloorMs) : `${DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS} (1s)`;
 		const fallback = config[key as keyof GoalSettings];
 		return typeof fallback === "string" ? fallback : "(default)";
 	}

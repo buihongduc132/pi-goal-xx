@@ -101,6 +101,36 @@ describe("auditor env config — Zone 2: invalid env value ignored", () => {
 			cleanup(tmp);
 		}
 	});
+
+	it("negative floor env value falls back to file config", () => {
+		const tmp = makeCwd({ auditorTimeoutFloorMs: 2000 });
+		try {
+			const s = loadGoalSettings(tmp, { [PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV]: "-1" });
+			assert.equal(s.auditorTimeoutFloorMs, 2000, "negative floor env must be ignored");
+		} finally {
+			cleanup(tmp);
+		}
+	});
+
+	it("zero floor env value falls back to file config (asPositiveInt rejects 0)", () => {
+		const tmp = makeCwd({ auditorTimeoutFloorMs: 2000 });
+		try {
+			const s = loadGoalSettings(tmp, { [PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV]: "0" });
+			assert.equal(s.auditorTimeoutFloorMs, 2000, "zero floor env must be ignored (floor of 1 in asPositiveInt)");
+		} finally {
+			cleanup(tmp);
+		}
+	});
+
+	it("non-numeric floor env value falls back to file config", () => {
+		const tmp = makeCwd({ auditorTimeoutFloorMs: 2000 });
+		try {
+			const s = loadGoalSettings(tmp, { [PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV]: "abc" });
+			assert.equal(s.auditorTimeoutFloorMs, 2000, "non-numeric floor env must be ignored");
+		} finally {
+			cleanup(tmp);
+		}
+	});
 });
 
 describe("auditor env config — Zone 5: round-trip persistence", () => {

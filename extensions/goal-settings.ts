@@ -118,7 +118,7 @@ export interface GoalSettings {
 	contractTemplates?: boolean;
 	/** UNIFIED: override the contracts directory (default `.pi/pi-goal-xx/contracts/`). */
 	contractsDir?: string;
-	/** Auditor timeout in milliseconds. Default 300000 (5 minutes). */
+	/** Auditor timeout in milliseconds. Default 900000 (15 minutes). */
 	auditorTimeoutMs?: number;
 	/** Auditor timeout floor in milliseconds. Prevents config typos from instant-aborting. Default 1000 (1s). */
 	auditorTimeoutFloorMs?: number;
@@ -142,6 +142,11 @@ export interface GoalLoggingConfig {
 	level?: "off" | "error" | "warn" | "info" | "debug";
 	toStderr?: boolean;
 }
+
+/** Default auditor timeout ceiling: 15 minutes. Configurable via auditorTimeoutMs / PI_GOAL_AUDITOR_TIMEOUT_MS. */
+export const DEFAULT_AUDITOR_TIMEOUT_MS = 15 * 60 * 1000;
+/** Default auditor timeout floor: 1 second. Configurable via auditorTimeoutFloorMs / PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS. */
+export const DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS = 1_000;
 
 export const PI_GOAL_SETTINGS_FILE_ENV = "PI_GOAL_SETTINGS_FILE";
 /** Env override for the trace log level: off|error|warn|info|debug. Takes precedence over file config. */
