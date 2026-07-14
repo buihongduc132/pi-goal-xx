@@ -15,6 +15,25 @@
 
 Belt AND suspenders. Either fix alone closes the bug; together they survive independent regressions in either repo. **Both ship.**
 
+> **Deploy dependency (clarified 2026-07-14 during verifier loop).** A+ is the
+> LOAD-BEARING fix and is complete + verified entirely within this repo: it
+> excludes any `process.exit`-calling extension from the auditor's inherited
+> set, so the killer never loads in the child and the timer is never armed.
+> A+ ALONE fully fixes the bug. B+ is a PRODUCER in this repo + a CONSUMER in
+> the separate **pi-plugins** repo (`profile/extensions/pi-print-clean-exit`,
+> committed `81f2cebf`). The B+ producer is correct, race-free, tested for
+> set/clear (Zones 2-4) and for enabling a sentinel-honoring consumer to
+> self-skip during the audit window (Zone 5). Until the pi-plugins consumer
+> (`81f2cebf`) is **deployed**, B+ is producer-only and harmless, and A+ holds
+> alone. The cross-repo consumer deploy is a tracked dependency, NOT a defect
+> in this PR. Deploying it is out of scope for the pi-goal-xx PR.
+>
+> Note: the commit message of `8fe563d` phrases B+ as "pi-print-clean-exit reads
+> this to self-skip" — accurate as design intent / forward contract, but not yet
+> true in any deployed stage until pi-plugins `81f2cebf` ships. That message is
+> immutable here (rebase is blocked by the environment safety hook); the
+> authoritative, current scoping lives in this section and the PR description.
+
 | Layer | Where | What | Survives |
 |-------|-------|------|----------|
 | **A+ (primary)** | pi-goal-xx `makeAuditorResourceLoader` | Exclude any inherited extension whose **source contains `process.exit(`**. Content-scan, not a static name list → self-maintaining. | "new process.exit extension added to pi-plugins later" |
