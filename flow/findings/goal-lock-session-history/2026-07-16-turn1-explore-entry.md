@@ -21,8 +21,6 @@
 
 ## [assistant]
 
-Investigated `extensions/goal-lock.ts` and grep'd for `acquireLock`/`releaseLock`/`GoalFocusLock`/`LockOwner`/`readLock(`/`refreshLease` usage across `extensions/`. Found callers in `goal.ts` and `goal-pool.ts`.
-
 ### Current state
 
 `extensions/goal-lock.ts` — **exclusive lease mutex** per goal. One JSON sidecar `<cwd>/.pi/goals/.locks/<goalId>.lock`:
