@@ -158,10 +158,14 @@ describe("status-refresh timer — stale-ctx catch handler integration", () => {
 			assert.ok((pi.ui as any).statusSet.length > 0, "status refresh path did not run");
 
 			// Simulate the ctx going stale: its `.cwd` getter now throws, exactly
-			// like runner.assertActive() does after session replacement.
+			// like runner.assertActive() does after session replacement. Count reads
+			// so we can PROVE the interval callback actually fired (a fixed sleep
+			// could expire before the tick under load, passing vacuously).
+			let staleCwdReads = 0;
 			Object.defineProperty(ctx, "cwd", {
 				configurable: true,
 				get() {
+					staleCwdReads++;
 					throw new Error("stale ctx: assertActive failed");
 				},
 			});
@@ -175,9 +179,14 @@ describe("status-refresh timer — stale-ctx catch handler integration", () => {
 			};
 			process.once("uncaughtException", onUncaught);
 
-			// STATUS_REFRESH_MS is 1000ms. Wait past one tick so the interval
-			// callback fires with the now-throwing ctx.
-			await new Promise((resolve) => setTimeout(resolve, 1150));
+			// STATUS_REFRESH_MS is 1000ms. Poll until the interval actually reads the
+			// throwing getter (proving the catch path was exercised), with a deadline
+			// so the test fails fast instead of hanging if the timer never fires.
+			const deadline = Date.now() + 2_000;
+			while (staleCwdReads === 0 && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			assert.ok(staleCwdReads > 0, "status-refresh interval did not fire / did not read the stale ctx");
 
 			process.removeListener("uncaughtException", onUncaught);
 
