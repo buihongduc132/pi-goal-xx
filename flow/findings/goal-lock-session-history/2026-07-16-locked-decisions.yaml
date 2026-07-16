@@ -1,0 +1,163 @@
+# Locked decisions for goal-lock-session-history explore.
+# Derived from explicit user steer in turn 2 (constraint-driven) and gotcha-coverage
+# in turn2a (same-file coupling invalidates the constraint-driven choice), and
+# teams-workflow gotcha resolution on 2026-07-16 (solutions/ dir).
+
+- id: LD1
+  turn: turn2
+  parts: ["Why A is the right call now"]
+  user_quote: |
+    "give me least resistance while durable , reliable approach for me ;"
+  decision: |
+    File layout = Option A (extend GoalFocusLock in the same `.lock` file). Same-file
+    `sessions?: Array<{ sessionId, lastWorkedAt }>` rides on existing lease write path.
+  status: superseded
+  superseded_by: LD3
+  basis: constraint-driven
+  rationale: |
+    Initial lean based on diff size and least resistance. Superseded by gotcha-coverage
+    G5.1/G5.3/G5.2: same-file couples the history to an ephemeral mutex, causing
+    history loss on reap/release and torn-write double-failure. The user's "durable +
+    reliable" constraint overrides the "least resistance" preference.
+
+- id: LD2
+  turn: turn2
+  user_quote: |
+    "No tools calls , just need to know like \"whom working on this\" to easily resume it later"
+  decision: |
+    Semantics of "worked on" = ever-held-the-lease. Mutation only at lease lifecycle
+    points (acquireLock, refreshLease, releaseLock). NO per-tool-call writes.
+  status: locked
+  basis: constraint-driven
+  rationale: |
+    User explicitly excluded tool-call-driven writes. Still locked. Applies to the new
+    separate sidecar file as well: only the current holder writes the history array at
+    acquire/heartbeat/release.
+
+- id: LD3
+  turn: turn2a
+  parts: ["Findings (ranked)", "Rank 5 (Sophisticated)"]
+  user_quote: "(auto-decided by gotcha-coverage, no explicit user lock)"
+  decision: |
+    File layout = Option B (separate `.locks/<goalId>.sessions.json` sidecar). The
+    cumulative session history must NOT share a file with the ephemeral lease mutex.
+  status: locked
+  basis: gotcha-coverage
+  rationale: |
+    G5.1: stale-lock reap deletes the `.lock` file and would wipe all session history.
+    G5.3: history bound to lease lifecycle degenerates to "who currently holds it."
+    G5.2: torn write on a shared file destroys both mutex and history. A separate
+    file gives the history its own durability boundary, own atomic write path, and
+    survives normal releaseLock and reaper operations.
+  supersedes: LD1
+  reinforced_by: LD8
+  caveat: |
+    Devil's-advocate review (solutions/devils-advocate-LD3-LD5.md) confirmed the flip
+    is correct BUT underspecified: LD3 alone does NOT encode "reap must not touch
+    sidecar" — that invariant is now made explicit in LD8. Without LD8, the invariant
+    is implicit and a future contributor could re-introduce G5.1.
+
+- id: LD4
+  turn: turn2a
+  parts: ["Rank 3 (Moderate)", "G3.2"]
+  user_quote: "(auto-decided by gotcha-coverage, no explicit user lock)"
+  decision: |
+    Array writes use UPSERT by sessionId, not blind append. No duplicate entries when
+    a session loses and re-acquires a lease.
+  status: locked
+  basis: gotcha-coverage
+  rationale: |
+    Blind append under re-acquire churn produces duplicate rows and corrupts any
+    "count of sessions" / "most recent unique session" consumer. Upsert is the minimal
+    correct semantics for the described "array of sessions, last time each worked".
+  verified_by: solutions/G3.1-G2.x-enforcement-and-schema.md
+  verification_note: |
+    enforcement-designer confirmed safe to key on sessionId alone — SELF_SESSION_ID
+    is crypto.randomUUID() (UUID v4, ~10^-37 collision), so the {sessionId, pid,
+    startTimeMs} tuple fallback proposed in G2.1 is unnecessary. Add defensive
+    UUID-format assertion at module load to guard against future regression.
+
+- id: LD5
+  turn: turn2a
+  parts: ["Rank 4 (Significant)", "G4.3"]
+  user_quote: "(auto-decided by gotcha-coverage, no explicit user lock)"
+  decision: |
+    `lastWorkedAt` for a session is frozen at release time; the current owner is NOT
+    duplicated in the history array. The canonical "current holder" is the lease's
+    `owner` field; the history array contains only non-current (released) sessions.
+  status: locked
+  basis: gotcha-coverage
+  rationale: |
+    Including current owner duplicates `owner.heartbeatAt` and creates two sources of
+    truth for "who is active now." Keeping current owner out of the array means no
+    dedup drift, no redundancy desync, and no special case for "is this entry still
+    active?" when reading history.
+  verified_by: solutions/devils-advocate-LD3-LD5.md
+  nuance: |
+    While active, the sidecar shows the PRIOR tenure's end-time (if session held
+    before, released, re-acquired), not the current. Current hold = `.lock.heartbeatAt`.
+    On release, the now-former owner is added/frozen into the array. Document this or
+    readers will see "stale" entries for the active session.
+
+# New decisions from teams-workflow gotcha resolution (2026-07-16):
+
+- id: LD6
+  turn: solutions/devils-advocate-LD3-LD5.md
+  parts: ["Challenge 1 — Orphan sidecar cleanup"]
+  user_quote: "(auto-decided by teams gotcha resolution, no explicit user lock)"
+  decision: |
+    `reapOrphanedLocks` MUST reap BOTH `.lock` AND `.sessions.json` for goalIds not
+    in the active set. Extend the extension-suffix check to a list, OR migrate to a
+    per-goal subdir model `.locks/<goalId>/{lease.lock, history.json}` (preferred
+    long-term).
+  status: locked
+  basis: gotcha-coverage
+  rationale: |
+    Without LD6, every retired goal leaves a permanent `.sessions.json` corpse.
+    `reapOrphanedLocks` was the self-cleaning safety net for `.lock`; the sidecar has
+    no equivalent. The "personal agent, handful of goals" mitigation does NOT apply
+    — this is per-retired-goal, not per-active-goal. Slow invisible leak → Rank 4
+    severity if unfixed.
+
+- id: LD7
+  turn: solutions/devils-advocate-LD3-LD5.md
+  parts: ["Challenge 3 — Crash handoff A->B"]
+  user_quote: "(auto-decided by teams gotcha resolution, no explicit user lock)"
+  decision: |
+    `acquireLock` (or a wrapper) MUST read `.sessions.json` BEFORE writing; upserts
+    self into the EXISTING array; NEVER constructs a fresh array when a sidecar
+    exists. Empty/no-file is the only legitimate "fresh start."
+  status: locked
+  basis: gotcha-coverage
+  rationale: |
+    Without LD7, if B's first action on acquire is to OVERWRITE the sidecar with
+    `[B]` (fresh array), A's history is wiped — G5.3 returns in a new form ("history
+    = current lease only"). The acquire-read-sidecar rule preserves cross-session
+    history on lease transfer. Residual: A's final heartbeat (≤60s before crash) is
+    lost; acceptable for advisory resume use case.
+  note_on_conflict: |
+    rmw-architect proposed acquireLock writes history on acquire; enforcement-designer
+    said acquire does NOT write (owner excluded). Resolution: acquire READS the
+    sidecar (LD7) to preserve prior sessions; whether it also WRITES depends on LD5
+    timing. Per LD5 + LD7, acquire does NOT add self to the array (owner excluded
+    while active); self is added on release. Both workers' designs are compatible
+    once acquire's role is "read-merge-write-without-self" vs "fresh array".
+
+- id: LD8
+  turn: solutions/devils-advocate-LD3-LD5.md
+  parts: ["Challenge 4 — NB2 Reap-scope fragility", "NB3 releaseLock ordering"]
+  user_quote: "(auto-decided by teams gotcha resolution, no explicit user lock)"
+  decision: |
+    EXPLICIT invariants:
+    (a) `reapStaleLock` / `reapOrphanedLocks` MUST NEVER read/write/delete
+        `.sessions.json` (except LD6's deliberate reap-on-deactivation). This is
+        load-bearing for G5.1's resolution.
+    (b) `releaseLock` writes self to sidecar BEFORE unlinking `.lock`. Order matters.
+  status: locked
+  basis: gotcha-coverage
+  rationale: |
+    G5.1 was resolved by accident (reap matches `.endsWith('.lock')`, ignores sidecar).
+    Without LD8(a), a future contributor adding "clean up associated sidecar on reap"
+    would re-introduce G5.1. The invariant must be visible (comment + test).
+    LD8(b) prevents releaseLock from crashing between unlink and sidecar-write and
+    losing the releasing session's final entry.

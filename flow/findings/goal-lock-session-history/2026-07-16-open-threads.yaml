@@ -1,0 +1,86 @@
+status: closed
+threads:
+  - id: OT1
+    topic: Owner dedup direction — `sessions` array includes current owner, or array = previous-owners-only?
+    raised_in: turn1
+    status: resolved
+    resolved_in: turn2a
+    resolution: |
+      Array = previous-owners-only. Current owner stays in the lease `owner` field only;
+      the history array is frozen-at-release for non-current sessions. Resolves G4.2 and
+      G4.3 desync hazards. See LD5. Verified by devil's-advocate review.
+
+  - id: OT2
+    topic: Array growth cap policy — unbounded vs soft cap (last N sessions).
+    raised_in: turn1
+    status: resolved
+    resolved_in: turn2a
+    resolution: |
+      Growth concern misdirected under same-file; under separate-file (LD3), growth is
+      real but bounded by LD6 (orphan reap). Soft cap (last N, suggested N=20) is a
+      follow-up task, not a blocker. G1.1 noted the worry was backwards in the original
+      same-file context.
+
+  - id: OT3
+    topic: Where to display `sessions` history — /goal-list, goal widget, trace?
+    raised_in: turn1
+    status: deferred
+    resolution: |
+      UX follow-up. Deferred to implementation: the data surface is independent of the
+      storage decision (LD3). Implementation task should add at minimum a display in
+      /goal-list ("previously: A 2h ago, B 10m ago") so the resume use case is usable.
+
+  - id: OT4
+    topic: releaseLock must NOT delete history when releasing the lease.
+    raised_in: turn2a
+    status: resolved
+    resolved_in: turn2b
+    resolution: |
+      Resolved by LD3 (separate sidecar) + LD8(b) (explicit ordering). releaseLock
+      writes self to sidecar BEFORE unlinking `.lock`. Sidecar untouched by release
+      semantics otherwise.
+
+  - id: OT5
+    topic: Atomic write + fsync for the history sidecar (G5.2 mitigation).
+    raised_in: turn2a
+    status: resolved
+    resolved_in: turn2b
+    resolution: |
+      Resolved by rmw-architect: `writeSessionsAtomic` = tmp → fsync(tmp) → rename →
+      fsync(dir). `final` never torn at any crash point. Fail-open on fsync error.
+
+  - id: OT6
+    topic: Schema version field for lock and history files (G3.4 mitigation).
+    raised_in: turn2a
+    status: resolved
+    resolved_in: turn2b
+    resolution: |
+      Add `version: 1` to both `.lock` and `.sessions.json`. New readers default missing
+      fields to `[]`. Writers preserve unknown fields for forward-compat.
+
+  - id: OT7
+    topic: Orphan sidecar cleanup (dead-goal .sessions.json accumulation).
+    raised_in: turn2b
+    status: resolved
+    resolved_in: turn2b
+    resolution: |
+      Resolved by LD6. `reapOrphanedLocks` extended to reap both `.lock` AND
+      `.sessions.json` for inactive goals. Rank 4 leak if unfixed.
+
+  - id: OT8
+    topic: acquireLock must read sidecar to preserve cross-session history on lease transfer.
+    raised_in: turn2b
+    status: resolved
+    resolved_in: turn2b
+    resolution: |
+      Resolved by LD7. acquireLock reads sidecar, upserts into existing array (not self,
+      per LD5), never constructs fresh array when sidecar exists.
+
+  - id: OT9
+    topic: Explicit invariant that reap never touches sidecar (LD8a) + releaseLock ordering (LD8b).
+    raised_in: turn2b
+    status: resolved
+    resolved_in: turn2b
+    resolution: |
+      Resolved by LD8. Comment + test required. The reap-doesn't-touch-sidecar rule
+      is load-bearing for G5.1's resolution — was implicit, now explicit.
