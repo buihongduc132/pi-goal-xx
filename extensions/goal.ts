@@ -200,6 +200,20 @@ const GOAL_PROGRESS_TOOL_SET = new Set<string>(GOAL_PROGRESS_TOOL_NAMES);
 const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
 
 /**
+ * Resolve the cwd to use when the status-refresh timer must bail out of a
+ * stale ctx. NEVER read the captured ctx's `.cwd` getter here — on a stale
+ * ctx that getter calls runner.assertActive() and throws, re-throwing inside
+ * the catch handler and crashing the host. Use the cached cwd instead.
+ *
+ * Extracted as a pure, exported helper so the catch handler's stale-cwd
+ * resolution is unit-testable in isolation (the timer closure itself is not
+ * exported).
+ */
+export function resolveStaleRefreshCwd(cachedCwd: string | null): string {
+	return cachedCwd ?? process.cwd();
+}
+
+/**
  * When non-null, /goal-tweak drafting is in progress for this goal id and the
  * agent is allowed to call propose_goal_tweak. Cleared after the tweak is applied
  * or when a user-driven turn arrives without a tweak follow-through. This is
@@ -773,9 +787,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			} catch (err) {
 				// ctx may be stale after session replacement / reload — the captured
 				// statusRefreshCtx's .ui getter calls assertActive() which throws once
-			// the session is replaced. Stop the timer and log; NEVER let a stale-ctx
+				// the session is replaced. Stop the timer and log; NEVER let a stale-ctx
 				// throw escape a timer callback (that crashes the host process).
-				const _staleCwd = statusRefreshCtx?.cwd ?? cachedCwd ?? process.cwd();
+				//
+				// Do NOT read statusRefreshCtx?.cwd here — its getter also calls
+				// assertActive() and would re-throw INSIDE this catch, escaping the
+				// timer and crashing the host. Use the cached cwd instead.
+				const _staleCwd = resolveStaleRefreshCwd(cachedCwd);
 				stopStatusRefresh();
 				logGoalTrace(_staleCwd, { level: "warn", step: "statusRefresh.stopped_stale_ctx", message: "status refresh timer stopped (ctx likely stale)", error: err instanceof Error ? err.message : String(err) });
 			}
