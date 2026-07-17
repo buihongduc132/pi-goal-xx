@@ -53,63 +53,10 @@ export function validateGoalUpdate(args: {
 	return { ok: true };
 }
 
-export function validateGoalAbort(args: {
-	goal: GoalPolicyRecordLike | null;
-	runningGoalId?: string | null;
-	reason: string;
-}): PolicyValidation {
-	const { goal, runningGoalId } = args;
-	if (!goal) return { ok: false, message: "No goal is set; abort_goal is a no-op." };
-	if (runningGoalId && goal.id !== runningGoalId) return { ok: false, message: "The active goal changed during this run; not aborting." };
-	if (goal.status === "complete") return { ok: false, message: "Goal is complete; abort_goal does not apply." };
-	if (!args.reason.trim()) return { ok: false, message: "abort_goal requires a non-empty reason." };
-	return { ok: true };
-}
-
-export function validatePauseGoal(args: {
-	goal: GoalPolicyRecordLike | null;
-	runningGoalId?: string | null;
-	reason: string;
-}): PolicyValidation {
-	const { goal, runningGoalId } = args;
-	if (!goal) return { ok: false, message: "No goal is set; pause_goal is a no-op." };
-	if (runningGoalId && goal.id !== runningGoalId) return { ok: false, message: "The active goal changed during this run; not pausing." };
-	if (!isRunnableStatus(goal.status)) return { ok: false, message: `Goal is ${statusLabel(goal)}; pause_goal does not apply.` };
-	if (!args.reason.trim()) return { ok: false, message: "pause_goal requires a non-empty reason." };
-	return { ok: true };
-}
-
-export function buildPausedByAgentGoal<T extends GoalPolicyRecordLike>(goal: T, args: {
-	reason: string;
-	suggestedAction?: string;
-	updatedAt: string;
-}): T {
-	const suggested = args.suggestedAction?.trim() || undefined;
-	return {
-		...goal,
-		status: "paused",
-		autoContinue: false,
-		stopReason: "agent",
-		pauseReason: args.reason.trim(),
-		pauseSuggestedAction: suggested,
-		updatedAt: args.updatedAt,
-	};
-}
-
-export function buildAbortedByAgentGoal<T extends GoalPolicyRecordLike>(goal: T, args: {
-	reason: string;
-	updatedAt: string;
-}): T {
-	return {
-		...goal,
-		status: "paused",
-		autoContinue: false,
-		stopReason: "agent",
-		pauseReason: `Aborted: ${args.reason.trim()}`,
-		pauseSuggestedAction: undefined,
-		updatedAt: args.updatedAt,
-	};
-}
+// Agent-side pause/abort tools were removed from this fork. User-driven
+// pause/abort remain via slash commands (/goal-pause, /goal-abort). The
+// agent signals completion via complete_goal; blockers go in the agent's
+// final message.
 
 export function validateResumeGoal(goal: GoalPolicyRecordLike | null): PolicyValidation {
 	if (!goal) return { ok: false, message: "No goal is set. Use /goals or /sisyphus to discuss, or /goals-set / /sisyphus-set to start immediately." };

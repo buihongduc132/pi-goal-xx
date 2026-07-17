@@ -97,15 +97,15 @@ describe("parseGoalSettings — additionalProperties:false", () => {
 	});
 });
 
-describe("parseGoalSettings — disabledTools (NEW FEATURE)", () => {
+		describe("parseGoalSettings — disabledTools (NEW FEATURE)", () => {
 	it("parses string array", () => {
-		const s = parseGoalSettings({ disabledTools: ["goal_question", "pause_goal"] });
-		assert.deepEqual(s.disabledTools, ["goal_question", "pause_goal"]);
+		const s = parseGoalSettings({ disabledTools: ["complete_goal", "create_goal"] });
+		assert.deepEqual(s.disabledTools, ["complete_goal", "create_goal"]);
 	});
 
 	it("parses comma-separated string", () => {
-		const s = parseGoalSettings({ disabledTools: "goal_question, pause_goal" });
-		assert.deepEqual(s.disabledTools, ["goal_question", "pause_goal"]);
+		const s = parseGoalSettings({ disabledTools: "complete_goal, create_goal" });
+		assert.deepEqual(s.disabledTools, ["complete_goal", "create_goal"]);
 	});
 
 	it("parses whitespace-separated string", () => {
