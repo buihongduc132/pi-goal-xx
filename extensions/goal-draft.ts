@@ -1,6 +1,7 @@
 import type { GoalTask } from "./goal-record.ts";
 import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
 import type { GoalSettings } from "./goal-settings.ts";
+import { askUserInstruction } from "./prompts/tool-instruction-parts.ts";
 import { expandContractTemplates } from "./contract-templating.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
@@ -231,14 +232,13 @@ export function validateGoalDraftProposal(input: DraftProposalInput): DraftPropo
 export function goalDraftingPrompt(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
 	const overrideBody = resolveGoalDraftingOverride(settings, cwd);
 	if (overrideBody) return overrideBody;
-	return goalDraftingPromptBase(topic, focus) + resolveGoalDraftingBlock(settings, cwd);
+	return goalDraftingPromptBase(topic, focus, settings, cwd) + resolveGoalDraftingBlock(settings, cwd);
 }
 
 function resolveGoalDraftingOverride(settings: GoalSettings | undefined, cwd: string | undefined): string | undefined {
-	if (!settings?.prompts) return undefined;
-	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
+	const cfg = (settings?.prompts as Record<string, PromptConfig> | undefined)?.["goal-drafting"];
 	if (!cfg || cfg.mode !== "override") return undefined;
-	const resolved = resolvePrompt("goal-drafting", cfg, cwd ?? ".", "", { promptsDir: settings.promptsDir });
+	const resolved = resolvePrompt("goal-drafting", cfg, cwd ?? ".", "", { promptsDir: settings?.promptsDir });
 	return resolved.source === "none" ? undefined : resolved.final;
 }
 
@@ -251,7 +251,20 @@ export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd
 	return `\n[PI GOAL CUSTOM PROMPT key=goal-drafting source=${resolved.source}]\n<goal_custom_prompt>\n${resolved.injected}\n</goal_custom_prompt>`;
 }
 
-function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus): string {
+/**
+ * Synthesize the goalDraftingPrompt ask-tool clause (G4). The plain-conversation
+ * clause is ALWAYS emitted; the tool clause is suppressed when both ask-tools
+ * are disabled, or references the available tool when only one is disabled.
+ */
+function draftingAskLine(settings?: GoalSettings, cwd?: string): string {
+	const askText = askUserInstruction(settings, cwd);
+	if (askText) {
+		return `- If the topic is vague, ask one focused question with a recommended default. ${askText} Plain conversation is acceptable for simple clarifications.`;
+	}
+	return "- If the topic is vague, ask one focused question with a recommended default. Plain conversation is acceptable for simple clarifications.";
+}
+
+function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
 	const safeTopic = promptSafeObjective(topic.trim() || "(no topic provided — ask the user what they want to accomplish)");
 	const header = focus === "sisyphus"
 		? "[GOAL CONFIRMATION focus=sisyphus]\nThe user invoked Sisyphus intent discussion (/sisyphus). Help turn their request into a confirmed goal contract. Do NOT start substantive work yet."
@@ -260,7 +273,7 @@ function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus): string
 	const commonProtocol = [
 		"Confirmation protocol:",
 		"- Treat this as a lightweight conversation with the user, not a separate long-running runtime phase.",
-		"- If the topic is vague, ask one focused question with a recommended default. Use goal_question or goal_questionnaire when a structured answer would help, but plain conversation is acceptable.",
+		draftingAskLine(settings, cwd),
 		"- Targeted read-only research is allowed when it helps define a better goal contract; do not start implementation before confirmation.",
 		"- If the topic is already concrete, you may proceed directly to propose_goal_draft.",
 		"- The goal contract should make the objective, success criteria, boundaries, constraints, and blocker rule explicit.",

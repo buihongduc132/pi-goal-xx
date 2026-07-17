@@ -10,6 +10,7 @@ import {
 	type GoalSettings,
 	type AuditorSubscription,
 } from "../extensions/goal-settings.ts";
+import { isolatedSettingsEnv } from "./_test-helpers.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -219,14 +220,14 @@ describe("goalSettingsPath", () => {
 describe("loadGoalSettingsFileConfig", () => {
 	it("returns {} when file missing", () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-"));
-		assert.deepEqual(loadGoalSettingsFileConfig(tmp, {}), {});
+		assert.deepEqual(loadGoalSettingsFileConfig(tmp, isolatedSettingsEnv()), {});
 	});
 
 	it("returns {} for malformed JSON", () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-"));
 		fs.mkdirSync(path.join(tmp, ".pi"), { recursive: true });
 		fs.writeFileSync(path.join(tmp, ".pi", "pi-goal-xx-settings.json"), "{ not json");
-		assert.deepEqual(loadGoalSettingsFileConfig(tmp, {}), {});
+		assert.deepEqual(loadGoalSettingsFileConfig(tmp, isolatedSettingsEnv()), {});
 	});
 
 	it("loads valid file", () => {

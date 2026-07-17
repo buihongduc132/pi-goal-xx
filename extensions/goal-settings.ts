@@ -27,6 +27,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import type { PromptConfig, PromptMode } from "./prompt-resolver.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -110,6 +111,14 @@ export interface GoalSettings {
 	prompts?: Record<string, PromptConfig>;
 	/** UNIFIED: override the prompts directory (default `.pi/pi-goal-xx/prompts/`). */
 	promptsDir?: string;
+	/**
+	 * UNIFIED: per-tool-instruction replacement config (keyed by tool name).
+	 * Only consulted when the tool is in `disabledTools`. The default instruction
+	 * for a disabled tool is suppressed; this provides a replacement via
+	 * `resolvePrompt("tool-instruction-<name>", cfg, ...)`. See
+	 * openspec/changes/add-prompt-tool-instruction-config/.
+	 */
+	toolInstructions?: Record<string, PromptConfig>;
 	/** UNIFIED: per-command pre/post/override hooks. Default off. */
 	commandHooks?: CommandHooksConfig;
 	/** UNIFIED: override the hooks directory (default `.pi/pi-goal-xx/hooks/`). */
@@ -180,6 +189,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"heartbeatMs",
 	"prompts",
 	"promptsDir",
+	"toolInstructions",
 	"commandHooks",
 	"hooksDir",
 	"contractTemplates",
@@ -267,6 +277,25 @@ function asPromptsBlock(raw: unknown): Record<string, PromptConfig> | undefined 
 	return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * Validate + coerce the `toolInstructions` block.
+ * Each entry is a tool name → PromptConfig. Unlike `prompts`, tool keys are
+ * NOT enumerated (any non-empty string accepted — future-proof). Each entry
+ * is validated via asPromptConfig with the nested-key check.
+ * Returns undefined for empty input.
+ */
+function asToolInstructionsBlock(raw: unknown): Record<string, PromptConfig> | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const out: Record<string, PromptConfig> = {};
+	for (const [key, val] of Object.entries(rec)) {
+		if (!key) continue;
+		const cfg = asPromptConfig(`toolInstructions.${key}`, val);
+		if (cfg) out[key] = cfg;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
 const LOGGING_LEVELS = new Set(["off", "error", "warn", "info", "debug"]);
 
 /** Validate + coerce the logging block. Throws on unknown nested keys / invalid level. */
@@ -348,6 +377,19 @@ export function goalSettingsPath(cwd: string, env: NodeJS.ProcessEnv = process.e
 		return path.isAbsolute(override) ? override : path.join(cwd, override);
 	}
 	return path.join(cwd, ".pi", "pi-goal-xx-settings.json");
+}
+
+/**
+ * Resolve the path to the GLOBAL settings file.
+ * If PI_CODING_AGENT_DIR is set → dirname(agentDir) + "/pi-goal-xx-settings.json".
+ * Otherwise → ~/.pi/pi-goal-xx-settings.json.
+ */
+export function globalGoalSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
+	const agentDir = asNonEmptyString(env.PI_CODING_AGENT_DIR);
+	if (agentDir) {
+		return path.join(path.dirname(agentDir), "pi-goal-xx-settings.json");
+	}
+	return path.join(os.homedir(), ".pi", "pi-goal-xx-settings.json");
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -503,6 +545,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (goalPrompt) settings.goalPrompt = goalPrompt;
 	const prompts = asPromptsBlock(record.prompts);
 	if (prompts) settings.prompts = prompts;
+	const toolInstructions = asToolInstructionsBlock(record.toolInstructions);
+	if (toolInstructions) settings.toolInstructions = toolInstructions;
 	const promptsDir = asNonEmptyString(record.promptsDir);
 	if (promptsDir) settings.promptsDir = promptsDir;
 	const commandHooks = asCommandHooksBlock(record.commandHooks);
@@ -546,15 +590,42 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 
 /**
  * Load settings from the file on disk. Returns {} if file missing or invalid.
+ * Merges global (base) + project-local (overlay) per-key.
  */
 export function loadGoalSettingsFileConfig(cwd: string, env?: NodeJS.ProcessEnv): GoalSettings {
+	const resolvedEnv = env ?? process.env;
+	let globalConfig: GoalSettings = {};
 	try {
-		const configPath = goalSettingsPath(cwd, env);
-		if (fs.existsSync(configPath)) return parseGoalSettings(JSON.parse(fs.readFileSync(configPath, "utf8")));
+		const globalPath = globalGoalSettingsPath(resolvedEnv);
+		if (fs.existsSync(globalPath)) {
+			globalConfig = parseGoalSettings(JSON.parse(fs.readFileSync(globalPath, "utf8")));
+		}
+	} catch {
+		// global file missing, malformed JSON, etc. — use defaults
+	}
+	let localConfig: GoalSettings = {};
+	try {
+		const configPath = goalSettingsPath(cwd, resolvedEnv);
+		if (fs.existsSync(configPath)) {
+			localConfig = parseGoalSettings(JSON.parse(fs.readFileSync(configPath, "utf8")));
+		}
 	} catch {
 		// file missing, malformed JSON, etc. — use defaults
 	}
-	return {};
+	return mergeSettings(globalConfig, localConfig);
+}
+
+/** Merge two GoalSettings: local wins per-key over global (shallow overlay). */
+function mergeSettings(global: GoalSettings, local: GoalSettings): GoalSettings {
+	const result: GoalSettings = {};
+	const keys = new Set([...Object.keys(global), ...Object.keys(local)]) as Set<keyof GoalSettings>;
+	for (const key of keys) {
+		const val = local[key] ?? global[key];
+		if (val !== undefined) {
+			(result as Record<string, unknown>)[key as string] = val;
+		}
+	}
+	return result;
 }
 
 /**
@@ -585,7 +656,7 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		heartbeatMs: fileConfig.heartbeatMs ?? 60_000,
 		prompts: fileConfig.prompts,
 		promptsDir: fileConfig.promptsDir,
-		commandHooks: fileConfig.commandHooks,
+		toolInstructions: fileConfig.toolInstructions,
 		hooksDir: fileConfig.hooksDir,
 		contractTemplates: asBool(env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES) === true
 			? false
@@ -668,6 +739,10 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (goalPrompt) clean.goalPrompt = goalPrompt;
 	if (settings.prompts) clean.prompts = settings.prompts;
 	if (settings.promptsDir) clean.promptsDir = settings.promptsDir;
+	if (settings.toolInstructions) {
+		const tiClean = asToolInstructionsBlock(settings.toolInstructions);
+		if (tiClean) clean.toolInstructions = tiClean;
+	}
 	if (settings.commandHooks) clean.commandHooks = settings.commandHooks;
 	if (settings.hooksDir) clean.hooksDir = settings.hooksDir;
 	if (settings.contractTemplates === false) clean.contractTemplates = false;
@@ -699,6 +774,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.goalPrompt) persisted.goalPrompt = clean.goalPrompt;
 	if (clean.prompts) persisted.prompts = clean.prompts;
 	if (clean.promptsDir) persisted.promptsDir = clean.promptsDir;
+	if (clean.toolInstructions) persisted.toolInstructions = clean.toolInstructions;
 	if (clean.commandHooks) persisted.commandHooks = clean.commandHooks;
 	if (clean.hooksDir) persisted.hooksDir = clean.hooksDir;
 	if (clean.contractTemplates === false) persisted.contractTemplates = false;

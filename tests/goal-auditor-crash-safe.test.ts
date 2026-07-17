@@ -16,6 +16,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { runGoalCompletionAuditor } from "../extensions/goal-auditor.ts";
 import { loadGoalSettings } from "../extensions/goal-settings.ts";
+import { isolatedSettingsEnv } from "./_test-helpers.ts";
 import type { GoalRecord } from "../extensions/goal-record.ts";
 
 function makeGoal(over: Partial<GoalRecord> = {}): GoalRecord {
@@ -137,7 +138,7 @@ describe("Bug 1a — auditor timeout (R2.1-R2.6)", () => {
 
 	it("R2.2: default 300000ms timeout when auditorTimeoutMs not set", async () => {
 		// Verify default is loaded from config when setting absent
-		const settings = loadGoalSettings(cwd);
+		const settings = loadGoalSettings(cwd, isolatedSettingsEnv());
 		assert.equal(settings.auditorTimeoutMs, undefined);
 		// We can't wait 5 minutes, but verify the value is used internally
 		// by checking a short timeout works
