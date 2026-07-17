@@ -111,6 +111,14 @@ export interface GoalSettings {
 	prompts?: Record<string, PromptConfig>;
 	/** UNIFIED: override the prompts directory (default `.pi/pi-goal-xx/prompts/`). */
 	promptsDir?: string;
+	/**
+	 * UNIFIED: per-tool-instruction replacement config (keyed by tool name).
+	 * Only consulted when the tool is in `disabledTools`. The default instruction
+	 * for a disabled tool is suppressed; this provides a replacement via
+	 * `resolvePrompt("tool-instruction-<name>", cfg, ...)`. See
+	 * openspec/changes/add-prompt-tool-instruction-config/.
+	 */
+	toolInstructions?: Record<string, PromptConfig>;
 	/** UNIFIED: per-command pre/post/override hooks. Default off. */
 	commandHooks?: CommandHooksConfig;
 	/** UNIFIED: override the hooks directory (default `.pi/pi-goal-xx/hooks/`). */
@@ -181,6 +189,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"heartbeatMs",
 	"prompts",
 	"promptsDir",
+	"toolInstructions",
 	"commandHooks",
 	"hooksDir",
 	"contractTemplates",
@@ -263,6 +272,25 @@ function asPromptsBlock(raw: unknown): Record<string, PromptConfig> | undefined 
 			throw new Error(`Unknown prompt key: ${key}`);
 		}
 		const cfg = asPromptConfig(key, val);
+		if (cfg) out[key] = cfg;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Validate + coerce the `toolInstructions` block.
+ * Each entry is a tool name → PromptConfig. Unlike `prompts`, tool keys are
+ * NOT enumerated (any non-empty string accepted — future-proof). Each entry
+ * is validated via asPromptConfig with the nested-key check.
+ * Returns undefined for empty input.
+ */
+function asToolInstructionsBlock(raw: unknown): Record<string, PromptConfig> | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const out: Record<string, PromptConfig> = {};
+	for (const [key, val] of Object.entries(rec)) {
+		if (!key) continue;
+		const cfg = asPromptConfig(`toolInstructions.${key}`, val);
 		if (cfg) out[key] = cfg;
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
@@ -517,6 +545,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (goalPrompt) settings.goalPrompt = goalPrompt;
 	const prompts = asPromptsBlock(record.prompts);
 	if (prompts) settings.prompts = prompts;
+	const toolInstructions = asToolInstructionsBlock(record.toolInstructions);
+	if (toolInstructions) settings.toolInstructions = toolInstructions;
 	const promptsDir = asNonEmptyString(record.promptsDir);
 	if (promptsDir) settings.promptsDir = promptsDir;
 	const commandHooks = asCommandHooksBlock(record.commandHooks);
@@ -626,7 +656,7 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		heartbeatMs: fileConfig.heartbeatMs ?? 60_000,
 		prompts: fileConfig.prompts,
 		promptsDir: fileConfig.promptsDir,
-		commandHooks: fileConfig.commandHooks,
+		toolInstructions: fileConfig.toolInstructions,
 		hooksDir: fileConfig.hooksDir,
 		contractTemplates: asBool(env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES) === true
 			? false
@@ -709,6 +739,10 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (goalPrompt) clean.goalPrompt = goalPrompt;
 	if (settings.prompts) clean.prompts = settings.prompts;
 	if (settings.promptsDir) clean.promptsDir = settings.promptsDir;
+	if (settings.toolInstructions) {
+		const tiClean = asToolInstructionsBlock(settings.toolInstructions);
+		if (tiClean) clean.toolInstructions = tiClean;
+	}
 	if (settings.commandHooks) clean.commandHooks = settings.commandHooks;
 	if (settings.hooksDir) clean.hooksDir = settings.hooksDir;
 	if (settings.contractTemplates === false) clean.contractTemplates = false;
@@ -740,6 +774,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.goalPrompt) persisted.goalPrompt = clean.goalPrompt;
 	if (clean.prompts) persisted.prompts = clean.prompts;
 	if (clean.promptsDir) persisted.promptsDir = clean.promptsDir;
+	if (clean.toolInstructions) persisted.toolInstructions = clean.toolInstructions;
 	if (clean.commandHooks) persisted.commandHooks = clean.commandHooks;
 	if (clean.hooksDir) persisted.hooksDir = clean.hooksDir;
 	if (clean.contractTemplates === false) persisted.contractTemplates = false;
