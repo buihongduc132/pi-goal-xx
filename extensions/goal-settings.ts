@@ -27,6 +27,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import type { PromptConfig, PromptMode } from "./prompt-resolver.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -350,6 +351,19 @@ export function goalSettingsPath(cwd: string, env: NodeJS.ProcessEnv = process.e
 	return path.join(cwd, ".pi", "pi-goal-xx-settings.json");
 }
 
+/**
+ * Resolve the path to the GLOBAL settings file.
+ * If PI_CODING_AGENT_DIR is set → dirname(agentDir) + "/pi-goal-xx-settings.json".
+ * Otherwise → ~/.pi/pi-goal-xx-settings.json.
+ */
+export function globalGoalSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
+	const agentDir = asNonEmptyString(env.PI_CODING_AGENT_DIR);
+	if (agentDir) {
+		return path.join(path.dirname(agentDir), "pi-goal-xx-settings.json");
+	}
+	return path.join(os.homedir(), ".pi", "pi-goal-xx-settings.json");
+}
+
 function asNonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -546,15 +560,42 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 
 /**
  * Load settings from the file on disk. Returns {} if file missing or invalid.
+ * Merges global (base) + project-local (overlay) per-key.
  */
 export function loadGoalSettingsFileConfig(cwd: string, env?: NodeJS.ProcessEnv): GoalSettings {
+	const resolvedEnv = env ?? process.env;
+	let globalConfig: GoalSettings = {};
 	try {
-		const configPath = goalSettingsPath(cwd, env);
-		if (fs.existsSync(configPath)) return parseGoalSettings(JSON.parse(fs.readFileSync(configPath, "utf8")));
+		const globalPath = globalGoalSettingsPath(resolvedEnv);
+		if (fs.existsSync(globalPath)) {
+			globalConfig = parseGoalSettings(JSON.parse(fs.readFileSync(globalPath, "utf8")));
+		}
+	} catch {
+		// global file missing, malformed JSON, etc. — use defaults
+	}
+	let localConfig: GoalSettings = {};
+	try {
+		const configPath = goalSettingsPath(cwd, resolvedEnv);
+		if (fs.existsSync(configPath)) {
+			localConfig = parseGoalSettings(JSON.parse(fs.readFileSync(configPath, "utf8")));
+		}
 	} catch {
 		// file missing, malformed JSON, etc. — use defaults
 	}
-	return {};
+	return mergeSettings(globalConfig, localConfig);
+}
+
+/** Merge two GoalSettings: local wins per-key over global (shallow overlay). */
+function mergeSettings(global: GoalSettings, local: GoalSettings): GoalSettings {
+	const result: GoalSettings = {};
+	const keys = new Set([...Object.keys(global), ...Object.keys(local)]) as Set<keyof GoalSettings>;
+	for (const key of keys) {
+		const val = local[key] ?? global[key];
+		if (val !== undefined) {
+			(result as Record<string, unknown>)[key as string] = val;
+		}
+	}
+	return result;
 }
 
 /**

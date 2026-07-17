@@ -11,6 +11,7 @@ import {
 	PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV,
 	type GoalSettings,
 } from "../extensions/goal-settings.ts";
+import { isolatedSettingsEnv } from "./_test-helpers.ts";
 
 /** Make a fresh temp cwd with the optional settings object written to disk. */
 function makeCwd(settings?: Record<string, unknown>): string {
@@ -168,7 +169,7 @@ describe("auditor env config — Zone 1: defaults when nothing configured", () =
 	it("both undefined when no file config and no env", () => {
 		const tmp = makeCwd();
 		try {
-			const s = loadGoalSettings(tmp, {});
+			const s = loadGoalSettings(tmp, isolatedSettingsEnv());
 			// Defaults are applied in goal-auditor.ts (15min / 1s), NOT in
 			// loadGoalSettings — settings stays undefined here so the auditor
 			// layer can supply its own documented defaults.
