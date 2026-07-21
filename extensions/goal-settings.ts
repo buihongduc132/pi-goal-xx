@@ -29,7 +29,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import type { PromptConfig, PromptMode } from "./prompt-resolver.ts";
-
+import {
+	DEFAULT_ACTIVE_ENV_NAME,
+	DEFAULT_ACTIVE_ENV_TEMPLATE,
+} from "./goal-env-runtime.ts";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Auditor operational mode. */
@@ -103,6 +106,17 @@ export interface GoalSettings {
 	goalPromptMode?: GoalPromptMode;
 	/** Inline goal custom prompt override; injected into runtime goal/continuation prompts. */
 	goalPrompt?: string;
+	/**
+	 * Active-goal env signal: when a goal is focused, the extension sets
+	 * `env[goalActiveEnvName] = <resolved value>`. Default name `PI_GOAL_XX_ACTIVE`.
+	 * Env override: `PI_GOAL_ACTIVE_ENV_NAME`.
+	 */
+	goalActiveEnvName?: string;
+	/**
+	 * Template for the active-goal env value. Tokens: {cwd} {repo} {branch} {goalId}.
+	 * Default `{repo}-{branch}-{goalId}`. Env override: `PI_GOAL_ACTIVE_ENV_TEMPLATE`.
+	 */
+	goalActiveEnvTemplate?: string;
 	/** Goal focus lock lease duration in ms. Default 180000 (3 min). */
 	leaseMs?: number;
 	/** Heartbeat refresh interval in ms. Default 60000 (60s). */
@@ -164,6 +178,10 @@ export const PI_GOAL_LOG_LEVEL_ENV = "PI_GOAL_LOG_LEVEL";
 export const PI_GOAL_AUDITOR_TIMEOUT_MS_ENV = "PI_GOAL_AUDITOR_TIMEOUT_MS";
 /** Env override for auditor timeout floor in ms. */
 export const PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV = "PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS";
+/** Env override for active-goal env var name (default `PI_GOAL_XX_ACTIVE`). */
+export const PI_GOAL_ACTIVE_ENV_NAME_ENV = "PI_GOAL_ACTIVE_ENV_NAME";
+/** Env override for active-goal env value template (default `{repo}-{branch}-{goalId}`). */
+export const PI_GOAL_ACTIVE_ENV_TEMPLATE_ENV = "PI_GOAL_ACTIVE_ENV_TEMPLATE";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -185,6 +203,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"auditorPrompt",
 	"goalPromptMode",
 	"goalPrompt",
+	"goalActiveEnvName",
+	"goalActiveEnvTemplate",
 	"leaseMs",
 	"heartbeatMs",
 	"prompts",
@@ -543,6 +563,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (goalPromptMode) settings.goalPromptMode = goalPromptMode;
 	const goalPrompt = asNonEmptyString(record.goalPrompt);
 	if (goalPrompt) settings.goalPrompt = goalPrompt;
+	const goalActiveEnvName = asNonEmptyString(record.goalActiveEnvName);
+	if (goalActiveEnvName) settings.goalActiveEnvName = goalActiveEnvName;
+	const goalActiveEnvTemplate = asNonEmptyString(record.goalActiveEnvTemplate);
+	if (goalActiveEnvTemplate) settings.goalActiveEnvTemplate = goalActiveEnvTemplate;
 	const prompts = asPromptsBlock(record.prompts);
 	if (prompts) settings.prompts = prompts;
 	const toolInstructions = asToolInstructionsBlock(record.toolInstructions);
@@ -652,6 +676,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		auditorPrompt: fileConfig.auditorPrompt,
 		goalPromptMode: fileConfig.goalPromptMode,
 		goalPrompt: fileConfig.goalPrompt,
+		goalActiveEnvName: asNonEmptyString(env[PI_GOAL_ACTIVE_ENV_NAME_ENV]) ?? fileConfig.goalActiveEnvName ?? DEFAULT_ACTIVE_ENV_NAME,
+		goalActiveEnvTemplate: asNonEmptyString(env[PI_GOAL_ACTIVE_ENV_TEMPLATE_ENV]) ?? fileConfig.goalActiveEnvTemplate ?? DEFAULT_ACTIVE_ENV_TEMPLATE,
 		leaseMs: fileConfig.leaseMs ?? 180_000,
 		heartbeatMs: fileConfig.heartbeatMs ?? 60_000,
 		prompts: fileConfig.prompts,
@@ -737,6 +763,10 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (auditorPrompt) clean.auditorPrompt = auditorPrompt;
 	if (goalPromptMode) clean.goalPromptMode = goalPromptMode;
 	if (goalPrompt) clean.goalPrompt = goalPrompt;
+	const goalActiveEnvName = asNonEmptyString(settings.goalActiveEnvName);
+	const goalActiveEnvTemplate = asNonEmptyString(settings.goalActiveEnvTemplate);
+	if (goalActiveEnvName) clean.goalActiveEnvName = goalActiveEnvName;
+	if (goalActiveEnvTemplate) clean.goalActiveEnvTemplate = goalActiveEnvTemplate;
 	if (settings.prompts) clean.prompts = settings.prompts;
 	if (settings.promptsDir) clean.promptsDir = settings.promptsDir;
 	if (settings.toolInstructions) {
@@ -772,6 +802,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.auditorPrompt) persisted.auditorPrompt = clean.auditorPrompt;
 	if (clean.goalPromptMode) persisted.goalPromptMode = clean.goalPromptMode;
 	if (clean.goalPrompt) persisted.goalPrompt = clean.goalPrompt;
+	if (clean.goalActiveEnvName) persisted.goalActiveEnvName = clean.goalActiveEnvName;
+	if (clean.goalActiveEnvTemplate) persisted.goalActiveEnvTemplate = clean.goalActiveEnvTemplate;
 	if (clean.prompts) persisted.prompts = clean.prompts;
 	if (clean.promptsDir) persisted.promptsDir = clean.promptsDir;
 	if (clean.toolInstructions) persisted.toolInstructions = clean.toolInstructions;
