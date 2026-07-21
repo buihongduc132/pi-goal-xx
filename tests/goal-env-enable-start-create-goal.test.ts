@@ -150,8 +150,8 @@ describe("PI_GOAL_ENABLE_START_GOAL env var — callable-while-hidden", () => {
 		);
 	});
 
-	it("PI_GOAL_ENABLE_START_GOAL=1: start_goal IS in active set (callable)", async () => {
-		process.env.PI_GOAL_ENABLE_START_GOAL = "1";
+	it("PI_GOAL_ENABLE_START_GOAL=true: start_goal IS in active set (callable)", async () => {
+		process.env.PI_GOAL_ENABLE_START_GOAL = "true";
 		const cwd = tmpCwd();
 		const before = h.activeToolSnapshots.length;
 		await triggerSync(cwd);
@@ -163,8 +163,8 @@ describe("PI_GOAL_ENABLE_START_GOAL env var — callable-while-hidden", () => {
 		);
 	});
 
-	it("PI_GOAL_ENABLE_START_GOAL=0: start_goal NOT in active set (explicit off)", async () => {
-		process.env.PI_GOAL_ENABLE_START_GOAL = "0";
+	it("PI_GOAL_ENABLE_START_GOAL=false: start_goal NOT in active set (explicit off)", async () => {
+		process.env.PI_GOAL_ENABLE_START_GOAL = "false";
 		const cwd = tmpCwd();
 		await triggerSync(cwd);
 		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
@@ -174,8 +174,8 @@ describe("PI_GOAL_ENABLE_START_GOAL env var — callable-while-hidden", () => {
 		);
 	});
 
-	it("PI_GOAL_ENABLE_START_GOAL=1 does NOT alter create_goal visibility (separate variable)", async () => {
-		process.env.PI_GOAL_ENABLE_START_GOAL = "1";
+	it("PI_GOAL_ENABLE_START_GOAL=true does NOT alter create_goal visibility (separate variable)", async () => {
+		process.env.PI_GOAL_ENABLE_START_GOAL = "true";
 		const cwd = tmpCwd();
 		await triggerSync(cwd);
 		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
@@ -197,8 +197,8 @@ describe("PI_GOAL_ENABLE_CREATE_GOAL env var — callable-while-hidden", () => {
 		);
 	});
 
-	it("PI_GOAL_ENABLE_CREATE_GOAL=1: create_goal IS in active set (callable)", async () => {
-		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "1";
+	it("PI_GOAL_ENABLE_CREATE_GOAL=true: create_goal IS in active set (callable)", async () => {
+		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "true";
 		const cwd = tmpCwd();
 		await triggerSync(cwd);
 		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
@@ -208,8 +208,8 @@ describe("PI_GOAL_ENABLE_CREATE_GOAL env var — callable-while-hidden", () => {
 		);
 	});
 
-	it("PI_GOAL_ENABLE_CREATE_GOAL=1 does NOT alter start_goal visibility (separate variable)", async () => {
-		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "1";
+	it("PI_GOAL_ENABLE_CREATE_GOAL=true does NOT alter start_goal visibility (separate variable)", async () => {
+		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "true";
 		const cwd = tmpCwd();
 		await triggerSync(cwd);
 		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
@@ -222,7 +222,7 @@ describe("PI_GOAL_ENABLE_CREATE_GOAL env var — callable-while-hidden", () => {
 
 describe("create_goal execute when PI_GOAL_ENABLE_CREATE_GOAL=1 — Q1 decision (b) functional", () => {
 	it("create_goal with valid objective CREATES a goal (no REJECT)", async () => {
-		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "1";
+		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "true";
 		const cwd = tmpCwd();
 		// First sync to populate cachedCwd + active set.
 		await triggerSync(cwd);

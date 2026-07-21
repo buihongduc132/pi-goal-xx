@@ -5,6 +5,8 @@
  *   PI_GOAL_DISABLE_TASKS     — "true" to disable, any other value = use file config
  *   PI_GOAL_DISABLE_CONTRACTS — "true" to disable, any other value = use file config
  *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
+ *   PI_GOAL_ENABLE_START_GOAL — "true" to opt-in start_goal callable-while-hidden
+ *   PI_GOAL_ENABLE_CREATE_GOAL — "true" to opt-in create_goal callable-while-hidden + functional execute
  *   PI_GOAL_SETTINGS_FILE     — alternative settings file path (relative to cwd or absolute)
  *   PI_GOAL_LOG_LEVEL         — trace log level override: off|error|warn|info|debug
  *   PI_GOAL_AUDITOR_TIMEOUT_MS       — auditor timeout in ms (default 900000 = 15min)
@@ -90,6 +92,10 @@ export interface GoalSettings {
 	disabled?: boolean;
 	/** Tool names to hide entirely (never registered, agent never sees them). */
 	disabledTools?: string[];
+	/** Opt-in: when true, start_goal tool is callable-while-hidden (active set + no promptSnippet). Default false. Env override: PI_GOAL_ENABLE_START_GOAL. */
+	enableStartGoal?: boolean;
+	/** Opt-in: when true, create_goal tool is callable-while-hidden AND its execute() creates a goal (Q1 decision b functional). Default false. Env override: PI_GOAL_ENABLE_CREATE_GOAL. */
+	enableCreateGoal?: boolean;
 	/** Events that should be asynchronously forwarded to the auditor. */
 	auditorSubscriptions?: AuditorSubscription[];
 	/** Auditor operational mode. Defaults to "inherit". */
@@ -182,6 +188,10 @@ export const PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV = "PI_GOAL_AUDITOR_TIMEOUT_FLO
 export const PI_GOAL_ACTIVE_ENV_NAME_ENV = "PI_GOAL_ACTIVE_ENV_NAME";
 /** Env override for active-goal env value template (default `{repo}-{branch}-{goalId}`). */
 export const PI_GOAL_ACTIVE_ENV_TEMPLATE_ENV = "PI_GOAL_ACTIVE_ENV_TEMPLATE";
+/** Env opt-in: when "true", start_goal tool becomes callable-while-hidden. Default false. */
+export const PI_GOAL_ENABLE_START_GOAL_ENV = "PI_GOAL_ENABLE_START_GOAL";
+/** Env opt-in: when "true", create_goal tool becomes callable-while-hidden AND its execute() creates a goal. Default false. */
+export const PI_GOAL_ENABLE_CREATE_GOAL_ENV = "PI_GOAL_ENABLE_CREATE_GOAL";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -195,6 +205,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"thinking_level",
 	"disabled",
 	"disabledTools",
+	"enableStartGoal",
+	"enableCreateGoal",
 	"auditorSubscriptions",
 	"auditorMode",
 	"auditorExclude",
@@ -547,6 +559,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (record.disabled === true || record.disabled === "true") settings.disabled = true;
 	const disabledTools = asStringArray(record.disabledTools);
 	if (disabledTools !== undefined) settings.disabledTools = disabledTools;
+	const enableStartGoal = asBool(record.enableStartGoal);
+	if (enableStartGoal !== undefined) settings.enableStartGoal = enableStartGoal;
+	const enableCreateGoal = asBool(record.enableCreateGoal);
+	if (enableCreateGoal !== undefined) settings.enableCreateGoal = enableCreateGoal;
 	const auditorSubscriptions = asAuditorSubscriptions(record.auditorSubscriptions);
 	if (auditorSubscriptions !== undefined) settings.auditorSubscriptions = auditorSubscriptions;
 	const auditorMode = asAuditorMode(record.auditorMode);
@@ -668,6 +684,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		thinkingLevel: fileConfig.thinkingLevel,
 		disabled: fileConfig.disabled,
 		disabledTools: asStringArray(env.PI_GOAL_DISABLED_TOOLS) ?? fileConfig.disabledTools,
+		enableStartGoal: asBool(env[PI_GOAL_ENABLE_START_GOAL_ENV]) ?? fileConfig.enableStartGoal ?? false,
+		enableCreateGoal: asBool(env[PI_GOAL_ENABLE_CREATE_GOAL_ENV]) ?? fileConfig.enableCreateGoal ?? false,
 		auditorSubscriptions: fileConfig.auditorSubscriptions,
 		auditorMode: fileConfig.auditorMode,
 		auditorExclude: fileConfig.auditorExclude,
@@ -755,6 +773,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (disableContracts === true) clean.disableContracts = true;
 	if (subtaskDepth !== undefined) clean.subtaskDepth = subtaskDepth;
 	if (disabledTools !== undefined) clean.disabledTools = disabledTools;
+	if (settings.enableStartGoal === true) clean.enableStartGoal = true;
+	if (settings.enableCreateGoal === true) clean.enableCreateGoal = true;
 	if (auditorSubscriptions !== undefined) clean.auditorSubscriptions = auditorSubscriptions;
 	if (auditorMode) clean.auditorMode = auditorMode;
 	if (auditorExclude) clean.auditorExclude = auditorExclude;
@@ -794,6 +814,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.disableContracts) persisted.disableContracts = true;
 	if (clean.subtaskDepth !== undefined) persisted.subtaskDepth = clean.subtaskDepth;
 	if (clean.disabledTools) persisted.disabledTools = clean.disabledTools;
+	if (clean.enableStartGoal) persisted.enableStartGoal = clean.enableStartGoal;
+	if (clean.enableCreateGoal) persisted.enableCreateGoal = clean.enableCreateGoal;
 	if (clean.auditorSubscriptions) persisted.auditorSubscriptions = clean.auditorSubscriptions;
 	if (clean.auditorMode) persisted.auditorMode = clean.auditorMode;
 	if (clean.auditorExclude) persisted.auditorExclude = clean.auditorExclude;
