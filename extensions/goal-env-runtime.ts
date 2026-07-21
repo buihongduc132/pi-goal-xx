@@ -14,7 +14,7 @@
  * Git-aware helpers (`getRepoName`, `getBranchName`) shell out to `git` and
  * fall back gracefully when not in a git repo or git is unavailable.
  */
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 
 /** Default env variable name for the active-goal signal. */
@@ -88,10 +88,12 @@ export function getRepoName(cwd: string): string {
 
 /**
  * Derive branch name: `git rev-parse --abbrev-ref HEAD`. Returns empty string
- * when detached, not in a repo, or git is unavailable.
+ * when detached (git returns the literal "HEAD"), not in a repo, or git
+ * is unavailable.
  */
 export function getBranchName(cwd: string): string {
-	return gitRun(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+	const raw = gitRun(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+	return raw === "HEAD" ? "" : raw;
 }
 
 /** Build an `ActiveEnvContext` from cwd + goalId using git-derived fields. */
@@ -107,7 +109,7 @@ export function buildActiveEnvContext(cwd: string, goalId: string): ActiveEnvCon
 /** Run a git command in `cwd`; return stdout on success, "" on failure. */
 function gitRun(cwd: string, args: string[]): string {
 	try {
-		const out = execSync(`git ${args.map(quoteShell).join(" ")}`, {
+		const out = execFileSync("git", args, {
 			cwd,
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
@@ -125,9 +127,3 @@ function gitTopLevel(cwd: string): string | null {
 	return out.trim() || null;
 }
 
-/** Minimal POSIX shell quoting for a single argv element. */
-function quoteShell(arg: string): string {
-	if (!arg) return "''";
-	if (/^[A-Za-z0-9_\-./@=:,+=]+$/.test(arg)) return arg;
-	return `'${arg.replace(/'/g, `'\\''`)}'`;
-}

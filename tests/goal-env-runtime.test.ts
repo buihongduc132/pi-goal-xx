@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-
+import { execSync } from "node:child_process";
 import {
 	DEFAULT_ACTIVE_ENV_NAME,
 	DEFAULT_ACTIVE_ENV_TEMPLATE,
@@ -93,10 +93,22 @@ test("getRepoName: returns basename of git toplevel (falls back to cwd basename)
 	assert.ok(typeof name === "string");
 });
 
-test("getBranchName: returns current branch or empty string", () => {
+test("getBranchName: returns the current git branch dynamically (no hardcode)", () => {
 	const cwd = process.cwd();
 	const branch = getBranchName(cwd);
-	assert.ok(typeof branch === "string");
-	// We are on feat/goal-active-env-var in the worktree
-	assert.equal(branch, "feat/goal-active-env-var");
+	assert.ok(typeof branch === "string", "branch must be a string");
+	// Derive expected value dynamically from git so the test passes regardless
+	// of which branch/checkout it runs under (no hard-coded branch name).
+	const expected = (() => {
+		try {
+			const raw = execSync(
+				"git rev-parse --abbrev-ref HEAD",
+				{ cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 },
+			).trim();
+			return raw === "HEAD" ? "" : raw;
+		} catch {
+			return "";
+		}
+	})();
+	assert.equal(branch, expected);
 });

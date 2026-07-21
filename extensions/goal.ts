@@ -969,29 +969,32 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		const diskGoal = fresh.get(focusedGoalId) ?? null;
 		if (!diskGoal) {
-			if (current && !current.activePath) {
-				goalsById = fresh;
-				goalsById.set(current.id, current);
-				focusedGoalId = current.id;
-				return true;
-			}
-			logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_vanished", goalId: focusedGoalId, message: "focused goal missing from disk; clearing focus", hadInMemoryGoal: !!current });
+		if (current && !current.activePath) {
 			goalsById = fresh;
-			focusedGoalId = null;
-			clearStoppedRuntimeState();
-			if (current) resetGetGoalNudgeState(current.id);
-			if (tweakDraftingFor !== null) tweakDraftingFor = null;
-			syncGoalTools();
-			updateUI(ctx);
-			return false;
+			goalsById.set(current.id, current);
+			focusedGoalId = current.id;
+			syncActiveGoalEnv(ctx);
+			return true;
 		}
-		const reconciled = current && opts.preserveMemoryUsage
-			? mergeFocusedGoalWithDisk({ memoryGoal: current, diskGoal })
-			: diskGoal;
+		logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_vanished", goalId: focusedGoalId, message: "focused goal missing from disk; clearing focus", hadInMemoryGoal: !!current });
 		goalsById = fresh;
-		goalsById.set(reconciled.id, reconciled);
-		focusedGoalId = reconciled.id;
-		if (reconciled.status !== "active" || !reconciled.autoContinue) clearContinuationState();
+		focusedGoalId = null;
+		clearStoppedRuntimeState();
+		if (current) resetGetGoalNudgeState(current.id);
+		if (tweakDraftingFor !== null) tweakDraftingFor = null;
+		syncActiveGoalEnv(ctx);
+		syncGoalTools();
+		updateUI(ctx);
+		return false;
+	}
+	const reconciled = current && opts.preserveMemoryUsage
+		? mergeFocusedGoalWithDisk({ memoryGoal: current, diskGoal })
+		: diskGoal;
+	goalsById = fresh;
+	goalsById.set(reconciled.id, reconciled);
+	focusedGoalId = reconciled.id;
+	syncActiveGoalEnv(ctx);
+	if (reconciled.status !== "active" || !reconciled.autoContinue) clearContinuationState();
 		if (reconciled.status !== "active") clearActiveAccounting();
 		return true;
 	}
@@ -1047,6 +1050,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		syncActiveGoalEnvCwd(ctx.cwd);
 	}
 
+	// Track the previously-managed env name so we can clear it when the user
+	// changes goalActiveEnvName while a goal is focused (comment 3619924996).
+	// Without this, switching names leaves the OLD variable dangling in env.
+	let lastActiveEnvName: string | null = null;
+
 	/**
 	 * Cwd-only variant so the `state.goal` setter (which only has cachedCwd)
 	 * can sync the env signal without needing a full ExtensionContext.
@@ -1056,11 +1064,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const settings = loadGoalSettings(cwd);
 			const name = settings.goalActiveEnvName || DEFAULT_ACTIVE_ENV_NAME;
 			const template = settings.goalActiveEnvTemplate || DEFAULT_ACTIVE_ENV_TEMPLATE;
+			// If the configured name changed since last sync, clear the stale var.
+			if (lastActiveEnvName !== null && lastActiveEnvName !== name) {
+				clearActiveGoalEnv(process.env, lastActiveEnvName);
+			}
 			if (focusedGoalId) {
 				const value = resolveActiveEnvValue(template, buildActiveEnvContext(cwd, focusedGoalId));
 				setActiveGoalEnv(process.env, name, value);
+				lastActiveEnvName = name;
 			} else {
 				clearActiveGoalEnv(process.env, name);
+				lastActiveEnvName = null;
 			}
 		} catch {
 			// Never let env-var drift crash focus change.
@@ -1353,6 +1367,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		clearStoppedRuntimeState();
 		runningGoalId = null;
+		syncActiveGoalEnv(ctx);
 		updateUI(ctx);
 	}
 
@@ -1500,10 +1515,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				const prevId = prev.id;
 				state.goal = null;
 				if (focusedGoalId === prevId) {
-					goalsById.delete(prevId);
-					focusedGoalId = null;
-				}
-				clearStoppedRuntimeState();
+				goalsById.delete(prevId);
+				focusedGoalId = null;
+			}
+			syncActiveGoalEnv(ctx);
+			clearStoppedRuntimeState();
 				syncGoalTools();
 				updateUI(ctx);
 				ctx.ui.notify("Debug goal removed", "info");
@@ -4464,6 +4480,7 @@ promptGuidelines: [
 			resetGetGoalNudgeState(completedGoal.id);
 			goalsById.delete(completedGoal.id);
 			focusedGoalId = null;
+			syncActiveGoalEnv(ctx);
 			appendFocusEntry(null, "completed");
 			syncGoalTools();
 			updateUI(ctx);
