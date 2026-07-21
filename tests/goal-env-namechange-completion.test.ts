@@ -27,13 +27,19 @@ let cwd: string;
 let pi: ReturnType<typeof createMockPi> | null = null;
 let envSnap: EnvSnapshot;
 let savedActive: string | undefined;
+let savedOldName: string | undefined;
+let savedNewName: string | undefined;
 
 beforeEach(() => {
 	cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-env-fix-"));
 	fs.mkdirSync(path.join(cwd, ".pi", "goals"), { recursive: true });
 	envSnap = forceNonWorkerEnv();
 	savedActive = process.env.PI_GOAL_XX_ACTIVE;
+	savedOldName = process.env.OLD_NAME;
+	savedNewName = process.env.NEW_NAME;
 	delete process.env.PI_GOAL_XX_ACTIVE;
+	delete process.env.OLD_NAME;
+	delete process.env.NEW_NAME;
 });
 
 afterEach(async () => {
@@ -44,6 +50,10 @@ afterEach(async () => {
 	if (savedActive === undefined) delete process.env.PI_GOAL_XX_ACTIVE;
 	else process.env.PI_GOAL_XX_ACTIVE = savedActive;
 	restoreGoalEnv(envSnap);
+	if (savedOldName === undefined) delete process.env.OLD_NAME;
+	else process.env.OLD_NAME = savedOldName;
+	if (savedNewName === undefined) delete process.env.NEW_NAME;
+	else process.env.NEW_NAME = savedNewName;
 	fs.rmSync(cwd, { recursive: true, force: true });
 });
 
