@@ -100,6 +100,14 @@ import {
 	type GoalLedgerEvent,
 } from "./goal-ledger.ts";
 import { buildCompactionSummary } from "./goal-compaction.ts";
+import {
+	DEFAULT_ACTIVE_ENV_NAME,
+	DEFAULT_ACTIVE_ENV_TEMPLATE,
+	buildActiveEnvContext,
+	clearActiveGoalEnv,
+	resolveActiveEnvValue,
+	setActiveGoalEnv,
+} from "./goal-env-runtime.ts";
 import { lazyWrapCommand } from "./command-hook-loader.ts";
 import { wrapToolDefinition } from "./tool-prompt-wrapper.ts";
 import {
@@ -524,10 +532,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (next) {
 				goalsById.set(next.id, next);
 				focusedGoalId = next.id;
+				if (cachedCwd) syncActiveGoalEnvCwd(cachedCwd);
 				return;
 			}
 			if (focusedGoalId) goalsById.delete(focusedGoalId);
 			focusedGoalId = null;
+			if (cachedCwd) syncActiveGoalEnvCwd(cachedCwd);
 		},
 	};
 	let continuationQueuedFor: string | null = null;
@@ -1023,8 +1033,38 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		} catch {
 			// Ledger append failure should not crash focus change
 		}
+		syncActiveGoalEnv(ctx);
 		syncGoalTools();
 		updateUI(ctx);
+	}
+
+	/**
+	 * Reflect the currently focused goal into env[goalActiveEnvName]. Sets to
+	 * the resolved template value when a goal is focused; clears the var when no
+	 * goal is focused. Errors are swallowed so env drift never breaks focus.
+	 */
+	function syncActiveGoalEnv(ctx: ExtensionContext): void {
+		syncActiveGoalEnvCwd(ctx.cwd);
+	}
+
+	/**
+	 * Cwd-only variant so the `state.goal` setter (which only has cachedCwd)
+	 * can sync the env signal without needing a full ExtensionContext.
+	 */
+	function syncActiveGoalEnvCwd(cwd: string): void {
+		try {
+			const settings = loadGoalSettings(cwd);
+			const name = settings.goalActiveEnvName || DEFAULT_ACTIVE_ENV_NAME;
+			const template = settings.goalActiveEnvTemplate || DEFAULT_ACTIVE_ENV_TEMPLATE;
+			if (focusedGoalId) {
+				const value = resolveActiveEnvValue(template, buildActiveEnvContext(cwd, focusedGoalId));
+				setActiveGoalEnv(process.env, name, value);
+			} else {
+				clearActiveGoalEnv(process.env, name);
+			}
+		} catch {
+			// Never let env-var drift crash focus change.
+		}
 	}
 
 	function updateFocusedGoal(next: GoalRecord, ctx: ExtensionContext, shouldPersist = true): void {
@@ -1037,6 +1077,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		if (shouldPersist) persist(ctx);
 		else syncGoalTools();
+		syncActiveGoalEnv(ctx);
 		updateUI(ctx);
 	}
 
@@ -1052,6 +1093,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		clearStoppedRuntimeState();
 		resetGetGoalNudgeState(previousGoalId);
 		appendFocusEntry(null, reason);
+		syncActiveGoalEnv(ctx);
 		syncGoalTools();
 		updateUI(ctx);
 	}
