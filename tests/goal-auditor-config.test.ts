@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -172,6 +172,16 @@ describe("runGoalCompletionAuditor — minimal mode", () => {
 });
 
 describe("runGoalCompletionAuditor — prompt resolution", () => {
+	let savedAgentDir: string | undefined;
+	beforeEach(() => {
+		savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-aud-isolated-agent");
+	});
+	afterEach(() => {
+		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+	});
+
 	it("uses hardcoded default when no inline/file prompts", async () => {
 		const cwd = makeTmpCwd();
 		let promptedText = "";
