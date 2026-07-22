@@ -2237,7 +2237,23 @@ Verification contract:
 				return;
 			}
 		}
-		const resumeGate = validateResumeGoal(state.goal);
+		// Stale-resume fix: validateResumeGoal is a pure file-status gate — it
+		// returns "already running" when status=active+autoContinue, regardless
+		// of lock liveness. But a goal whose file says active+autoContinue is
+		// only "running" if THIS session holds a live focus lock for it. A
+		// stale/missing lock (owning session died or lease lapsed) means the
+		// goal is NOT running — resume must proceed to re-acquire + continue.
+		// Mirrors the UI's "stale" derivation (compactStatusLabel checks
+		// liveLockHolder === false). The downstream acquireFocusedLock handles
+		// heldByOther (another live session) and stale-lock reaping.
+		const resumeGate = (() => {
+			const gate = validateResumeGoal(state.goal);
+			if (gate.ok) return gate;
+			if (/already running/i.test(gate.message) && state.goal && !isLockHeldBySelf(ctx.cwd, state.goal.id)) {
+				return { ok: true } as const;
+			}
+			return gate;
+		})();
 		if (!resumeGate.ok) {
 			const level = resumeGate.message.includes("already running") ? "info" : "warning";
 			ctx.ui.notify(resumeGate.message, level);
