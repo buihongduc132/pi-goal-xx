@@ -845,7 +845,13 @@ export async function runGoalCompletionAuditor(args: {
 						resourceLoader: makeAuditorResourceLoader(resolved, mainResourceLoader),
 						sessionManager: SessionManager.inMemory(args.ctx.cwd),
 						settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
-						tools: resolved.tools,
+						// OT4 boundary filter: strip goal-creation tools from the auditor's
+						// inherited tool set. The auditor verifies completion — it never
+						// needs to create/start goals. When PI_GOAL_ENABLE_START_GOAL=true
+						// or PI_GOAL_ENABLE_CREATE_GOAL=true, these tools are in the host
+						// active set (callable-while-hidden) and would leak to the auditor
+						// via getActiveTools(). Filter unconditionally.
+						tools: resolved.tools.filter((t: string) => t !== "start_goal" && t !== "create_goal"),
 						customTools: [reportProgressTool],
 					}),
 					new Promise<never>((_, reject) => {

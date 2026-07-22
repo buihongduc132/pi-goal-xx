@@ -87,13 +87,20 @@ describe("start_goal tool — registration", () => {
 	});
 });
 
-describe("start_goal tool — subagent hiding contract", () => {
-	// CRITICAL: start_goal must NEVER appear in the active tool set. If it did,
-	// it would be visible to the LLM AND leak to subagents (goal-auditor inherits
-	// tools via pi.getActiveTools()). These assertions run AFTER start_goal.execute()
-	// (in the lifecycle describe below) which triggers syncGoalTools() → setActiveTools().
-	// We assert against real captured snapshots, not an empty list.
-	it("start_goal does NOT appear in any setActiveTools snapshot after execute", async () => {
+describe("start_goal tool — subagent hiding contract (DEFAULT — env unset)", () => {
+	// CONTRACT FLIPPED (goal mruclxo8-zl33gu LD1+LD2):
+	//   - DEFAULT (env unset): start_goal NOT in active set (hidden && !callable).
+	//     This is the backward-compatible contract — start_goal stays hidden from
+	//     LLM + subagents by default. Old code called active.delete() unconditionally;
+	//     new code gates on !enableStartGoal, default false.
+	//   - OPT-IN (PI_GOAL_ENABLE_START_GOAL=true): start_goal IS in active set
+	//     (callable-while-hidden, quiet-prose). Tested in
+	//     tests/goal-env-enable-start-create-goal.test.ts.
+	// These assertions run AFTER start_goal.execute() (in the lifecycle describe
+	// below) which triggers syncGoalTools() → setActiveTools(). We assert against
+	// real captured snapshots, not an empty list.
+	it("DEFAULT: start_goal does NOT appear in setActiveTools snapshot after execute (env unset)", async () => {
+		delete process.env.PI_GOAL_ENABLE_START_GOAL;
 		const cwd = tmpCwd();
 		// Record the snapshot count before — lifecycle tests above may have added some.
 		const beforeCount = h.activeToolSnapshots.length;
@@ -110,12 +117,13 @@ describe("start_goal tool — subagent hiding contract", () => {
 			const snapshot = h.activeToolSnapshots[i]!;
 			assert.ok(
 				!snapshot.includes("start_goal"),
-				`start_goal must never be in setActiveTools snapshot #${i}, but found in: ${snapshot.join(", ")}`,
+				`DEFAULT: start_goal must NOT be in setActiveTools snapshot #${i}, but found in: ${snapshot.join(", ")}`,
 			);
 		}
 	});
 
-	it("create_goal also does NOT appear in any setActiveTools snapshot after execute", async () => {
+	it("DEFAULT: create_goal also does NOT appear in setActiveTools snapshot (env unset)", async () => {
+		delete process.env.PI_GOAL_ENABLE_CREATE_GOAL;
 		const cwd = tmpCwd();
 		const beforeCount = h.activeToolSnapshots.length;
 		// create_goal.execute does not trigger syncGoalTools on its own, so manually
@@ -131,7 +139,7 @@ describe("start_goal tool — subagent hiding contract", () => {
 			const snapshot = h.activeToolSnapshots[i]!;
 			assert.ok(
 				!snapshot.includes("create_goal"),
-				`create_goal must never be in setActiveTools snapshot #${i}, but found in: ${snapshot.join(", ")}`,
+				`DEFAULT: create_goal must NOT be in setActiveTools snapshot #${i}, but found in: ${snapshot.join(", ")}`,
 			);
 		}
 	});

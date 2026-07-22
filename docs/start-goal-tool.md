@@ -3,7 +3,8 @@
 The agent-facing equivalent of `/goals-set`. Creates a new active pi goal, focuses
 it, and immediately starts the auto-run enforcement loop (`queueContinuation`).
 
-Unlike `create_goal` (which is registered but hard-locked to **always reject**),
+Unlike `create_goal` (which is registered but hidden by default; when enabled
+via `PI_GOAL_ENABLE_CREATE_GOAL=1` it creates a goal without starting auto-run),
 `start_goal` actually creates **and** starts the goal.
 
 ## Signature
@@ -35,14 +36,16 @@ with the current goal details (no goal is created).
 
 ## Subagent Visibility Contract
 
-**HIDDEN by default.** `start_goal` is:
+**HIDDEN by default; opt-in callable-while-hidden.** `start_goal` is:
 
 1. **Registered** as a pi tool via `pi.registerTool(regTool(defineTool({ name: START_GOAL_TOOL_NAME, ... })))` in `extensions/goal.ts`.
-2. **Never added to the active tool set.** In `syncGoalTools()`, the line `active.delete(START_GOAL_TOOL_NAME)` ensures it is always removed. Because tool visibility = membership in the active set passed to `pi.setActiveTools()`, this means:
+2. **Default (env unset): NOT in the active tool set.** In `syncGoalTools()`, `active.delete(START_GOAL_TOOL_NAME)` runs when `!enableStartGoal` (default false). Because tool visibility = membership in the active set passed to `pi.setActiveTools()`, this means:
    - The LLM never sees `start_goal` in its available tools list.
    - It does not appear in the system prompt's "Available tools:" section.
    - It has **no `promptSnippet`** — intentionally not advertised.
-3. **Does not leak to subagents.** The only subagent in this codebase is the goal-auditor, which inherits tools via `pi.getActiveTools()`. Since `start_goal` is absent from the active set, it never reaches the auditor or any delegated agent.
+   - It does not leak to subagents (goal-auditor inherits via `pi.getActiveTools()`).
+3. **Opt-in (`PI_GOAL_ENABLE_START_GOAL=true`): IS in the active tool set (callable-while-hidden).** `syncGoalTools()` calls `active.add(START_GOAL_TOOL_NAME)` when `enableStartGoal=true`. The tool becomes dispatchable but remains quiet-prose (no `promptSnippet` ad). **Known limitation (OT3/pi-core):** `promptSnippet` omission hides ONLY the prose line in `Available tools:` section, NOT the tool schema sent to the model. So when enabled, the model still sees the tool in schema and can call unprompted. True schema-hide requires pi-core patch (decouple `state.tools` into `dispatchEligible` vs `schemaAdvertised`). Out of scope for this change.
+4. **Subagent leak when enabled:** When `start_goal` stays in the active set (required for callable), `getActiveTools()` returns it verbatim → goal-auditor (and any subagent) inherits it. Mitigation (OT4/t8): strip from inherited tools BEFORE spawning goal-auditor subagent, NOT via `active.delete()` (which kills dispatch).
 
 The knowledge of **how and when** to call `start_goal` will be provided to agents
 via prompt/skill context in a future change (TBD — not implemented here).
@@ -81,7 +84,7 @@ start_goal.execute(params, ctx)
 |---|---|---|---|
 | `/goals` `/sisyphus` → `propose_goal_draft` | Yes (`startNow=false`) | No (deferred) | Yes (Confirm/Continue dialog) |
 | `/goals-set` `/sisyphus-set` | Yes (`startNow=true`) | Yes | No (direct command) |
-| `create_goal` tool | **No (always rejected)** | No | N/A |
+| `create_goal` tool | **Yes (`startNow=false`, when enabled)** | No | N/A |
 | **`start_goal` tool** (this) | **Yes (`startNow=true`)** | **Yes** | **No (agent-initiated)** |
 
 ## Implementation Reference

@@ -711,13 +711,32 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// question turns, compaction, or active-tool resync.
 			active.add(PROPOSE_DRAFT_TOOL_NAME);
 			// create_goal stays hidden — hard invariant: user must confirm via propose_goal_draft.
-			active.delete(CREATE_GOAL_TOOL_NAME);
+			// Opt-in: PI_GOAL_ENABLE_CREATE_GOAL=true (or settings.enableCreateGoal=true) keeps
+			// create_goal in the active set (callable-while-hidden). Q1 decision (b): when
+			// enabled, execute() also creates a goal (startNow=false).
+			const enableCreateGoal = cachedCwd
+				? !!loadGoalSettings(cachedCwd).enableCreateGoal
+				: false;
+			if (enableCreateGoal) {
+				active.add(CREATE_GOAL_TOOL_NAME);
+			} else {
+				active.delete(CREATE_GOAL_TOOL_NAME);
+			}
 			// start_goal stays hidden from the LLM and subagents by default. It is the
 			// agent-facing equivalent of /goals-set (create + start auto-run). The
 			// knowledge of how/when to call it is provided via prompt/skill context (TBD).
 			// Because it is absent from the active set, it does not leak to subagents
 			// (the goal-auditor inherits tools via pi.getActiveTools()).
-			active.delete(START_GOAL_TOOL_NAME);
+			// Opt-in: PI_GOAL_ENABLE_START_GOAL=true (or settings.enableStartGoal=true) keeps
+			// start_goal in the active set (callable-while-hidden, quiet-prose).
+			const enableStartGoal = cachedCwd
+				? !!loadGoalSettings(cachedCwd).enableStartGoal
+				: false;
+			if (enableStartGoal) {
+				active.add(START_GOAL_TOOL_NAME);
+			} else {
+				active.delete(START_GOAL_TOOL_NAME);
+			}
 			if (confirmationIntent !== null) {
 				active.add(QUESTION_TOOL_NAME);
 				active.add(QUESTIONNAIRE_TOOL_NAME);
@@ -2665,7 +2684,11 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		name: "create_goal",
 		label: "Create Goal",
 		description: "Create a new active pi goal and focus it. Hidden outside drafting flows; propose_goal_draft is the normal commit path.",
-		promptSnippet: "Create a persistent pi goal when the user explicitly asks for one or when a goal-drafting interview has converged.",
+		// No promptSnippet: intentionally not advertised in the system prompt.
+		// When enabled via PI_GOAL_ENABLE_CREATE_GOAL=1, create_goal enters the
+		// active set (callable) but remains hidden from prose (same pattern as
+		// start_goal). The promptGuidelines below are for model behavior guidance
+		// only when the tool is actually called, not for prose advertisement.
 		promptGuidelines: [
 			"Use create_goal only when the user explicitly asks to start a long-running goal, OR when a /goals or /sisyphus intent discussion has produced a concrete objective.",
 			"Creating a new goal focuses it and leaves other open goals untouched. Do not archive or replace existing goals unless the user explicitly asks through a user command.",
@@ -2678,8 +2701,46 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// Q1 decision (b) functional: when enabled via PI_GOAL_ENABLE_CREATE_GOAL=1
+			// (or settings.enableCreateGoal=true), create_goal actually creates a
+			// goal WITHOUT starting the auto-run loop (startNow=false — distinct
+			// from start_goal which uses startNow=true). Default off: REJECTs.
+			const enableCreateGoal = !!loadGoalSettings(ctx.cwd).enableCreateGoal;
+			if (!enableCreateGoal) {
+				return {
+					content: [{ type: "text", text: "create_goal REJECTED: direct agent creation is disabled. Use /goals or /sisyphus with propose_goal_draft for confirmation, or have the user invoke /goals-set or /sisyphus-set for immediate creation. To enable, set PI_GOAL_ENABLE_CREATE_GOAL=1." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			const raw = (params.objective ?? "").trim();
+			if (!raw) {
+				return {
+					content: [{ type: "text", text: "create_goal REJECTED: no objective provided. Pass a concrete objective." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			if (raw.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{ type: "text", text: `create_goal REJECTED: objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.` }],
+					details: goalDetails(state.goal),
+				};
+			}
+			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
+			const autoContinue = params.autoContinue ?? true;
+			const sisyphus = params.sisyphus ?? false;
+			clearContinuationState();
+			clearActiveAccounting();
+			confirmationIntent = null;
+			syncGoalTools();
+			// startNow=FALSE: create_goal creates the goal but does NOT start the
+			// auto-run enforcement loop. Mirrors propose_goal_draft's post-confirm
+			// behavior. Use start_goal (or /goals-set) for create+start.
+			replaceGoal({ objective, autoContinue, sisyphus }, ctx, false, verificationContract);
 			return {
-				content: [{ type: "text", text: "create_goal REJECTED: direct agent creation is disabled. Use /goals or /sisyphus with propose_goal_draft for confirmation, or have the user invoke /goals-set or /sisyphus-set for immediate creation." }],
+				content: [{ type: "text", text: buildGoalCreatedReport({ objective: raw, detailedSummary: detailedSummary(state.goal) }) }],
 				details: goalDetails(state.goal),
 			};
 		},
