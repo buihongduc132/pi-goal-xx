@@ -2684,7 +2684,11 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		name: "create_goal",
 		label: "Create Goal",
 		description: "Create a new active pi goal and focus it. Hidden outside drafting flows; propose_goal_draft is the normal commit path.",
-		promptSnippet: "Create a persistent pi goal when the user explicitly asks for one or when a goal-drafting interview has converged.",
+		// No promptSnippet: intentionally not advertised in the system prompt.
+		// When enabled via PI_GOAL_ENABLE_CREATE_GOAL=1, create_goal enters the
+		// active set (callable) but remains hidden from prose (same pattern as
+		// start_goal). The promptGuidelines below are for model behavior guidance
+		// only when the tool is actually called, not for prose advertisement.
 		promptGuidelines: [
 			"Use create_goal only when the user explicitly asks to start a long-running goal, OR when a /goals or /sisyphus intent discussion has produced a concrete objective.",
 			"Creating a new goal focuses it and leaves other open goals untouched. Do not archive or replace existing goals unless the user explicitly asks through a user command.",

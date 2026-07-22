@@ -208,6 +208,18 @@ describe("PI_GOAL_ENABLE_CREATE_GOAL env var — callable-while-hidden", () => {
 		);
 	});
 
+	it("create_goal has NO promptSnippet — callable-while-hidden (quiet-prose)", () => {
+		// R2: when enabled, create_goal must NOT advertise in prose.
+		// The promptSnippet is omitted from the definition (same pattern as
+		// start_goal) so even when in the active set, it stays quiet.
+		const def = h.tools.get("create_goal");
+		assert.ok(def, "create_goal must be registered");
+		assert.ok(
+			!def?.promptSnippet,
+			"create_goal must NOT have a promptSnippet (callable-while-hidden). Got: " + def?.promptSnippet,
+		);
+	});
+
 	it("PI_GOAL_ENABLE_CREATE_GOAL=true does NOT alter start_goal visibility (separate variable)", async () => {
 		process.env.PI_GOAL_ENABLE_CREATE_GOAL = "true";
 		const cwd = tmpCwd();

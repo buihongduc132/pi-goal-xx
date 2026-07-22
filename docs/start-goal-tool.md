@@ -3,7 +3,8 @@
 The agent-facing equivalent of `/goals-set`. Creates a new active pi goal, focuses
 it, and immediately starts the auto-run enforcement loop (`queueContinuation`).
 
-Unlike `create_goal` (which is registered but hard-locked to **always reject**),
+Unlike `create_goal` (which is registered but hidden by default; when enabled
+via `PI_GOAL_ENABLE_CREATE_GOAL=1` it creates a goal without starting auto-run),
 `start_goal` actually creates **and** starts the goal.
 
 ## Signature
@@ -83,7 +84,7 @@ start_goal.execute(params, ctx)
 |---|---|---|---|
 | `/goals` `/sisyphus` → `propose_goal_draft` | Yes (`startNow=false`) | No (deferred) | Yes (Confirm/Continue dialog) |
 | `/goals-set` `/sisyphus-set` | Yes (`startNow=true`) | Yes | No (direct command) |
-| `create_goal` tool | **No (always rejected)** | No | N/A |
+| `create_goal` tool | **Yes (`startNow=false`, when enabled)** | No | N/A |
 | **`start_goal` tool** (this) | **Yes (`startNow=true`)** | **Yes** | **No (agent-initiated)** |
 
 ## Implementation Reference
