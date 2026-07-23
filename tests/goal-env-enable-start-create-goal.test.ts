@@ -97,7 +97,7 @@ function tmpCwd(): string {
 	return tmp;
 }
 
-const ENV_KEYS = ["PI_GOAL_ENABLE_START_GOAL", "PI_GOAL_ENABLE_CREATE_GOAL"] as const;
+const ENV_KEYS = ["PI_GOAL_ENABLE_START_GOAL", "PI_GOAL_ENABLE_CREATE_GOAL", "PI_CODING_AGENT_DIR"] as const;
 type EnvSnap = Record<string, string | undefined>;
 
 function snapEnv(): EnvSnap {
@@ -125,6 +125,10 @@ after(() => restoreEnv(envSnap));
 beforeEach(() => {
 	// Clear goal tools env vars before each test — explicit set per-test.
 	for (const k of ENV_KEYS) delete process.env[k];
+	// Isolate global config: point PI_CODING_AGENT_DIR to a temp dir so the
+	// global settings file (~/.pi/agent/pi-goal-xx-settings.json in prod)
+	// does NOT leak into tests. Tests that need the global path set it explicitly.
+	process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-isolated-" + Math.random().toString(36).slice(2));
 });
 
 /**

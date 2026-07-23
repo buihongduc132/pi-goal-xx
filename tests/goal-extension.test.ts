@@ -134,8 +134,18 @@ describe("goal.ts tools — no active goal", () => {
 	});
 
 	it("create_goal is rejected", async () => {
-		const res = await h.tools.get("create_goal")!.execute("t", { objective: "x" }, undefined, undefined, makeCtx(tmpCwd()));
-		assert.match(res.content[0].text, /REJECTED|disabled/i);
+		// Isolate from global config leak: deployed settings file has enableCreateGoal=true.
+		const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const prevEnable = process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		delete process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-ext-iso-" + Math.random().toString(36).slice(2));
+		try {
+			const res = await h.tools.get("create_goal")!.execute("t", { objective: "x" }, undefined, undefined, makeCtx(tmpCwd()));
+			assert.match(res.content[0].text, /REJECTED|disabled/i);
+		} finally {
+			if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+			if (prevEnable === undefined) delete process.env.PI_GOAL_ENABLE_CREATE_GOAL; else process.env.PI_GOAL_ENABLE_CREATE_GOAL = prevEnable;
+		}
 	});
 
 	it("propose_goal_draft without drafting flow is rejected", async () => {

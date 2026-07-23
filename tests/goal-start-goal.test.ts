@@ -1,4 +1,4 @@
-import { describe, it, before } from "node:test";
+import { describe, it, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -88,6 +88,13 @@ describe("start_goal tool — registration", () => {
 });
 
 describe("start_goal tool — subagent hiding contract (DEFAULT — env unset)", () => {
+	beforeEach(() => {
+		// Isolate global config so deployed ~/.pi/agent/pi-goal-xx-settings.json
+		// does NOT leak into these DEFAULT-contract tests.
+		delete process.env.PI_GOAL_ENABLE_START_GOAL;
+		delete process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-start-goal-iso-" + Math.random().toString(36).slice(2));
+	});
 	// CONTRACT FLIPPED (goal mruclxo8-zl33gu LD1+LD2):
 	//   - DEFAULT (env unset): start_goal NOT in active set (hidden && !callable).
 	//     This is the backward-compatible contract — start_goal stays hidden from

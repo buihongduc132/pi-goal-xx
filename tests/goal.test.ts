@@ -156,6 +156,10 @@ describe("propose_goal_draft tool — headless auto-confirm", () => {
 		const cwd = tmpWorkspace();
 		const pi = setupPi(cwd);
 		goalExtension(pi);
+		// Isolate from global config leak: deployed ~/.pi/agent/pi-goal-xx-settings.json
+		// has enableCreateGoal=true. This test asserts the DEFAULT (disabled) behavior.
+		delete process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-goal-test-iso-" + Math.random().toString(36).slice(2));
 		const ctx = createMockCtx(pi, { cwd });
 		const result = await invokeTool(pi, ctx, "create_goal", {
 			objective: "x", autoContinue: false, sisyphus: false,
