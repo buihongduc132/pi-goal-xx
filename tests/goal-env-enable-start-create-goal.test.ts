@@ -255,3 +255,48 @@ describe("create_goal execute when PI_GOAL_ENABLE_CREATE_GOAL=1 — Q1 decision 
 		assert.ok(files.length > 0, "create_goal when enabled MUST persist a goal .md file");
 	});
 });
+
+describe("settings file fallback — enableStartGoal/enableCreateGoal without env vars", () => {
+	// Worst-first: tests the exact user bug — env vars set in shell but NOT
+	// propagated to pi process. Settings file is the persistent fallback.
+	it("settings file enableStartGoal=true: start_goal IS in active set (no env var needed)", async () => {
+		const cwd = tmpCwd();
+		// Write settings file (NOT env var) — simulates the deployed config.
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ enableStartGoal: true }),
+		);
+		await triggerSync(cwd);
+		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
+		assert.ok(
+			lastSnap.includes("start_goal"),
+			`SETTINGS FILE: start_goal MUST be in active set when settings.enableStartGoal=true (no env var). Got: ${lastSnap.join(", ")}`,
+		);
+	});
+
+	it("settings file enableCreateGoal=true: create_goal IS in active set (no env var needed)", async () => {
+		const cwd = tmpCwd();
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ enableCreateGoal: true }),
+		);
+		await triggerSync(cwd);
+		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
+		assert.ok(
+			lastSnap.includes("create_goal"),
+			`SETTINGS FILE: create_goal MUST be in active set when settings.enableCreateGoal=true (no env var). Got: ${lastSnap.join(", ")}`,
+		);
+	});
+
+	it("settings file BOTH keys: BOTH tools in active set", async () => {
+		const cwd = tmpCwd();
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ enableStartGoal: true, enableCreateGoal: true }),
+		);
+		await triggerSync(cwd);
+		const lastSnap = h.activeToolSnapshots[h.activeToolSnapshots.length - 1]!;
+		assert.ok(lastSnap.includes("start_goal"), "BOTH: start_goal missing");
+		assert.ok(lastSnap.includes("create_goal"), "BOTH: create_goal missing");
+	});
+});
