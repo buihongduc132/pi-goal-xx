@@ -291,6 +291,42 @@ test("prompts.auditor takes precedence over legacy auditorPrompt when both prese
 	assert.equal(aud.mode, "override");
 });
 
+// ---------------------------------------------------------------------------
+// 13. prompts.<key>.file — arbitrary file path source (RED PHASE)
+// ---------------------------------------------------------------------------
+// `cfg.file` is NOT yet accepted by asPromptConfig (knownNested lacks "file"),
+// so the parse + round-trip tests below MUST throw until GREEN adds file
+// support. The bogus-key test is an INVARIANT regression guard (passes both
+// phases): file alone should be accepted, but other unknowns still rejected.
+
+test("prompts.auditor.file survives parse", () => {
+	const parsed = parseGoalSettings({
+		prompts: { auditor: { file: "/some/path.md" } },
+	});
+	const aud = (parsed.prompts as Record<string, { file?: string }>).auditor;
+	assert.ok(aud, "prompts.auditor should be present");
+	assert.equal(aud!.file, "/some/path.md");
+});
+
+test("prompts.auditor.file survives save+load roundtrip", () => {
+	const parsed = parseGoalSettings({
+		prompts: { auditor: { file: "/some/path.md" } },
+	});
+	const cwd = writeSettings({});
+	saveGoalSettingsFileConfig(cwd, parsed);
+	const reparsed = loadGoalSettingsFileConfig(cwd);
+	const aud = (reparsed.prompts as Record<string, { file?: string }>).auditor;
+	assert.ok(aud, "prompts.auditor should survive roundtrip");
+	assert.equal(aud!.file, "/some/path.md");
+});
+
+test("prompts.<key> unknown nested key (other than file) still rejected", () => {
+	assert.throws(
+		() => parseGoalSettings({ prompts: { auditor: { bogus: 1 } } }),
+		/bogus|prompt/i,
+	);
+});
+
 // Keep type imports live for tsc.
 ((): PromptConfig => ({ mode: "override", inline: "x" }))();
 ((): PromptMode => "off")();

@@ -272,7 +272,7 @@ function isKnownPromptKey(key: string): boolean {
 function asPromptConfig(key: string, raw: unknown): PromptConfig | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
 	const rec = raw as Record<string, unknown>;
-	const knownNested = new Set(["mode", "inline"]);
+	const knownNested = new Set(["mode", "inline", "file"]);
 	const unknownNested = Object.keys(rec).filter((k) => !knownNested.has(k));
 	if (unknownNested.length > 0) {
 		throw new Error(
@@ -282,6 +282,8 @@ function asPromptConfig(key: string, raw: unknown): PromptConfig | undefined {
 	const cfg: PromptConfig = {};
 	const inline = asNonEmptyString(rec.inline);
 	if (inline) cfg.inline = inline;
+	const file = asNonEmptyString(rec.file);
+	if (file) cfg.file = file;
 	if (rec.mode !== undefined) {
 		const mode = asNonEmptyString(rec.mode);
 		if (!mode || !UNIFIED_PROMPT_MODES.has(mode as PromptMode)) {
