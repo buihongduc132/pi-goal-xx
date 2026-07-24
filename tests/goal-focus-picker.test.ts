@@ -223,7 +223,11 @@ describe("goal-focus picker UX — focusGoalCommand end-to-end", () => {
 		);
 	});
 
-	it("headless (!ctx.hasUI): notify carries the legend + activePath sub-line", async () => {
+	it("headless (!ctx.hasUI): auto-picks most-recent open goal (feature c: non-TUI just works)", async () => {
+		// Feature (c) behavior change: headless multi-open no longer just prints
+		// a list and returns (which left focus undefined and silently disabled
+		// goal work). It now deterministically auto-picks the most-recent open
+		// goal via sortGoalsForPicker and notifies "Auto-focused".
 		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "active", autoContinue: true });
 		writeGoalFile(cwd, { id: "zz99yy11-betaid", status: "paused", autoContinue: false });
 		const { pi, ctx } = setup(false /* headless */);
@@ -233,15 +237,9 @@ describe("goal-focus picker UX — focusGoalCommand end-to-end", () => {
 		await flushContinuation();
 
 		// ui.select must NOT have been called in headless mode.
-		// The headless branch calls ctx.ui.notify with buildGoalListText output.
-		const listNotify = pi.ui.notifyCalls.find((n) => /Columns:/.test(String(n.msg)));
-		assert.ok(listNotify, "headless notify must include the 'Columns:' legend");
-		const msg = String(listNotify!.msg);
-		assert.match(msg, /Open goals: 2/);
-		// activePath sub-line still present in the list view.
-		assert.ok(msg.includes(".pi/goals/"), `list view keeps activePath sub-line: ${msg}`);
-		assert.match(msg, /running/);
-		assert.match(msg, /paused/);
+		// Auto-pick notifies "Auto-focused".
+		const autoNotify = pi.ui.notifyCalls.find((n) => /Auto-focused/i.test(String(n.msg)));
+		assert.ok(autoNotify, "headless auto-focus MUST notify 'Auto-focused'");
 	});
 
 	it("computeHeldByOther: goal locked by another live session shows 🔒 pill in its label", async () => {

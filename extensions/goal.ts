@@ -2,7 +2,8 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
 import * as crypto from "node:crypto";
-import { existsSync } from "node:fs";
+import * as path from "node:path";
+import { existsSync, lstatSync } from "node:fs";
 import {
 	footerStatus,
 	formatDuration,
@@ -116,6 +117,7 @@ import {
 	ensureDirectory,
 	GOALS_DIR,
 	mergeGoalPromptFromDisk,
+	parseGoalFile,
 	readActiveGoalPool,
 	safeUnlinkGoalFile,
 	sanitizeGoalPaths,
@@ -1119,6 +1121,116 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (state.goal?.status === "active" && state.goal.autoContinue) queueContinuation(ctx);
 	}
 
+	/**
+	 * Feature (b): Load a goal .md file from PI_GOAL_FILE / settings.goalFile,
+	 * focus it, and (if active/paused) leave it ready for the session_start
+	 * tail to arm continuation. The helper does NOT acquire locks or queue
+	 * continuations itself — the existing session_start tail (lines ~4613-4631)
+	 * is the single auto-run chokepoint (D6) and handles lock-acquire +
+	 * queueContinuation uniformly.
+	 *
+	 * Returns `{ handled: true }` whenever the env path was entered (success OR
+	 * a notified error). `handled: false` only when no path resolves.
+	 *
+	 * Status transitions (applyStatusForEnvLoad):
+	 *   - complete → notify, no run
+	 *   - paused   → flip to active + autoContinue + clear stopReason (explicit
+	 *                "load and RUN" instruction; opt out via settings.goalFile omit)
+	 *   - active   → no-op
+	 *
+	 * Ignored in worker sessions (PI_TEAMS_WORKER=1) — workers never inherit
+	 * focus. The caller (session_start) pre-checks isWorkerSession(); we
+	 * re-check defensively here.
+	 */
+	function loadAndFocusGoalFile(ctx: ExtensionContext, filePath: string): { handled: boolean } {
+		if (isWorkerSession()) return { handled: false };
+		// 1. Resolve absolute path (absolute as-is; relative → ctx.cwd).
+		const abs = path.isAbsolute(filePath) ? filePath : path.resolve(ctx.cwd, filePath);
+		// 2. Stat: reject symlinks, dirs, missing. Mirrors parseGoalFile's own
+		//    symlink guard for the EXTERNAL path (the source file may live
+		//    outside .pi/goals, so isSafeActivePath is not applicable here).
+		try {
+			const st = lstatSync(abs);
+			if (st.isSymbolicLink() || !st.isFile()) {
+				try { ctx.ui.notify(`PI_GOAL_FILE is not a regular file: ${filePath}`, "error"); } catch {}
+				return { handled: true };
+			}
+		} catch {
+			try { ctx.ui.notify(`PI_GOAL_FILE not found: ${filePath}`, "error"); } catch {}
+			return { handled: true };
+		}
+		// 3. Parse via the SAME parser the pool reader uses.
+		const parsed = parseGoalFile(abs);
+		if (!parsed) {
+			try { ctx.ui.notify(`PI_GOAL_FILE could not be parsed as a goal file: ${filePath}`, "error"); } catch {}
+			return { handled: true };
+		}
+		// 4. Branch: already in pool (same id) vs not.
+		if (goalsById.has(parsed.id)) {
+			const existing = goalsById.get(parsed.id);
+			if (existing) {
+				setFocusedGoalId(existing.id, ctx, "selected");
+				applyStatusForEnvLoad(ctx, existing);
+			}
+			return { handled: true };
+		}
+		// 5. Not-in-pool: copy into .pi/goals/ durably via the canonical writer,
+		//    then focus. writeActiveGoalFile computes a safe activePath under
+		//    GOALS_DIR, sanitizes paths, and atomic-writes — so even a malicious
+		//    PI_GOAL_FILE cannot escape .pi/goals/ on the write side.
+		let persisted: GoalRecord;
+		try {
+			const writeResult = tryWriteActiveGoalFile(ctx, parsed, false);
+			if (!writeResult.ok) {
+				// tryWriteActiveGoalFile already notified the error.
+				return { handled: true };
+			}
+			persisted = writeResult.goal;
+		} catch (err) {
+			try { ctx.ui.notify(`PI_GOAL_FILE could not be copied into .pi/goals: ${err instanceof Error ? err.message : String(err)}`, "error"); } catch {}
+			return { handled: true };
+		}
+		// Insert into the in-memory pool AND focus in one move. setFocusedGoalId
+		// validates goalId ∈ goalsById, so set it first.
+		goalsById.set(persisted.id, persisted);
+		setFocusedGoalId(persisted.id, ctx, "selected");
+		applyStatusForEnvLoad(ctx, persisted);
+		return { handled: true };
+	}
+
+	/**
+	 * Apply the PI_GOAL_FILE status-transition rules to the currently-focused
+	 * goal. Called AFTER setFocusedGoalId so state.goal is the focused record.
+	 * The session_start tail (lock-acquire + queueContinuation) arms auto-run
+	 * once status is active.
+	 */
+	function applyStatusForEnvLoad(ctx: ExtensionContext, goal: GoalRecord): void {
+		const current = state.goal;
+		if (!current || current.id !== goal.id) return;
+		if (current.status === "complete") {
+			try { ctx.ui.notify(`Loaded goal is already complete (not started): ${truncateText(current.objective, 60)}`, "info"); } catch {}
+			return;
+		}
+		if (current.status === "paused") {
+			// Explicit "load and RUN" instruction: flip paused → active.
+			// Mirrors the session_start pause-resume path and handleGoalResume.
+			setGoal(
+				{
+					...current,
+					status: "active",
+					autoContinue: true,
+					stopReason: undefined,
+					pauseReason: undefined,
+					pauseSuggestedAction: undefined,
+				},
+				ctx,
+				true,
+				undefined,
+			);
+		}
+		// active: no-op — tail arms continuation.
+	}
+
 	function removeFocusedGoal(ctx: ExtensionContext, reason: GoalFocusReason): void {
 		const previousGoalId = focusedGoalId;
 		if (focusedGoalId) goalsById.delete(focusedGoalId);
@@ -1994,9 +2106,21 @@ Verification contract:
 			setFocusedGoalId(only.id, ctx, "selected");
 			return state.goal;
 		}
-		if (!ctx.hasUI) {
-			ctx.ui.notify(buildUnfocusedOpenGoalsSummary(open.length), "warning");
-			return null;
+		if (!isInteractiveTui(ctx)) {
+			// Feature (c): non-TUI multi-open. Auto-pick the most-recent open
+			// goal instead of returning null (which would leave focus undefined
+			// and silently disable goal work in headless launches).
+			const { liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+			const sorted = sortGoalsForPicker(open, liveLockHolderSet);
+			const picked = sorted[0];
+			if (!picked) {
+				ctx.ui.notify(buildUnfocusedOpenGoalsSummary(open.length), "warning");
+				return null;
+			}
+			if (!(await confirmFocusOverride(ctx, picked.id))) return null;
+			setFocusedGoalId(picked.id, ctx, "selected");
+			ctx.ui.notify(`Auto-focused goal (non-TUI): ${oneLineSummary(picked)}`, "info");
+			return state.goal;
 		}
 		const shortIds = resolveShortIdsForPool(open);
 		const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
@@ -2087,9 +2211,24 @@ Verification contract:
 			return true;
 		}
 		// Held by another LIVE session.
-		if (!ctx.hasUI) {
+		// Feature (c): in non-TUI the confirm dialog is unusable. Allow
+		// takeover when PI_GOAL_AUTO_CONFIRM=1 (the same opt-in that
+		// auto-confirms goal-draft proposals). Without it, refuse + notify
+		// (unchanged for headless without opt-in; TUI still prompts).
+		const autoConfirm = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
+		if (autoConfirm) {
 			ctx.ui.notify(
-				`Goal ${goalId} is held by session ${lock.owner.sessionId} (pid ${lock.owner.pid}). Cannot prompt for takeover in headless mode.`,
+				`Goal ${goalId} held by session ${lock.owner.sessionId}; auto-taking over (PI_GOAL_AUTO_CONFIRM).`,
+				"warning",
+			);
+			try {
+				releaseLock(ctx.cwd, goalId);
+			} catch {}
+			return true;
+		}
+		if (!isInteractiveTui(ctx)) {
+			ctx.ui.notify(
+				`Goal ${goalId} is held by session ${lock.owner.sessionId} (pid ${lock.owner.pid}). Set PI_GOAL_AUTO_CONFIRM=1 to take over.`,
 				"warning",
 			);
 			return false;
@@ -2125,8 +2264,22 @@ Verification contract:
 			ctx.ui.notify(`Focused goal: ${oneLineSummary(only)}`, "info");
 			return;
 		}
-		if (!ctx.hasUI) {
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, computeLockInfo(open, ctx.cwd)), "info");
+		if (!isInteractiveTui(ctx)) {
+			// Feature (c): non-TUI multi-open. The picker needs a UI surface; in
+			// non-TUI we deterministically auto-pick the most-recent open goal
+			// (same sort used by the TUI picker) and run confirmFocusOverride on
+			// it so a held lock is respected (or taken over via PI_GOAL_AUTO_CONFIRM).
+			const { liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+			const sorted = sortGoalsForPicker(open, liveLockHolderSet);
+			const picked = sorted[0];
+			if (!picked) {
+				ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, computeLockInfo(open, ctx.cwd)), "info");
+				return;
+			}
+			if (!(await confirmFocusOverride(ctx, picked.id))) return;
+			setFocusedGoalId(picked.id, ctx, "selected");
+			armFocusedContinuation(ctx);
+			ctx.ui.notify(`Auto-focused goal (non-TUI): ${oneLineSummary(picked)}`, "info");
 			return;
 		}
 		const shortIds = resolveShortIdsForPool(open);
@@ -2783,6 +2936,13 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		name: START_GOAL_TOOL_NAME,
 		label: "Start Goal",
 		description: "Create a new active pi goal, focus it, and immediately start the auto-run enforcement loop. Hidden from subagents by default; surfaced only via explicit prompt/skill context.",
+		// promptSnippet is statically defined so that when start_goal is in the
+		// active set (PI_GOAL_ENABLE=1 / PI_GOAL_ENABLE_START_GOAL=1), the model
+		// is prompted to start a goal from prose. The host's _rebuildSystemPrompt
+		// auto-gates promptSnippet by active-set membership, so this snippet is
+		// auto-hidden when the tool is inactive (the default) and auto-shown when
+		// the launcher opts the inner pi into goal-creation mode.
+		promptSnippet: "When the user describes a goal or task in prose (a concrete objective to pursue), call start_goal with that objective to create and auto-run a pi goal. Use this instead of asking the user to run a slash command when the inner pi is launched in goal-capable mode.",
 		parameters: Type.Object({
 			objective: Type.String({ description: "Concrete objective to pursue. For Sisyphus goals this MUST be the full plan including numbered steps and per-step done criteria." }),
 			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Defaults to true." })),
@@ -4597,15 +4757,39 @@ promptGuidelines: [
 	pi.on("session_start", async (event, ctx) => {
 		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, event.reason);
+		// Feature (b): PI_GOAL_FILE / settings.goalFile autoload. Resolve focus
+		// + status, then fall through to the existing lock-acquire +
+		// queueContinuation tail (single auto-run chokepoint, D6). The helper
+		// does NOT acquire locks or queue continuations itself. Ignored in
+		// worker sessions (PI_TEAMS_WORKER=1) — workers never inherit focus.
+		let envLoadPerformed = false;
+		const goalFilePath = loadGoalSettings(ctx.cwd).goalFile;
+		if (goalFilePath && !isWorkerSession()) {
+			const result = loadAndFocusGoalFile(ctx, goalFilePath);
+			envLoadPerformed = result.handled;
+		}
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
-		if (event.reason === "resume" && !state.goal && openGoals().length > 1 && ctx.hasUI) {
+		if (event.reason === "resume" && !envLoadPerformed && !state.goal && openGoals().length > 1 && ctx.hasUI) {
 			await focusGoalCommand(ctx);
 		}
-		// Codex behavior: prompt before reactivating a paused goal on resume.
-		if (event.reason === "resume" && state.goal?.status === "paused" && ctx.hasUI) {
+		// Feature (c): paused-goal resume at session_start. In non-TUI the goal
+		// would otherwise stay paused forever (silent no-op). PI_GOAL_AUTO_RESUME
+		// overrides: "1" forces auto-resume (even TUI), "0" blocks it. Default
+		// = prompt in TUI, auto-resume in non-TUI. Suppressed when the env load
+		// (PI_GOAL_FILE) already resolved focus+status.
+		if (!envLoadPerformed && state.goal?.status === "paused") {
 			const current = state.goal;
-			const shouldResume = await ctx.ui.confirm("Resume paused goal?", `Goal: ${current.objective}`);
+			const autoResumeEnv = process.env.PI_GOAL_AUTO_RESUME;
+			let shouldResume: boolean;
+			if (autoResumeEnv === "0") {
+				shouldResume = false;
+			} else if (isInteractiveTui(ctx) && autoResumeEnv !== "1") {
+				shouldResume = await ctx.ui.confirm("Resume paused goal?", `Goal: ${current.objective}`);
+			} else {
+				try { ctx.ui.notify(`Auto-resuming paused goal: ${truncateText(current.objective, 60)}`, "info"); } catch {}
+				shouldResume = true;
+			}
 			if (shouldResume) {
 				setGoal({ ...current, status: "active", autoContinue: true, stopReason: undefined, pauseReason: undefined, pauseSuggestedAction: undefined }, ctx);
 			}

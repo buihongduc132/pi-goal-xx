@@ -90,7 +90,13 @@ function plantStaleLock(goalId: string) {
 }
 
 describe("Unit F — /goal-focus override flow (tasks 5.1–5.7)", () => {
-	it("5.1+5.6: headless (!ctx.hasUI) + held-by-other → override REFUSED (cannot prompt)", async () => {
+	it("5.1+5.6: headless (!ctx.hasUI) + held-by-other → override AUTO-TAKEOVER (feature c: non-TUI just works)", async () => {
+		// Feature (c) behavior change: in non-TUI the confirm dialog is unusable,
+		// so shouldAutoConfirmProposal() returns true → takeover auto-proceeds
+		// (matching the goal-draft auto-confirm semantics). The old "refuse in
+		// headless" contract is superseded — non-TUI launches get full goal
+		// functionality. To opt OUT of auto-takeover, the launcher must NOT use
+		// non-TUI mode (use TUI) or avoid /goal-focus on held goals.
 		writeGoalFile(cwd, { id: "locked-goal", autoContinue: true });
 		const { pi, ctx } = setup(false /* headless */);
 		await loadGoals(pi, ctx);
@@ -99,12 +105,12 @@ describe("Unit F — /goal-focus override flow (tasks 5.1–5.7)", () => {
 		await invokeCommand(pi, ctx, "goal-focus", "");
 		await flushContinuation();
 
-		// Focus unchanged: refused, no takeover.
-		const refused = pi.ui.notifyCalls.some((n) => /Cannot prompt|headless|held by/i.test(String(n.msg)));
-		assert.ok(refused, "headless refused with a warning");
-		// Lock still belongs to OTHER.
+		// Auto-takeover: lock stolen from OTHER, now owned by SELF.
+		const autoNotify = pi.ui.notifyCalls.some((n) => /auto-taking over/i.test(String(n.msg)));
+		assert.ok(autoNotify, "headless auto-takeover notifies 'auto-taking over'");
 		const lock = readLock(cwd, "locked-goal");
-		assert.ok(lock && lock.owner.sessionId === OTHER.sessionId, "lock not stolen in headless");
+		assert.ok(lock, "lock present after auto-takeover");
+		assert.ok(lock!.owner.sessionId !== OTHER.sessionId, "lock stolen from other in headless (auto)");
 	});
 
 	it("5.2+5.3: override CONFIRMED → reaps held + acquires fresh (self owns the lock after)", async () => {
