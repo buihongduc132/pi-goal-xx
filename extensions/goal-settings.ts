@@ -2,11 +2,17 @@
  * Unified global goal settings.
  *
  * Reads `.pi/pi-goal-xx-settings.json` with env var overrides:
- *   PI_GOAL_DISABLE_TASKS     — "true" to disable, any other value = use file config
- *   PI_GOAL_DISABLE_CONTRACTS — "true" to disable, any other value = use file config
+ *   PI_GOAL_DISABLE_TASKS     — "true"/"1" to disable, "false"/"0"/other = use file config
+ *   PI_GOAL_DISABLE_CONTRACTS — "true"/"1" to disable, "false"/"0"/other = use file config
  *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
  *   PI_GOAL_ENABLE_START_GOAL — "true" to opt-in start_goal callable-while-hidden
  *   PI_GOAL_ENABLE_CREATE_GOAL — "true" to opt-in create_goal callable-while-hidden + functional execute
+ *   PI_GOAL_ENABLE            — "true"/"1" master launch switch: implies START_GOAL + CREATE_GOAL,
+ *                               and arms start_goal with a promptSnippet so the model can start a
+ *                               goal from prose. Per-tool vars (incl. =0) still narrow down.
+ *   PI_GOAL_FILE              — absolute or cwd-relative path to a goal .md file to autoload at
+ *                               session_start (load → focus → auto-run if active/paused). Worker-ignored.
+ *   PI_GOAL_AUTO_RESUME       — "1" force / "0" block non-TUI paused-goal auto-resume at session_start
  *   PI_GOAL_SETTINGS_FILE     — alternative settings file path (relative to cwd or absolute)
  *   PI_GOAL_LOG_LEVEL         — trace log level override: off|error|warn|info|debug
  *   PI_GOAL_AUDITOR_TIMEOUT_MS       — auditor timeout in ms (default 900000 = 15min)
@@ -96,6 +102,21 @@ export interface GoalSettings {
 	enableStartGoal?: boolean;
 	/** Opt-in: when true, create_goal tool is callable-while-hidden AND its execute() creates a goal (Q1 decision b functional). Default false. Env override: PI_GOAL_ENABLE_CREATE_GOAL. */
 	enableCreateGoal?: boolean;
+	/**
+	 * Master launch switch: when true, both enableStartGoal and enableCreateGoal
+	 * default to true (the inner pi gets the FULL goal tool surface — create /
+	 * start / focus / resume — and start_gain gains a promptSnippet so the model
+	 * can start a goal from prose). Explicit enableStartGoal/enableCreateGoal
+	 * (env or file) still narrow it back down. Default false. Env override:
+	 * PI_GOAL_ENABLE.
+	 */
+	enable?: boolean;
+	/**
+	 * Absolute or cwd-relative path to a goal `.md` file to autoload at
+	 * session_start (load → focus → auto-run if active/paused). Env override
+	 * `PI_GOAL_FILE`; ignored in worker sessions (PI_TEAMS_WORKER=1).
+	 */
+	goalFile?: string;
 	/** Events that should be asynchronously forwarded to the auditor. */
 	auditorSubscriptions?: AuditorSubscription[];
 	/** Auditor operational mode. Defaults to "inherit". */
@@ -192,6 +213,25 @@ export const PI_GOAL_ACTIVE_ENV_TEMPLATE_ENV = "PI_GOAL_ACTIVE_ENV_TEMPLATE";
 export const PI_GOAL_ENABLE_START_GOAL_ENV = "PI_GOAL_ENABLE_START_GOAL";
 /** Env opt-in: when "true", create_goal tool becomes callable-while-hidden AND its execute() creates a goal. Default false. */
 export const PI_GOAL_ENABLE_CREATE_GOAL_ENV = "PI_GOAL_ENABLE_CREATE_GOAL";
+/**
+ * Master launch env: when "true"/"1", implies enableStartGoal + enableCreateGoal
+ * (full goal tool surface) and arms start_goal with a promptSnippet so the model
+ * can start a goal from prose. Explicit PI_GOAL_ENABLE_START_GOAL=0 / =1 still
+ * narrows per-tool. Default false.
+ */
+export const PI_GOAL_ENABLE_ENV = "PI_GOAL_ENABLE";
+/**
+ * Env override: absolute or cwd-relative path to a goal `.md` file to autoload
+ * at session_start (load → focus → auto-run if active/paused). Ignored in worker
+ * sessions (PI_TEAMS_WORKER=1).
+ */
+export const PI_GOAL_FILE_ENV = "PI_GOAL_FILE";
+/**
+ * Env override for non-TUI paused-goal auto-resume at session_start.
+ * "1" = force auto-resume (even in TUI); "0" = never auto-resume; unset = auto
+ * (prompt in TUI, auto-resume in non-TUI).
+ */
+export const PI_GOAL_AUTO_RESUME_ENV = "PI_GOAL_AUTO_RESUME";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -207,6 +247,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"disabledTools",
 	"enableStartGoal",
 	"enableCreateGoal",
+	"enable",
+	"goalFile",
 	"auditorSubscriptions",
 	"auditorMode",
 	"auditorExclude",
@@ -431,8 +473,8 @@ function asNonEmptyString(value: unknown): string | undefined {
 }
 
 function asBool(value: unknown): boolean | undefined {
-	if (value === true || value === "true") return true;
-	if (value === false || value === "false") return false;
+	if (value === true || value === "true" || value === "1") return true;
+	if (value === false || value === "false" || value === "0") return false;
 	return undefined;
 }
 
@@ -565,6 +607,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (enableStartGoal !== undefined) settings.enableStartGoal = enableStartGoal;
 	const enableCreateGoal = asBool(record.enableCreateGoal);
 	if (enableCreateGoal !== undefined) settings.enableCreateGoal = enableCreateGoal;
+	const enable = asBool(record.enable);
+	if (enable !== undefined) settings.enable = enable;
+	const goalFile = asNonEmptyString(record.goalFile);
+	if (goalFile) settings.goalFile = goalFile;
 	const auditorSubscriptions = asAuditorSubscriptions(record.auditorSubscriptions);
 	if (auditorSubscriptions !== undefined) settings.auditorSubscriptions = auditorSubscriptions;
 	const auditorMode = asAuditorMode(record.auditorMode);
@@ -677,6 +723,9 @@ function mergeSettings(global: GoalSettings, local: GoalSettings): GoalSettings 
  */
 export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.env): GoalSettings {
 	const fileConfig = loadGoalSettingsFileConfig(cwd, env);
+	// Master enable switch: env > file > false. Per-tool flags fall back to this
+	// so PI_GOAL_ENABLE=1 (or settings.enable=true) implies both tools callable.
+	const enable = asBool(env[PI_GOAL_ENABLE_ENV]) ?? fileConfig.enable ?? false;
 	return {
 		disableTasks: asBool(env.PI_GOAL_DISABLE_TASKS) ?? fileConfig.disableTasks ?? false,
 		disableContracts: asBool(env.PI_GOAL_DISABLE_CONTRACTS) ?? fileConfig.disableContracts ?? false,
@@ -686,8 +735,10 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		thinkingLevel: fileConfig.thinkingLevel,
 		disabled: fileConfig.disabled,
 		disabledTools: asStringArray(env.PI_GOAL_DISABLED_TOOLS) ?? fileConfig.disabledTools,
-		enableStartGoal: asBool(env[PI_GOAL_ENABLE_START_GOAL_ENV]) ?? fileConfig.enableStartGoal ?? false,
-		enableCreateGoal: asBool(env[PI_GOAL_ENABLE_CREATE_GOAL_ENV]) ?? fileConfig.enableCreateGoal ?? false,
+		enableStartGoal: asBool(env[PI_GOAL_ENABLE_START_GOAL_ENV]) ?? fileConfig.enableStartGoal ?? enable,
+		enableCreateGoal: asBool(env[PI_GOAL_ENABLE_CREATE_GOAL_ENV]) ?? fileConfig.enableCreateGoal ?? enable,
+		enable,
+		goalFile: asNonEmptyString(env[PI_GOAL_FILE_ENV]) ?? fileConfig.goalFile,
 		auditorSubscriptions: fileConfig.auditorSubscriptions,
 		auditorMode: fileConfig.auditorMode,
 		auditorExclude: fileConfig.auditorExclude,
@@ -777,6 +828,9 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (disabledTools !== undefined) clean.disabledTools = disabledTools;
 	if (settings.enableStartGoal === true) clean.enableStartGoal = true;
 	if (settings.enableCreateGoal === true) clean.enableCreateGoal = true;
+	if (settings.enable === true) clean.enable = true;
+	const goalFile = asNonEmptyString(settings.goalFile);
+	if (goalFile) clean.goalFile = goalFile;
 	if (auditorSubscriptions !== undefined) clean.auditorSubscriptions = auditorSubscriptions;
 	if (auditorMode) clean.auditorMode = auditorMode;
 	if (auditorExclude) clean.auditorExclude = auditorExclude;
@@ -818,6 +872,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.disabledTools) persisted.disabledTools = clean.disabledTools;
 	if (clean.enableStartGoal) persisted.enableStartGoal = clean.enableStartGoal;
 	if (clean.enableCreateGoal) persisted.enableCreateGoal = clean.enableCreateGoal;
+	if (clean.enable) persisted.enable = clean.enable;
+	if (clean.goalFile) persisted.goalFile = clean.goalFile;
 	if (clean.auditorSubscriptions) persisted.auditorSubscriptions = clean.auditorSubscriptions;
 	if (clean.auditorMode) persisted.auditorMode = clean.auditorMode;
 	if (clean.auditorExclude) persisted.auditorExclude = clean.auditorExclude;
