@@ -2,8 +2,8 @@
  * Unified global goal settings.
  *
  * Reads `.pi/pi-goal-xx-settings.json` with env var overrides:
- *   PI_GOAL_DISABLE_TASKS     — "true" to disable, any other value = use file config
- *   PI_GOAL_DISABLE_CONTRACTS — "true" to disable, any other value = use file config
+ *   PI_GOAL_DISABLE_TASKS     — "true"/"1" to disable, "false"/"0"/other = use file config
+ *   PI_GOAL_DISABLE_CONTRACTS — "true"/"1" to disable, "false"/"0"/other = use file config
  *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
  *   PI_GOAL_ENABLE_START_GOAL — "true" to opt-in start_goal callable-while-hidden
  *   PI_GOAL_ENABLE_CREATE_GOAL — "true" to opt-in create_goal callable-while-hidden + functional execute

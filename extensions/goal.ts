@@ -2144,13 +2144,16 @@ Verification contract:
 	/**
 	 * Unit F — /goal-focus override flow (D5, LD2). Checks the focus lock on a
 	 * goal BEFORE setFocusedGoalId is called. Returns true if focus may proceed,
-	 * false if it should be aborted (declined or headless-refused).
+	 * false if it should be aborted (declined or refused).
 	 *
 	 * - No lock / stale lock → silent proceed (setFocusedGoalId reaps+acquires).
 	 * - Held by self → proceed.
-	 * - Held by another LIVE session → confirm dialog; on confirm, forcibly
-	 *   release + proceed; on decline, abort.
-	 * - Headless (!ctx.hasUI) → refuse with a warning (cannot prompt).
+	 * - Held by another LIVE session:
+	 *   - Feature (c): in non-TUI (or PI_GOAL_AUTO_CONFIRM=1) → auto-takeover
+	 *     (release + proceed + warn). Non-TUI launches get full goal
+	 *     functionality without a prompt.
+	 *   - TUI without opt-in → confirm dialog; on confirm, forcibly release +
+	 *     proceed; on decline, abort. On TUI decline, refuse + notify.
 	 */
 	/**
 	 * Compute the set of open goals held by OTHER live sessions, for surfacing
@@ -2211,10 +2214,12 @@ Verification contract:
 			return true;
 		}
 		// Held by another LIVE session.
-		// Feature (c): in non-TUI the confirm dialog is unusable. Allow
-		// takeover when PI_GOAL_AUTO_CONFIRM=1 (the same opt-in that
-		// auto-confirms goal-draft proposals). Without it, refuse + notify
-		// (unchanged for headless without opt-in; TUI still prompts).
+		// Feature (c): in non-TUI the confirm dialog is unusable, so the goal
+		// would be unusable if we refused. shouldAutoConfirmProposal returns
+		// true in non-TUI (regardless of PI_GOAL_AUTO_CONFIRM) AND when
+		// PI_GOAL_AUTO_CONFIRM=1 is set explicitly. Either way → auto-takeover
+		// (release + proceed + warn). Only TUI without opt-in reaches the
+		// confirm dialog below.
 		const autoConfirm = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
 		if (autoConfirm) {
 			ctx.ui.notify(
@@ -4770,7 +4775,13 @@ promptGuidelines: [
 		}
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
-		if (event.reason === "resume" && !envLoadPerformed && !state.goal && openGoals().length > 1 && ctx.hasUI) {
+		// Feature (c): multi-open at session_start resume. focusGoalCommand now
+		// self-dispatches — it auto-picks the most-recent open goal in non-TUI
+		// (isInteractiveTui internal branch) and shows the picker in TUI. Calling
+		// it in both modes ensures non-TUI launches with multiple open goals
+		// (and no PI_GOAL_FILE) still resolve focus instead of leaving it
+		// undefined and silently disabling goal work.
+		if (event.reason === "resume" && !envLoadPerformed && !state.goal && openGoals().length > 1) {
 			await focusGoalCommand(ctx);
 		}
 		// Feature (c): paused-goal resume at session_start. In non-TUI the goal

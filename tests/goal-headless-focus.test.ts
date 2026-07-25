@@ -149,4 +149,17 @@ describe("Feature (c) — non-TUI multi-open auto-pick", () => {
 		const autoNotify = (pi.ui as any).notifyCalls.find((c: any) => /Auto-focused/i.test(String(c.msg)));
 		assert.ok(autoNotify, "non-TUI /goal-focus MUST auto-pick + notify 'Auto-focused'");
 	});
+
+	it("session_start resume non-TUI with 2 open goals (no PI_GOAL_FILE) → auto-focuses", async () => {
+		// F2 fix: session_start multi-open must resolve focus in non-TUI too,
+		// not just in TUI. Without this, a non-TUI launch into a multi-open
+		// pool (no PI_GOAL_FILE) leaves focus undefined → goal work disabled.
+		writePoolGoal("resume-a");
+		writePoolGoal("resume-b");
+		const { pi, ctx } = freshPi({ hasUI: false });
+		await emit(pi, ctx, "session_start", { reason: "resume" });
+		await flushContinuation();
+		const autoNotify = (pi.ui as any).notifyCalls.find((c: any) => /Auto-focused/i.test(String(c.msg)));
+		assert.ok(autoNotify, "session_start non-TUI multi-open MUST auto-focus");
+	});
 });
