@@ -551,6 +551,11 @@ export async function runGoalCompletionAuditor(args: {
 	const model = resolved.model;
 	const thinkingLevel = config.thinkingLevel;
 	const outputParts: string[] = [];
+	// Fallback: accumulate text from text_delta events so output is captured
+	// even when text_end fires with empty content or doesn't fire at all
+	// (observed with some LiteLLM-proxied models that produce tool-calling
+	// loops without a final text response).
+	let textDeltaAccum = "";
 	if (resolved.error) {
 		return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: resolved.error };
 	}
@@ -1010,11 +1015,21 @@ export async function runGoalCompletionAuditor(args: {
 					emitProgress();
 					return;
 				}
+				// Capture text from text_delta events as a fallback buffer.
+				// Some models (notably LiteLLM-proxied) may fire text_end with empty
+				// content or not fire text_end at all. Accumulating deltas ensures
+				// we still capture whatever text the model produced.
+				if (streamEvent?.type === "text_delta" && typeof streamEvent.delta === "string") {
+					textDeltaAccum += streamEvent.delta;
+				}
 				// Capture text from text_end stream events — the verdict text lives
 				// here, not in message_end's finalMessage (pi-core can drop text
 				// content from the finalized message at message_end).
+				// Use || instead of ?? so empty-string content falls back to partial.
 				if (streamEvent?.type === "text_end") {
-					const textContent = streamEvent.content ?? streamEvent?.partial?.content?.[0]?.text;
+					const textContent = (streamEvent.content && streamEvent.content.trim())
+						? streamEvent.content
+						: streamEvent?.partial?.content?.[0]?.text;
 					if (typeof textContent === "string" && textContent.trim()) {
 						outputParts.push(textContent);
 					}
@@ -1233,6 +1248,13 @@ export async function runGoalCompletionAuditor(args: {
 					thinkingLevel,
 					error: "Auditor aborted.",
 				};
+			}
+			// Fallback: if no text was captured from text_end/message_end events,
+			// use the accumulated text_delta buffer. This handles models that produce
+			// text through deltas but never fire text_end with content, or that end
+			// the session while still in a tool-calling loop (no final text message).
+			if (outputParts.length === 0 && textDeltaAccum.trim()) {
+				outputParts.push(textDeltaAccum.trim());
 			}
 			const output = outputParts.join("\n\n").trim();
 			const decision = parseAuditorDecision(output);
