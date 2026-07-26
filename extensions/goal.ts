@@ -1020,13 +1020,34 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				} catch {}
 			}
 			if (focusedGoalId) {
-				acquireFocusedLock(ctx.cwd, focusedGoalId);
+				const acquireResult = acquireFocusedLock(ctx.cwd, focusedGoalId);
+				if (!acquireResult.ok) {
+					// Lock acquisition failed (held by another live session) — revert focus.
+					// Without this check, two sessions can both "focus" the same stale goal
+					// and run it concurrently. See flow/troubleshootings/2026-07-26_dual-session-stale-goal-race.md
+					if (acquireResult.heldByOther) {
+						try {
+							ctx.ui.notify(
+								`Goal focused but not running — held by session ${acquireResult.heldByOther.owner.sessionId} (pid ${acquireResult.heldByOther.owner.pid}). Use /goal-focus to take over.`,
+								"warning",
+							);
+						} catch {}
+					}
+					focusedGoalId = previousGoalId;
+				} else {
+					clearContinuationState();
+					clearActiveAccounting();
+					resetGetGoalNudgeState(previousGoalId);
+					resetGetGoalNudgeState(focusedGoalId);
+					if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
+				}
+			} else {
+				clearContinuationState();
+				clearActiveAccounting();
+				resetGetGoalNudgeState(previousGoalId);
+				resetGetGoalNudgeState(focusedGoalId);
+				if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
 			}
-			clearContinuationState();
-			clearActiveAccounting();
-			resetGetGoalNudgeState(previousGoalId);
-			resetGetGoalNudgeState(focusedGoalId);
-			if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
 		}
 		appendFocusEntry(focusedGoalId, reason);
 		// Append ledger event for focus changes
