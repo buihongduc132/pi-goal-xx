@@ -119,9 +119,22 @@ export function safeToString(reason: unknown): string {
 
 
 export function parseAuditorDecision(output: string): { approved: boolean; disapproved: boolean } {
-	const approved = /<approved\s*\/>/.test(output);
-	const disapproved = /<disapproved\s*\/>/.test(output);
-	return { approved: approved && !disapproved, disapproved };
+	// The verdict is determined by the LAST marker in the output. The auditor
+	// prompt instructs the model to end with exactly one marker, but the
+	// report body may reference <disapproved/> or <approved/> as evidence
+	// (e.g., quoting the original bug or discussing prior verdicts). Using
+	// .test() returns true if the pattern appears ANYWHERE, causing false
+	// rejections when both markers appear. The last-occurrence strategy is
+	// robust to in-body references because the final marker is always the
+	// actual verdict (per prompt instructions).
+	const approvedMatches = [...output.matchAll(/<approved\s*\/>/g)];
+	const disapprovedMatches = [...output.matchAll(/<disapproved\s*\/>/g)];
+	const lastApproved = approvedMatches.length > 0 ? approvedMatches[approvedMatches.length - 1].index : -1;
+	const lastDisapproved = disapprovedMatches.length > 0 ? disapprovedMatches[disapprovedMatches.length - 1].index : -1;
+	// Whichever marker appears last is the verdict. If neither appears, both false.
+	const approved = lastApproved > lastDisapproved;
+	const disapproved = lastDisapproved > lastApproved;
+	return { approved, disapproved };
 }
 
 export interface AuditorVerificationEvidence {
