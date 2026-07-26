@@ -931,6 +931,11 @@ export async function runGoalCompletionAuditor(args: {
 				error: rejectionMessage,
 			};
 		}
+		// B6: aborted flag — MUST be declared BEFORE session.subscribe() so the
+		// callback closure can access it without TDZ errors when events fire
+		// synchronously. emitProgress (called from the subscribe callback) checks
+		// this flag to stop writing progress after abort.
+		let aborted = args.signal?.aborted ?? false;
 		const unsubscribe = session.subscribe((event) => {
 			// Forensic trace: record every session event with a bounded preview.
 			// This is the timeline used to diagnose crashes/hangs after the fact.
@@ -1063,11 +1068,7 @@ export async function runGoalCompletionAuditor(args: {
 		});
 		// Wire the external AbortSignal to abort the running session when fired
 		// This is the mechanism that makes Esc-to-skip actually stop the auditor.
-		// B6: set a local `aborted` flag so emitProgress stops writing to the
-		// caller's progress state after abort. Without this, late events from
-		// the session (which may fire after session.abort() returns) would
-		// resurrect the nulled auditProgress in the caller.
-		let aborted = args.signal?.aborted ?? false;
+		// aborted already declared above (before session.subscribe)
 		// Counterfactual fix: wrap session.abort() in try/catch for
 		// defense-in-depth. abort() is non-throwing today (pi-agent-core),
 		// but a future refactor could throw — and a throw inside an
