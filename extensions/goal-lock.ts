@@ -247,6 +247,11 @@ export function isLockStale(lock: GoalFocusLock): boolean {
 /**
  * Atomic write: tmp file then rename (POSIX-atomic).
  * FAIL-OPEN: fs errors are logged, never thrown.
+ *
+ * NOTE: NOT safe for lock acquisition — the rename overwrites any existing
+ * file, creating a TOCTOU race between this write and the verify-read in
+ * acquireLock. Use writeLockExclusive() for acquireLock. This function is
+ * retained for refreshLease which needs overwrite semantics.
  */
 export function writeLockAtomic(cwd: string, goalId: string, lock: GoalFocusLock): void {
 	ensureLockDir(cwd);
@@ -267,9 +272,55 @@ export function writeLockAtomic(cwd: string, goalId: string, lock: GoalFocusLock
 }
 
 /**
- * Acquire flow (D5): read → if held by OTHER (different sessionId AND held),
- * fail with heldByOther → reap stale → write atomic → RE-READ to verify
- * ownership (boot-race loser backs off if verify mismatches).
+ * Exclusive lock write: O_CREAT | O_EXCL on the final path.
+ * Returns true if the lock was written (this caller won the race).
+ * Returns false on EEXIST (another writer got there first) — the caller
+ * should re-read and check if the existing lock is stale or held.
+ *
+ * This closes the TOCTOU race in acquireLock: the old writeLockAtomic +
+ * verify-read pattern had a gap where another process could overwrite
+ * between write and verify, causing both to believe they own the lock.
+ * O_EXCL is truly atomic at the kernel level — only one open("wx") succeeds.
+ *
+ * FAIL-OPEN: non-EEXIST fs errors are logged, returns false.
+ * On write failure after O_EXCL open, the partial file is cleaned up.
+ */
+export function writeLockExclusive(cwd: string, goalId: string, lock: GoalFocusLock): boolean {
+	ensureLockDir(cwd);
+	const final = lockPath(cwd, goalId);
+	let fd: number;
+	try {
+		fd = fs.openSync(final, "wx"); // O_CREAT | O_EXCL | O_WRONLY
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "EEXIST") return false; // another writer won the race
+		logGoalTrace(cwd, { level: "warn", step: "lock.writeExclusive", goalId, message: `failed to open lock ${final}`, error: previewError(err) });
+		return false; // fail-open
+	}
+	try {
+		fs.writeSync(fd, JSON.stringify(lock));
+		return true;
+	} catch (err) {
+		logGoalTrace(cwd, { level: "warn", step: "lock.writeExclusive", goalId, message: `failed to write lock ${final}`, error: previewError(err) });
+		// Clean up partial/corrupt file
+		try { fs.unlinkSync(final); } catch { /* ignore */ }
+		return false;
+	} finally {
+		try { fs.closeSync(fd); } catch { /* ignore */ }
+	}
+}
+
+/**
+ * Acquire flow (D5 + race-safe): read → if held by OTHER, fail → reap stale →
+ * writeLockExclusive (O_EXCL) → if EEXIST, re-read and retry (stale) or fail (held).
+ *
+ * O_EXCL closes the TOCTOU race: the old writeLockAtomic + verify-read pattern
+ * had a gap where another process could overwrite between write and verify,
+ * causing both sessions to believe they own the lock. O_EXCL is truly atomic.
+ *
+ * Retry loop (max 3 attempts): handles the case where another session reaped
+ * the same stale lock and wrote first. On each retry, re-reads the lock to
+ * check if it's now held (fail) or stale again (reap + retry).
  *
  * FAIL-OPEN: fs errors during write/verify result in { ok: false }, not throws.
  */
@@ -280,31 +331,59 @@ export function acquireLock(
 	leaseMs: number,
 ): { ok: boolean; heldByOther?: GoalFocusLock } {
 	ensureLockDir(cwd);
-	const existing = readLock(cwd, goalId);
-	if (existing) {
-		if (existing.owner.sessionId !== self.sessionId && isLockHeld(existing)) {
-			return { ok: false, heldByOther: existing };
+
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const existing = readLock(cwd, goalId);
+		if (existing) {
+			if (existing.owner.sessionId !== self.sessionId && isLockHeld(existing)) {
+				return { ok: false, heldByOther: existing };
+			}
+			if (isLockStale(existing)) {
+				reapStaleLock(cwd, goalId);
+			}
+		} else {
+			// readLock returns null on both ENOENT and error (corrupt JSON).
+			// Reap corrupt/unreadable lock files so O_EXCL can succeed.
+			const detailed = readLockDetailed(cwd, goalId);
+			if (detailed.status === "error") {
+				try { fs.unlinkSync(lockPath(cwd, goalId)); } catch { /* ignore */ }
+			}
 		}
-		if (isLockStale(existing)) {
-			reapStaleLock(cwd, goalId);
+
+		const now = Date.now();
+		const lock: GoalFocusLock = {
+			goalId,
+			owner: { ...self, startTimeMs: getSelfStartTimeMs() },
+			acquiredAt: new Date(now).toISOString(),
+			expiresAt: new Date(now + leaseMs).toISOString(),
+			heartbeatAt: new Date(now).toISOString(),
+		};
+
+		if (writeLockExclusive(cwd, goalId, lock)) {
+			return { ok: true };
+		}
+
+		// EEXIST: another session wrote between our read and our write.
+		// Re-read: if held → fail; if stale → loop reaps and retries.
+		const after = readLock(cwd, goalId);
+		if (after) {
+			if (after.owner.sessionId === self.sessionId) {
+				return { ok: true }; // defensive: we own it
+			}
+			if (isLockHeld(after)) {
+				return { ok: false, heldByOther: after };
+			}
+			// Stale → loop will reap and retry
+		} else {
+			// Disappeared or corrupt → loop will handle
+			const detailed = readLockDetailed(cwd, goalId);
+			if (detailed.status === "error") {
+				try { fs.unlinkSync(lockPath(cwd, goalId)); } catch { /* ignore */ }
+			}
 		}
 	}
-	const now = Date.now();
-	const lock: GoalFocusLock = {
-		goalId,
-		owner: { ...self, startTimeMs: getSelfStartTimeMs() },
-		acquiredAt: new Date(now).toISOString(),
-		expiresAt: new Date(now + leaseMs).toISOString(),
-		heartbeatAt: new Date(now).toISOString(),
-	};
-	writeLockAtomic(cwd, goalId, lock);
-	// Verify ownership — boot-race loser backs off if another session wrote
-	// between our reap and our write (or if our write silently failed).
-	const verified = readLock(cwd, goalId);
-	if (!verified || verified.owner.sessionId !== self.sessionId) {
-		return { ok: false };
-	}
-	return { ok: true };
+
+	return { ok: false };
 }
 
 /**
