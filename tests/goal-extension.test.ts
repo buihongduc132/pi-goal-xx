@@ -71,20 +71,26 @@ let h: Harness;
 before(() => { h = makeHarness(); });
 
 describe("goal.ts extension — registration surface", () => {
-	it("registers all 14 tools", () => {
+	it("registers the surviving tools (dead block/question/pause tools removed)", () => {
 		const names = Array.from(h.tools.keys()).sort();
-		assert.deepEqual(names, [
-			"abort_goal", "complete_goal", "complete_task", "create_goal",
-			"get_goal", "goal_question", "goal_questionnaire", "pause_goal",
+		// Dead tools (pause_goal, abort_goal, goal_question, goal_questionnaire) MUST
+		// NOT be registered. The surviving set is below.
+		const expected = [
+			"complete_goal", "complete_task", "create_goal",
+			"get_goal",
 			"propose_goal_draft", "propose_goal_tweak", "propose_task_list",
 			"skip_task", "start_goal", "step_complete",
-		]);
+		];
+		assert.deepEqual(names, expected);
+		for (const dead of ["pause_goal", "abort_goal", "goal_question", "goal_questionnaire"]) {
+			assert.ok(!names.includes(dead), `dead tool ${dead} registered`);
+		}
 	});
 
-	it("registers 14 commands incl. goal/sisyphus/goals-set", () => {
+	it("registers commands incl. goal/sisyphus/goals-set", () => {
 		const names = Array.from(h.commands.keys());
-		assert.equal(names.length, 14);
-		for (const c of ["goal", "sisyphus", "goals-set", "goal-pause", "goal-resume", "goal-abort"]) {
+		assert.ok(names.length >= 10);
+		for (const c of ["goal", "sisyphus", "goals-set"]) {
 			assert.ok(h.commands.has(c), `missing command ${c}`);
 		}
 	});
@@ -158,16 +164,6 @@ describe("goal.ts tools — no active goal", () => {
 		assert.ok(res.content[0].text !== undefined);
 	});
 
-	it("pause_goal without active goal is handled gracefully", async () => {
-		const res = await h.tools.get("pause_goal")!.execute("t", { reason: "x" }, undefined, undefined, makeCtx(tmpCwd()));
-		assert.ok(res.content[0].text !== undefined);
-	});
-
-	it("abort_goal without active goal is handled gracefully", async () => {
-		const res = await h.tools.get("abort_goal")!.execute("t", { reason: "x" }, undefined, undefined, makeCtx(tmpCwd()));
-		assert.ok(res.content[0].text !== undefined);
-	});
-
 	it("complete_task without active goal is handled", async () => {
 		const res = await h.tools.get("complete_task")!.execute("t", { taskId: "x", evidence: "e" }, undefined, undefined, makeCtx(tmpCwd()));
 		assert.ok(res.content[0].text !== undefined);
@@ -225,18 +221,6 @@ describe("goal.ts — goals-set command creates a goal", () => {
 			"t", { taskId: "n2", reason: "obsolete" }, undefined, undefined, makeCtx(cwd),
 		);
 		assert.ok(res.details !== undefined);
-	});
-
-	it("pause_goal pauses the active goal", async () => {
-		const res = await h.tools.get("pause_goal")!.execute(
-			"t", { reason: "need input", suggestedAction: "provide creds" }, undefined, undefined, makeCtx(cwd),
-		);
-		assert.match(res.content[0].text, /pause|Pause/i);
-	});
-
-	it("abort_goal aborts the goal", async () => {
-		const res = await h.tools.get("abort_goal")!.execute("t", { reason: "obsolete" }, undefined, undefined, makeCtx(cwd));
-		assert.match(res.content[0].text, /abort|Abort|cancel/i);
 	});
 });
 

@@ -4,7 +4,7 @@
  * Real harness-based behavioral tests. Each test loads the goal extension into
  * a fresh mock pi (fresh SELF_SESSION_ID + fresh continuation state), drives it
  * through its public surface (session_start event, /goal-resume command,
- * /goals-set command, pause_goal tool), and asserts on observable behavior:
+ * /goals-set command, /goal-pause command), and asserts on observable behavior:
  *   - whether a continuation fired (pi.sentMessages has a "pi-goal-event")
  *   - on-disk lock state (readLock / lockPath)
  *
@@ -147,7 +147,7 @@ describe("Unit E — auto-run chokepoint (tasks 4.10–4.16)", () => {
 		assert.ok(goalId, "goal created");
 
 		// Pause (stops heartbeat; lock remains on disk, lazy-reap).
-		await invokeTool(pi, ctx, "pause_goal", { reason: "waiting" });
+		await invokeCommand(pi, ctx, "goal-pause", "");
 		// Simulate lease lapse: same owner, expired lease.
 		const selfOwner = readLock(cwd, goalId)!.owner;
 		plantLock(goalId!, selfOwner, Date.now() - 1_000);
@@ -169,7 +169,7 @@ describe("Unit E — auto-run chokepoint (tasks 4.10–4.16)", () => {
 		const goalId = soleGoalIdOnDisk();
 		assert.ok(goalId, "goal created");
 
-		await invokeTool(pi, ctx, "pause_goal", { reason: "waiting" });
+		await invokeCommand(pi, ctx, "goal-pause", "");
 		// Another live session acquires while we're paused.
 		releaseLock(cwd, goalId);
 		acquireLock(cwd, goalId, OTHER, 180_000);

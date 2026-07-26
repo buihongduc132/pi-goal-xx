@@ -50,12 +50,10 @@ import {
 import {
 	isInteractiveTui,
 	proposalDialogFailureMessage,
-	registerQuestionnaireTools,
 	shouldAutoConfirmProposal,
 	showProposalDialog,
 } from "./goal-questionnaire.ts";
 import {
-	ABORT_GOAL_TOOL_NAME,
 	ACTIVE_GOAL_TOOL_NAMES,
 	COMPLETE_TASK_TOOL_NAME,
 	CREATE_GOAL_TOOL_NAME,
@@ -64,8 +62,6 @@ import {
 	PROPOSE_DRAFT_TOOL_NAME,
 	PROPOSE_TASK_LIST_TOOL_NAME,
 	PROPOSE_TWEAK_TOOL_NAME,
-	QUESTIONNAIRE_TOOL_NAME,
-	QUESTION_TOOL_NAME,
 	SISYPHUS_STEP_TOOL_NAME,
 	GOAL_PROGRESS_TOOL_NAMES,
 	lifecycleToolNamesForGoalStatus,
@@ -163,18 +159,14 @@ import { showTaskListOverlay } from "./widgets/task-list-overlay.ts";
 
 import {
 	abortGoalCommandMessage,
-	buildAbortedByAgentGoal,
 	buildCompletionReport,
 	buildGoalCreatedReport,
-	buildPausedByAgentGoal,
 	buildTaskSummary,
 	clearGoalCommandMessage,
 	shouldArmPostCompactReminder,
 	shouldInjectPostCompactReminder,
 	taskCompletionBlockWarning,
-	validateGoalAbort,
 	validateGoalCompletion,
-	validatePauseGoal,
 	checkSubtasksComplete,
 	findSubtaskDepthViolation,
 	findTaskInTree,
@@ -203,8 +195,8 @@ const GOAL_PROGRESS_TOOL_SET = new Set<string>(GOAL_PROGRESS_TOOL_NAMES);
 
 
 /**
- * Tools that are NEVER blocked by the post-stop in-turn block. After pause_goal,
- * abort_goal, or complete_goal fires, the agent should
+ * Tools that are NEVER blocked by the post-stop in-turn block. After
+ * complete_goal fires, the agent should
  * yield the turn; we block all subsequent tool calls except these read-only inspections.
  */
 const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
@@ -517,10 +509,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// Unit E task 4.8b: when focus is cleared (null) or changes to a
 			// different goal id, release the previous goal's focus lock BEFORE
 			// reassignment. This single chokepoint covers ALL setGoal(null)
-			// paths (clear, replace-topic, aborted) automatically — abort is
-			// terminal so it releases explicitly (honors the "MUST NOT hold
-			// locks" invariant); pause relies on lazy reap-on-acquire (see
-			// pause_goal comment).
+			// paths (clear, replace-topic, cleared) automatically — a terminal
+			// clear is terminal so it releases explicitly (honors the "MUST NOT hold
+			// locks" invariant); user-initiated pause (/goal-pause) relies on lazy
+			// reap-on-acquire.
 			const prevId = focusedGoalId;
 			const changing = prevId !== null && (next === null || next.id !== prevId);
 			if (changing && cachedCwd) {
@@ -645,10 +637,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Per-turn flags reset in turn_start (#4, C9 fix).
 	// goalWorkToolCalledThisTurn: tracks whether a real goal-work tool was called.
 	//   If false at turn_end, we don't queue another autoContinue (empty chat turn).
-	// turnStoppedFor: set by pause_goal / complete_goal / propose_goal_tweak
+	// turnStoppedFor: set by complete_goal / propose_goal_tweak
 	//   after their successful execute. Once set, pi.on("tool_call") blocks all
 	//   subsequent in-turn tool calls except POST_STOP_ALLOWED_TOOLS. This is the
-	//   schema fix for "agent keeps writing files after pause_goal".
+	//   schema fix for "agent keeps writing files after a lifecycle stop".
 	// turnSeq: lightweight generation counter, incremented at each turn start.
 	//   Used to scope turnStoppedFor so stale markers from prior turns or sessions
 	//   cannot poison a resumed active goal.
@@ -686,8 +678,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				: new Set<string>();
 			const active = new Set(initialTools);
 			for (const name of goalExecutionWorkTools) active.add(name);
-			active.delete(QUESTION_TOOL_NAME);
-			active.delete(QUESTIONNAIRE_TOOL_NAME);
 			for (const name of ACTIVE_GOAL_TOOL_NAMES) active.delete(name);
 			const phase = confirmationIntent !== null ? "drafting" : tweakDraftingFor !== null ? "tweakDrafting" : "normal";
 			const lifecycleTools = lifecycleToolNamesForGoalStatus(state.goal?.status, phase);
@@ -697,11 +687,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// not expose it as an active work tool.
 			active.delete(SISYPHUS_STEP_TOOL_NAME);
 			// propose_goal_tweak is always available for active/paused goals via lifecycle tools.
-			// During a /goal-tweak drafting flow, additionally expose question tools.
 			if (state.goal && tweakDraftingFor === state.goal.id) {
 				active.add(PROPOSE_TWEAK_TOOL_NAME);
-				active.add(QUESTION_TOOL_NAME);
-				active.add(QUESTIONNAIRE_TOOL_NAME);
 			}
 			// Outside of active/paused states, remove propose_goal_tweak
 			if (!state.goal || state.goal.status === "complete") {
@@ -739,13 +726,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			} else {
 				active.delete(START_GOAL_TOOL_NAME);
 			}
-			if (confirmationIntent !== null) {
-				active.add(QUESTION_TOOL_NAME);
-				active.add(QUESTIONNAIRE_TOOL_NAME);
-			} else if (state.goal?.status === "active") {
+			if (state.goal?.status === "active") {
 				for (const name of goalExecutionWorkTools) active.add(name);
-				active.add(QUESTION_TOOL_NAME);
-				active.add(QUESTIONNAIRE_TOOL_NAME);
 			}
 			// Per-tool disable: hide any tool listed in settings.disabledTools.
 			// All tool names are eligible (lifecycle included); the user accepts
@@ -2807,8 +2789,6 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 	}));
 
 
-	registerQuestionnaireTools(pi);
-
 	pi.registerTool(regTool(defineTool({
 		name: "get_goal",
 		label: "Get Goal",
@@ -2834,7 +2814,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 				}
 			}
 			const lifecycleHint = view && (view.status === "active" || view.status === "paused")
-				? "\nLifecycle tools: if evidence proves the objective is satisfied, call complete_goal({verificationSummary: \"evidence\"}); if blocked, call pause_goal({reason, suggestedAction?}); if abandoned/obsolete/unsafe, call abort_goal({reason}). For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
+				? "\nLifecycle tools: if evidence proves the objective is satisfied, call complete_goal({verificationSummary: \"evidence\"}). If you are blocked, state the blocker in your final message and stop — the user will intervene. For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
 				: "";
 			const text = view
 				? `${detailedSummary(view)}${lifecycleHint}${nudge}${otherCount > 0 ? `\nOther open goals: ${otherCount} (human can run /goal-list or /goal-focus)` : ""}`
@@ -3461,9 +3441,9 @@ ${objective}` : objective,
 			"Before calling complete_goal, you MUST provide a verificationSummary that addresses every success criterion and any verification contract on the goal. Fold all verification evidence (test output, grep results, requirements coverage) into this single field.",
 			"The auditor is authoritative: completion is archived only if the auditor report ends with <approved/>. If it ends with <disapproved/> or no approval marker, complete_goal is rejected and the goal remains open.",
 			"Do NOT call complete_goal if any work remains, even if substantial progress was made. Do not use it merely because work is stopping, tests passed, or you are blocked.",
-			"Do not use complete_goal=complete as an escape hatch when you are blocked. If you are blocked, call pause_goal({reason, suggestedAction?}) instead so the user can intervene.",
+			"If you are blocked and cannot make one more reasonable next step, do NOT mark the goal complete. State the blocker in your final message and stop; the user will intervene.",
 			"For sisyphus goals, do not mark complete until every numbered step has been executed and individually verified against its done criterion.",
-			"The goal objective is immutable. The agent MUST NOT modify the goal objective on its own initiative. If the user gives requirements, feedback, or corrections that differ from the goal objective, ask the user to run /goal-tweak to revise the goal. Use goal_question to confirm when the change is ambiguous.",
+			"The goal objective is immutable. The agent MUST NOT modify the goal objective on its own initiative. If the user gives requirements, feedback, or corrections that differ from the goal objective, ask the user to run /goal-tweak to revise the goal. If the change is ambiguous, ask the user directly in your reply.",
 			"If the goal has a verificationContract, your verificationSummary must address every item in the contract. The auditor will cross-check your claims against real artifacts.",
 		],
 		parameters: Type.Object({
@@ -3629,7 +3609,7 @@ ${objective}` : objective,
 						content: [{ type: "text", text: [
 							"The completion auditor is disabled in settings.",
 							"",
-							`Use \`goal_question\` to ask the user: "The independent completion auditor is disabled. Bypass independent verification and mark the goal complete?"`,  
+							"Ask the user directly in your reply: The independent completion auditor is disabled. Bypass independent verification and mark the goal complete?",
 							"If the user confirms, call complete_goal again with confirmBypassAuditor: true.",
 						].join("\n") }],
 						details: goalDetails(state.goal),
@@ -3996,168 +3976,6 @@ ${objective}` : objective,
 		renderCall(args, theme) {
 			const label = args?.status ?? "";
 			return new Text(theme.fg("toolTitle", "complete_goal ") + theme.fg("success", label), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			return renderGoalResult(result, theme);
-		},
-	})))
-
-	pi.registerTool(regTool(defineTool({
-		name: "pause_goal",
-		label: "Pause Goal",
-		description: "Pause the active pi goal and report a blocker to the user. The user must /goal-resume, /goal-tweak, or /goal-clear before work continues.",
-		promptSnippet: "Pause the active pi goal and report a concrete blocker so the user can intervene.",
-		promptGuidelines: [
-			"Use pause_goal when you have hit a real blocker that you cannot resolve with one more reasonable next step: missing credentials, ambiguous or contradictory spec, a file or permission you cannot access, a sisyphus step whose precondition is not in the plan, or any irreversible / dangerous operation that requires explicit user approval.",
-			"Do NOT use pause_goal to escape a merely hard problem; first try one concrete next step. Do not use pause_goal as a softer substitute for complete_goal \u2014 if the objective is achieved, complete it; if it is not, do not complete it.",
-			"Never silently invent a workaround, fake completion, or quietly redefine the objective. Pause and report instead.",
-			"Always pass a concrete one-sentence reason. When you know how the user can unblock you, pass suggestedAction (e.g. 'Set FOO_API_KEY env var and /goal-resume', or 'Use /goal-tweak to insert a precondition step before step 3').",
-			"After pause_goal returns, stop. Do not call other tools in the same turn.",
-			"For sisyphus goals: if any step is unclear, blocked, fails, or seems wrong, pause_goal is the correct action \u2014 do not skip the step or invent a workaround.",
-		],
-		parameters: Type.Object({
-			reason: Type.String({ description: "One-sentence concrete blocker description. Plain language, not an apology." }),
-			suggestedAction: Type.Optional(Type.String({ description: "Optional concrete suggestion for how the user can unblock (e.g. command to run, value to provide, /goal-tweak hint)." })),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			reconcileFocusedGoalFromDisk(ctx);
-			const reason = params.reason.trim();
-			if (!reason) throw new Error("pause_goal requires a non-empty reason.");
-			const pauseGate = validatePauseGoal({ goal: state.goal, runningGoalId, reason });
-			if (!pauseGate.ok) {
-				return {
-					content: [{ type: "text", text: pauseGate.message }],
-					details: goalDetails(state.goal),
-				};
-			}
-			if (!state.goal) throw new Error("Goal disappeared during pause validation.");
-			const suggested = params.suggestedAction?.trim() || undefined;
-
-			// Account for any remaining elapsed time before stopping the run.
-			accountProgress(ctx);
-			// Unit E task 4.7: pause does NOT explicitly release the focus lock.
-			// The heartbeat timer stops (no active continuation → no auto-refresh,
-			// and clearStoppedRuntimeState is not called here, so the timer keeps
-			// running until setGoal→status!=active clears it below). Lazy
-			// reap-on-acquire: when this or another session later calls
-			// acquireLock (e.g. /goal-resume), a lapsed/stale lock is reaped.
-			// This mirrors the pause-vs-abort split: pause = lazy reap,
-			// abort = explicit release via the state.goal setter (task 4.8b).
-			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
-			const next = buildPausedByAgentGoal(state.goal, { reason, suggestedAction: suggested, updatedAt: nowIso() });
-			setGoal(next, ctx);
-			resetGetGoalNudgeState(next.id);
-			// C9 fix: mark turn-stopped so subsequent in-turn tool calls are blocked.
-			// This is the schema-level closure of "agent kept writing files after pause_goal".
-			setTurnStopped(state.goal.id);
-
-			const suggestionLine = suggested ? `\nSuggested: ${truncateText(suggested, 160)}` : "";
-			ctx.ui.notify(
-				`Goal paused by agent.\nReason: ${truncateText(reason, 200)}${suggestionLine}\n\nUse /goal-resume to continue, /goal-tweak to revise, or /goal-clear to abandon.`,
-				"warning",
-			);
-			// Async auditor subscription: forward "pause" (blocked) event.
-			emitAuditorSubscription(
-				ctx,
-				loadGoalSettings(ctx.cwd),
-				"pause",
-				{ goalId: next.id, details: { reason, suggestedAction: suggested } },
-				nowIso,
-				ctx.ui?.notify,
-			);
-			return {
-				content: [{
-					type: "text",
-					text: `Goal paused. Reason: ${reason}${suggested ? `\nSuggested: ${suggested}` : ""}\nWaiting for user to /goal-resume, /goal-tweak, or /goal-clear. Stop now; do not start another tool call.`,
-				}],
-				details: goalDetails(state.goal),
-				terminate: true,
-			};
-		},
-		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", "pause_goal ") + theme.fg("warning", truncateText(args?.reason ?? "", 80)), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			return renderGoalResult(result, theme);
-		},
-	})))
-
-	pi.registerTool(regTool(defineTool({
-		name: ABORT_GOAL_TOOL_NAME,
-		label: "Abort Goal",
-		description: "Abort the current active or paused pi goal and archive it without marking it complete.",
-		promptSnippet: "Abort the current pi goal only when the user asks to abandon it or the objective is obsolete/impossible.",
-		promptGuidelines: [
-			"Use abort_goal only when the user explicitly asks to abandon/cancel the current goal, or when the goal is impossible, obsolete, or unsafe to continue and should not be marked complete.",
-			"Do not use abort_goal as a substitute for complete_goal. If the objective is achieved, complete it instead.",
-			"Do not use abort_goal for ordinary blockers that the user can resolve; use pause_goal({reason, suggestedAction?}) for that case.",
-			"Always pass a concrete one-sentence reason. After abort_goal returns, stop and do not call other tools in the same turn.",
-		],
-		parameters: Type.Object({
-			reason: Type.String({ description: "One-sentence reason for abandoning the current goal. Plain language, not an apology." }),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			reconcileFocusedGoalFromDisk(ctx);
-			const reason = params.reason.trim();
-			if (!reason) throw new Error("abort_goal requires a non-empty reason.");
-			const abortGate = validateGoalAbort({ goal: state.goal, runningGoalId, reason });
-			if (!abortGate.ok) {
-				return {
-					content: [{ type: "text", text: abortGate.message }],
-					details: goalDetails(state.goal),
-				};
-			}
-			if (!state.goal) throw new Error("Goal disappeared during abort validation.");
-			const abortedGoalId = state.goal.id;
-
-			// Account for any remaining elapsed time before abandoning the run.
-			accountProgress(ctx);
-			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
-			state.goal = buildAbortedByAgentGoal(state.goal, { reason, updatedAt: nowIso() });
-			const archived = archiveCurrentGoal(ctx, "agent");
-			resetGetGoalNudgeState(abortedGoalId);
-			setGoal(null, ctx, true, "aborted");
-			setTurnStopped(abortedGoalId);
-
-			const archiveLine = archived?.archivedPath ? `\nArchive: ${archived.archivedPath}` : "";
-			ctx.ui.notify(
-				`Goal aborted by agent.\nReason: ${truncateText(reason, 200)}${archiveLine}`,
-				"warning",
-			);
-			// Append ledger event for abort
-			try {
-				appendGoalEvent(ctx, {
-					type: "goal_aborted",
-					goalId: abortedGoalId,
-					reason,
-					archivePath: archived?.archivedPath,
-					at: nowIso(),
-				});
-			} catch {
-				// Ledger append failure should not crash abort
-			}
-			// Async auditor subscription: forward "abort" event.
-			emitAuditorSubscription(
-				ctx,
-				loadGoalSettings(ctx.cwd),
-				"abort",
-				{ goalId: abortedGoalId, details: { reason, archivePath: archived?.archivedPath } },
-				nowIso,
-				ctx.ui?.notify,
-			);
-			return {
-				content: [{
-					type: "text",
-					text: `Goal aborted. Reason: ${reason}${archiveLine}\nThe goal has been archived and cleared. Stop now; do not start another tool call.`,
-				}],
-				details: goalDetails(state.goal),
-				terminate: true,
-			};
-		},
-		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", "abort_goal ") + theme.fg("warning", truncateText(args?.reason ?? "", 80)), 0, 0);
 		},
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
@@ -4630,8 +4448,8 @@ promptGuidelines: [
 	// #4 + C9 fix + Phase 5 C3: gate in-turn tool calls based on lifecycle state.
 	pi.on("tool_call", async (event, ctx) => {
 		const stoppedGoalId = currentTurnStoppedGoalId();
-		// Post-stop in-turn block (C9 0ad8 fix): after pause_goal / abort_goal /
-		// complete_goal / propose_goal_tweak fires in this turn, block all subsequent tool calls except
+		// Post-stop in-turn block (C9 0ad8 fix): after a lifecycle stop
+		// (complete_goal / propose_goal_tweak) fires in this turn, block all subsequent tool calls except
 		// read-only inspection. Forces the agent to yield the turn instead of "fixing"
 		// the situation by creating extra files etc.
 		if (stoppedGoalId !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
@@ -4927,8 +4745,8 @@ promptGuidelines: [
 			const pauseExtras: string[] = [];
 			if (current.stopReason === "agent") {
 				pauseExtras.push("");
-				pauseExtras.push(`Pause reason (you set this in a prior turn via pause_goal): ${current.pauseReason ?? "(unknown)"}`);
-				if (current.pauseSuggestedAction) pauseExtras.push(`You suggested: ${current.pauseSuggestedAction}`);
+				pauseExtras.push(`Pause reason (set in a prior turn): ${current.pauseReason ?? "(unknown)"}`);
+				if (current.pauseSuggestedAction) pauseExtras.push(`Suggested action: ${current.pauseSuggestedAction}`);
 			}
 			// Inject durable auditor feedback if available
 			let auditorExtra = "";
@@ -4942,7 +4760,7 @@ promptGuidelines: [
 				// Ledger read failure should not break the prompt
 			}
 			return {
-				systemPrompt: `${currentSystemPrompt()}\n\n[PI GOAL PAUSED goalId=${current.id}]\n${untrustedObjectiveBlock(current)}${pauseExtras.join("\n")}${auditorExtra}\n\nThe goal is paused. Do not autonomously continue substantive work unless the user resumes it with /goal-resume. If the user explicitly asks to finish or abandon the paused goal, or the objective is already satisfied based on available evidence, you may call complete_goal or abort_goal without resuming. Do not call pause_goal again.`,
+				systemPrompt: `${currentSystemPrompt()}\n\n[PI GOAL PAUSED goalId=${current.id}]\n${untrustedObjectiveBlock(current)}${pauseExtras.join("\n")}${auditorExtra}\n\nThe goal is paused. Do not autonomously continue substantive work unless the user resumes it with /goal-resume. If the user explicitly asks to finish the paused goal, or the objective is already satisfied based on available evidence, you may call complete_goal without resuming.`,
 			};
 		}
 		const activeGoal = state.goal;

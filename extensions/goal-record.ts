@@ -42,7 +42,7 @@ export interface GoalRecord {
 	activePath?: string;
 	archivedPath?: string;
 	stopReason?: StopReason;
-	// Set by the agent's pause_goal tool. Cleared when the goal becomes active again.
+	// Set by /goal-pause (user slash command) or by a slash command that pauses the goal.
 	pauseReason?: string;
 	pauseSuggestedAction?: string;
 	skipAuditor?: boolean;

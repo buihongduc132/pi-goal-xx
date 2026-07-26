@@ -1,7 +1,6 @@
 import type { GoalTask } from "./goal-record.ts";
 import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
 import type { GoalSettings } from "./goal-settings.ts";
-import { askUserInstruction } from "./prompts/tool-instruction-parts.ts";
 import { expandContractTemplates } from "./contract-templating.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
@@ -257,11 +256,7 @@ export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd
  * are disabled, or references the available tool when only one is disabled.
  */
 function draftingAskLine(settings?: GoalSettings, cwd?: string): string {
-	const askText = askUserInstruction(settings, cwd);
-	if (askText) {
-		return `- If the topic is vague, ask one focused question with a recommended default. ${askText} Plain conversation is acceptable for simple clarifications.`;
-	}
-	return "- If the topic is vague, ask one focused question with a recommended default. Plain conversation is acceptable for simple clarifications.";
+	return "- If the topic is vague, ask one focused question with a recommended default via plain conversation.";
 }
 
 function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
@@ -273,7 +268,6 @@ function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, setting
 	const commonProtocol = [
 		"Confirmation protocol:",
 		"- Treat this as a lightweight conversation with the user, not a separate long-running runtime phase.",
-		draftingAskLine(settings, cwd),
 		"- Targeted read-only research is allowed when it helps define a better goal contract; do not start implementation before confirmation.",
 		"- If the topic is already concrete, you may proceed directly to propose_goal_draft.",
 		"- The goal contract should make the objective, success criteria, boundaries, constraints, and blocker rule explicit.",
