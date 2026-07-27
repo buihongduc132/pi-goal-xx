@@ -64,7 +64,7 @@ export function formatQuestionnaireAnswers(result: GoalQuestionnaireResult): str
 export function isInteractiveTui(ctx: { hasUI: boolean; mode?: string }): boolean {
 	const mode = (ctx as any).mode;
 	if (typeof mode === "string") {
-		return mode === "interactive";
+		return mode === "tui" || mode === "interactive";
 	}
 	// Fallback: when mode is not available, use hasUI (legacy behavior)
 	return ctx.hasUI;
@@ -75,7 +75,7 @@ export function shouldAutoConfirmProposal(args: { hasUI: boolean; autoConfirmEnv
 	if (args.autoConfirmEnv === "1") return true;
 	// When mode is known, use it; otherwise fall back to hasUI
 	if (typeof args.mode === "string") {
-		return args.mode !== "interactive";
+		return args.mode !== "tui" && args.mode !== "interactive";
 	}
 	return !args.hasUI;
 }

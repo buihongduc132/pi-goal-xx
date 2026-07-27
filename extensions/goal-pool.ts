@@ -55,6 +55,13 @@ export function resolveSessionFocus(args: {
 	cwd?: string;
 	selfSessionId?: string;
 }): string | null {
+	// Bug fix: Check open goal count FIRST. If 2+ goals exist, return null
+	// to let user choose via /goal-focus. This prevents silent auto-focus
+	// at session_start even when focusEntry/legacyGoal exist.
+	const open = openGoalsFromPool(args.pool);
+	if (open.length > 1) {
+		return null;
+	}
 	const focusedGoalId = args.focusEntry?.focusedGoalId ?? null;
 	const focused = focusedGoalId ? focusedGoalFromPool(args.pool, focusedGoalId) : null;
 	if (focused && focused.status !== "complete") {
@@ -68,7 +75,6 @@ export function resolveSessionFocus(args: {
 		args.pool.set(args.legacyGoal.id, cloneGoal(args.legacyGoal));
 		return args.legacyGoal.id;
 	}
-	const open = openGoalsFromPool(args.pool);
 	if (open.length !== 1) return null;
 	const candidate = open[0]?.id ?? null;
 	if (!candidate) return null;
