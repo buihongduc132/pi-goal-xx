@@ -1270,6 +1270,29 @@ export async function runGoalCompletionAuditor(args: {
 			if (outputParts.length === 0 && textDeltaAccum.trim()) {
 				outputParts.push(textDeltaAccum.trim());
 			}
+			// G4: reasoning models (e.g. role-smart) may produce thinking + tool calls
+			// but never emit a final text verdict. If output is still empty after all
+			// fallbacks, send a follow-up message to force the model to produce the
+			// verdict. This handles the case where the model ends the session without
+			// producing any text response.
+			if (outputParts.length === 0) {
+				try {
+					const verdictPrompt = "Please provide your final audit verdict. End your response with exactly <approved/> if the goal is complete, or exactly <disapproved/> if not.";
+					await session.prompt(verdictPrompt);
+					// Capture any text produced by the follow-up
+					if (outputParts.length === 0 && textDeltaAccum.trim()) {
+						outputParts.push(textDeltaAccum.trim());
+					}
+				} catch (followUpErr) {
+					// Follow-up failed — log but continue with empty output
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "verdict_followup_failed",
+						goalId: args.goal.id,
+						error: followUpErr instanceof Error ? followUpErr.message : String(followUpErr),
+					});
+				}
+			}
 			const output = outputParts.join("\n\n").trim();
 			const decision = parseAuditorDecision(output);
 			logAuditorTrace(args.ctx.cwd, buildEndEntry({
