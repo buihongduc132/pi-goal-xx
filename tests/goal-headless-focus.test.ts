@@ -134,32 +134,29 @@ describe("Feature (c) — confirmFocusOverride non-TUI takeover", () => {
 	});
 });
 
-describe("Feature (c) — non-TUI multi-open auto-pick", () => {
-	it("/goal-focus in non-TUI with 2 open goals → auto-focuses (no picker)", async () => {
+describe("Feature (c) — non-TUI multi-open NO auto-pick (bug fix)", () => {
+	it("/goal-focus in non-TUI with 2 open goals → shows list, does NOT auto-focus", async () => {
 		writePoolGoal("goal-a");
 		writePoolGoal("goal-b");
 		const { pi, ctx } = freshPi({ hasUI: false });
-		// Prime the session so focus state is initialized.
 		await emit(pi, ctx, "session_start", { reason: "new" });
-		// Now invoke /goal-focus directly — non-TUI branch auto-picks.
 		await invokeCommand(pi, ctx, "goal-focus", "");
 		await flushContinuation();
-		// One of the goals should be focused (auto-picked). Hard to assert WHICH
-		// without sort details, so assert a notify mentioning "Auto-focused".
+		// MUST NOT auto-focus
 		const autoNotify = (pi.ui as any).notifyCalls.find((c: any) => /Auto-focused/i.test(String(c.msg)));
-		assert.ok(autoNotify, "non-TUI /goal-focus MUST auto-pick + notify 'Auto-focused'");
+		assert.ok(!autoNotify, "non-TUI /goal-focus with 2+ goals MUST NOT auto-focus");
+		// MUST show list
+		const listNotify = (pi.ui as any).notifyCalls.find((c: any) => /goal-a|goal-b/i.test(String(c.msg)));
+		assert.ok(listNotify, "non-TUI /goal-focus with 2+ goals MUST show goal list");
 	});
 
-	it("session_start resume non-TUI with 2 open goals (no PI_GOAL_FILE) → auto-focuses", async () => {
-		// F2 fix: session_start multi-open must resolve focus in non-TUI too,
-		// not just in TUI. Without this, a non-TUI launch into a multi-open
-		// pool (no PI_GOAL_FILE) leaves focus undefined → goal work disabled.
+	it("session_start resume non-TUI with 2 open goals → does NOT auto-focus", async () => {
 		writePoolGoal("resume-a");
 		writePoolGoal("resume-b");
 		const { pi, ctx } = freshPi({ hasUI: false });
 		await emit(pi, ctx, "session_start", { reason: "resume" });
 		await flushContinuation();
 		const autoNotify = (pi.ui as any).notifyCalls.find((c: any) => /Auto-focused/i.test(String(c.msg)));
-		assert.ok(autoNotify, "session_start non-TUI multi-open MUST auto-focus");
+		assert.ok(!autoNotify, "session_start non-TUI multi-open MUST NOT auto-focus");
 	});
 });

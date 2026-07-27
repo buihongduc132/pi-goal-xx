@@ -223,11 +223,11 @@ describe("goal-focus picker UX — focusGoalCommand end-to-end", () => {
 		);
 	});
 
-	it("headless (!ctx.hasUI): auto-picks most-recent open goal (feature c: non-TUI just works)", async () => {
-		// Feature (c) behavior change: headless multi-open no longer just prints
-		// a list and returns (which left focus undefined and silently disabled
-		// goal work). It now deterministically auto-picks the most-recent open
-		// goal via sortGoalsForPicker and notifies "Auto-focused".
+	it("headless (!ctx.hasUI): shows list, does NOT auto-pick (bug fix)", async () => {
+		// Bug fix: headless multi-open with 2+ goals must NOT auto-pick.
+		// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+		// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+		// can we selecting the GOAL?"
 		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "active", autoContinue: true });
 		writeGoalFile(cwd, { id: "zz99yy11-betaid", status: "paused", autoContinue: false });
 		const { pi, ctx } = setup(false /* headless */);
@@ -236,10 +236,12 @@ describe("goal-focus picker UX — focusGoalCommand end-to-end", () => {
 		await invokeCommand(pi, ctx, "goal-focus", "");
 		await flushContinuation();
 
-		// ui.select must NOT have been called in headless mode.
-		// Auto-pick notifies "Auto-focused".
+		// MUST NOT auto-focus
 		const autoNotify = pi.ui.notifyCalls.find((n) => /Auto-focused/i.test(String(n.msg)));
-		assert.ok(autoNotify, "headless auto-focus MUST notify 'Auto-focused'");
+		assert.ok(!autoNotify, "headless with 2+ goals MUST NOT auto-focus");
+		// MUST show list
+		const listNotify = pi.ui.notifyCalls.find((n) => /qi4x4i|betaid/i.test(String(n.msg)));
+		assert.ok(listNotify, "headless with 2+ goals MUST show goal list");
 	});
 
 	it("computeHeldByOther: goal locked by another live session shows 🔒 pill in its label", async () => {

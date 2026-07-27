@@ -2115,20 +2115,12 @@ Verification contract:
 			return state.goal;
 		}
 		if (!isInteractiveTui(ctx)) {
-			// Feature (c): non-TUI multi-open. Auto-pick the most-recent open
-			// goal instead of returning null (which would leave focus undefined
-			// and silently disable goal work in headless launches).
-			const { liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
-			const sorted = sortGoalsForPicker(open, liveLockHolderSet);
-			const picked = sorted[0];
-			if (!picked) {
-				ctx.ui.notify(buildUnfocusedOpenGoalsSummary(open.length), "warning");
-				return null;
-			}
-			if (!(await confirmFocusOverride(ctx, picked.id))) return null;
-			setFocusedGoalId(picked.id, ctx, "selected");
-			ctx.ui.notify(`Auto-focused goal (non-TUI): ${oneLineSummary(picked)}`, "info");
-			return state.goal;
+			// Bug fix: non-TUI with 2+ goals must NOT auto-focus. Return null.
+			// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+			// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+			// can we selecting the GOAL?"
+			ctx.ui.notify(buildUnfocusedOpenGoalsSummary(open.length), "warning");
+			return null;
 		}
 		const shortIds = resolveShortIdsForPool(open);
 		const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
@@ -2260,7 +2252,7 @@ Verification contract:
 		return true;
 	}
 
-	async function focusGoalCommand(ctx: ExtensionContext): Promise<void> {
+	async function focusGoalCommand(ctx: ExtensionContext, rawArgs?: string): Promise<void> {
 		// Bug fix: reconcile from disk before reading pool. Without this,
 		// goals created by other sessions after startup are invisible to
 		// the picker (stale in-memory pool).
@@ -2269,6 +2261,21 @@ Verification contract:
 		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) {
 			ctx.ui.notify("No open goals. Use /goals or /sisyphus to discuss, or /goals-set / /sisyphus-set to start immediately.", "warning");
+			return;
+		}
+		// If rawArgs provided, parse as goal id and focus that specific goal
+		if (rawArgs && rawArgs.trim()) {
+			const targetId = rawArgs.trim();
+			// Match by full id or short suffix
+			const matched = open.find(g => g.id === targetId || g.id.endsWith(`-${targetId}`));
+			if (!matched) {
+				ctx.ui.notify(`Goal not found: ${targetId}. Use /goal-list to see available goals.`, "warning");
+				return;
+			}
+			if (!(await confirmFocusOverride(ctx, matched.id))) return;
+			setFocusedGoalId(matched.id, ctx, "selected");
+			armFocusedContinuation(ctx);
+			ctx.ui.notify(`Focused goal: ${oneLineSummary(matched)}`, "info");
 			return;
 		}
 		if (open.length === 1) {
@@ -2282,21 +2289,13 @@ Verification contract:
 			return;
 		}
 		if (!isInteractiveTui(ctx)) {
-			// Feature (c): non-TUI multi-open. The picker needs a UI surface; in
-			// non-TUI we deterministically auto-pick the most-recent open goal
-			// (same sort used by the TUI picker) and run confirmFocusOverride on
-			// it so a held lock is respected (or taken over via PI_GOAL_AUTO_CONFIRM).
-			const { liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
-			const sorted = sortGoalsForPicker(open, liveLockHolderSet);
-			const picked = sorted[0];
-			if (!picked) {
-				ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, computeLockInfo(open, ctx.cwd)), "info");
-				return;
-			}
-			if (!(await confirmFocusOverride(ctx, picked.id))) return;
-			setFocusedGoalId(picked.id, ctx, "selected");
-			armFocusedContinuation(ctx);
-			ctx.ui.notify(`Auto-focused goal (non-TUI): ${oneLineSummary(picked)}`, "info");
+			// Bug fix: non-TUI with 2+ goals must NOT auto-focus. Show list instead.
+			// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+			// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+			// can we selecting the GOAL?"
+			const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther, liveLockHolderSet }), "info");
+			ctx.ui.notify("Use /goal-focus <short-id> to select a specific goal.", "info");
 			return;
 		}
 		const shortIds = resolveShortIdsForPool(open);
@@ -2744,9 +2743,9 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		},
 	}));
 	pi.registerCommand("goal-focus", wrapCmdDef("goal-focus", {
-		description: "Choose which open goal this session should focus on.",
-		handler: async (_rawArgs, ctx) => {
-			await focusGoalCommand(ctx);
+		description: "Choose which open goal this session should focus on. Use /goal-focus <short-id> to select a specific goal.",
+		handler: async (rawArgs, ctx) => {
+			await focusGoalCommand(ctx, rawArgs);
 		},
 	}));
 	pi.registerCommand("goal-settings", wrapCmdDef("goal-settings", {
@@ -4631,14 +4630,14 @@ promptGuidelines: [
 		}
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
-		// Feature (c): multi-open at session_start resume. focusGoalCommand now
-		// self-dispatches — it auto-picks the most-recent open goal in non-TUI
-		// (isInteractiveTui internal branch) and shows the picker in TUI. Calling
-		// it in both modes ensures non-TUI launches with multiple open goals
-		// (and no PI_GOAL_FILE) still resolve focus instead of leaving it
-		// undefined and silently disabling goal work.
+		// Bug fix: with 2+ goals, session_start resume must NOT auto-focus.
+		// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+		// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+		// can we selecting the GOAL?"
 		if (event.reason === "resume" && !envLoadPerformed && !state.goal && openGoals().length > 1) {
-			await focusGoalCommand(ctx);
+			// Notify user that multiple goals exist, but do not auto-focus.
+			const openCount = openGoals().length;
+			ctx.ui.notify(`${openCount} open goals exist. Use /goal-focus <short-id> to select which one to work on.`, "info");
 		}
 		// Feature (c): paused-goal resume at session_start. In non-TUI the goal
 		// would otherwise stay paused forever (silent no-op). PI_GOAL_AUTO_RESUME
