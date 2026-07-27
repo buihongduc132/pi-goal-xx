@@ -2014,8 +2014,10 @@ Verification contract:
 		reconcileFocusedGoalFromDisk(ctx);
 		clearContinuationState();
 		clearActiveAccounting();
-		if (!state.goal) {
-			if (openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if (open.length > 1 || !state.goal) {
+			if (open.length > 0) {
 				const selected = await chooseOpenGoal(ctx, "Tweak which open goal?");
 				if (!selected) return;
 			} else {
@@ -2099,8 +2101,11 @@ Verification contract:
 
 	async function chooseOpenGoal(ctx: ExtensionContext, title: string): Promise<GoalRecord | null> {
 		reconcileFocusedGoalFromDisk(ctx);
-		if (state.goal && state.goal.status !== "complete") return state.goal;
 		const open = openGoals();
+		// Only fast-return the focused goal when there's 0-1 open goals.
+		// With 2+ open goals, ALWAYS show the picker so the user can select
+		// which goal to operate on (bug fix: early return blocked selection).
+		if (open.length <= 1 && state.goal && state.goal.status !== "complete") return state.goal;
 		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) return null;
 		if (open.length === 1) {
@@ -2256,6 +2261,10 @@ Verification contract:
 	}
 
 	async function focusGoalCommand(ctx: ExtensionContext): Promise<void> {
+		// Bug fix: reconcile from disk before reading pool. Without this,
+		// goals created by other sessions after startup are invisible to
+		// the picker (stale in-memory pool).
+		reconcileFocusedGoalFromDisk(ctx);
 		const open = openGoals();
 		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) {
@@ -2365,8 +2374,10 @@ Verification contract:
 
 	async function handleGoalPause(ctx: ExtensionContext): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal) {
-			if (openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if (open.length > 1 || !state.goal) {
+			if (open.length > 0) {
 				const selected = await chooseOpenGoal(ctx, "Pause which open goal?");
 				if (!selected) return;
 			} else {
@@ -2389,7 +2400,9 @@ Verification contract:
 
 	async function handleGoalResume(ctx: ExtensionContext): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Resume or focus open goal");
 			if (!selected) return;
 			if (selected.status === "active") {
@@ -2625,7 +2638,9 @@ Verification contract:
 			return;
 		}
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Clear which open goal?");
 			if (!selected) return;
 		}
@@ -2652,7 +2667,9 @@ Verification contract:
 			return;
 		}
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Abort which open goal?");
 			if (!selected) return;
 		}
