@@ -372,3 +372,42 @@ function patchGoalTimestamp(cwd: string, id: string, iso: string): void {
 		return;
 	}
 }
+
+describe("chooseOpenGoal multi-goal picker — bug fix: focused goal must not block selection", () => {
+	it("chooseOpenGoal shows picker when 2+ open goals exist even if a goal is already focused", async () => {
+		// Setup: 2 open goals
+		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "active", autoContinue: true });
+		writeGoalFile(cwd, { id: "zz99yy11-betaid", status: "paused", autoContinue: false });
+		const { pi, ctx } = setup(true);
+		await loadGoals(pi, ctx);
+
+		// Manually set a focused goal (simulating auto-focus on session start)
+		// by directly invoking the focus command with a pre-pushed answer
+		(pi.ui as any).selectAnswers.length = 0;
+		const spy = spySelect(pi.ui);
+		await invokeCommand(pi, ctx, "goal-focus", "");
+		await flushContinuation();
+
+		// Verify the initial focus worked
+		const focusedBefore = lastFocusedGoalId(pi);
+		assert.ok(focusedBefore, `a goal should be focused after initial focus. select calls: ${spy.calls.length}, entries: ${(pi as any).appendedEntries.length}`);
+
+		// Clear spy for the next command
+		spy.restore();
+		const spy2 = spySelect(pi.ui);
+		(pi.ui as any).selectAnswers.length = 0;
+
+		// Now invoke goal-pause which calls chooseOpenGoal internally.
+		// The picker MUST show even though a goal is already focused.
+		await invokeCommand(pi, ctx, "goal-pause", "");
+		await flushContinuation();
+		spy2.restore();
+
+		// The picker MUST have been called (not skipped due to focused goal)
+		const selectCalls = spy2.calls.filter((c) => c.items && c.items.length > 0);
+		assert.ok(selectCalls.length >= 1, `picker must be called when 2+ open goals exist, got ${selectCalls.length} calls`);
+		// The picker must show 2 items (both open goals)
+		const pickerCall = selectCalls[0];
+		assert.equal(pickerCall!.items.length, 2, `picker must show 2 goals, got ${pickerCall!.items.length}`);
+	});
+});
