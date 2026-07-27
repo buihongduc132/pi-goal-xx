@@ -4634,7 +4634,7 @@ promptGuidelines: [
 		// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
 		// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
 		// can we selecting the GOAL?"
-		if (event.reason === "resume" && !envLoadPerformed && !state.goal && openGoals().length > 1) {
+		if (!envLoadPerformed && !state.goal && openGoals().length > 1) {
 			// Notify user that multiple goals exist, but do not auto-focus.
 			const openCount = openGoals().length;
 			ctx.ui.notify(`${openCount} open goals exist. Use /goal-focus <short-id> to select which one to work on.`, "info");
