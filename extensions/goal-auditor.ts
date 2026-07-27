@@ -1276,6 +1276,12 @@ export async function runGoalCompletionAuditor(args: {
 			// verdict. This handles the case where the model ends the session without
 			// producing any text response.
 			if (outputParts.length === 0) {
+				logAuditorTrace(args.ctx.cwd, {
+					ts: new Date().toISOString(),
+					phase: "verdict_followup_sent",
+					goalId: args.goal.id,
+					model: modelLabel(model),
+				});
 				try {
 					const verdictPrompt = "Please provide your final audit verdict. End your response with exactly <approved/> if the goal is complete, or exactly <disapproved/> if not.";
 					await session.prompt(verdictPrompt);
@@ -1283,6 +1289,12 @@ export async function runGoalCompletionAuditor(args: {
 					if (outputParts.length === 0 && textDeltaAccum.trim()) {
 						outputParts.push(textDeltaAccum.trim());
 					}
+					logAuditorTrace(args.ctx.cwd, {
+						ts: new Date().toISOString(),
+						phase: "verdict_followup_completed",
+						goalId: args.goal.id,
+						outputLength: outputParts.length > 0 ? outputParts.join("\n\n").length : 0,
+					});
 				} catch (followUpErr) {
 					// Follow-up failed — log but continue with empty output
 					logAuditorTrace(args.ctx.cwd, {
