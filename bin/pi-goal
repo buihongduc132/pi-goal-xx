@@ -1,0 +1,24 @@
+#!/bin/bash
+# pi-goal — pi with goal tools surfaced.
+#
+# Canonical source for ~/.local/bin/pi-goal.
+# This wrapper is a clean passthrough of `pi` with the ONLY addition being
+# 3 env vars that surface GOAL* tools in the pi session:
+#   PI_GOAL_ENABLE=true             → master switch: implies START_GOAL + CREATE_GOAL + promptSnippet
+#   PI_GOAL_ENABLE_START_GOAL=true  → start_goal callable-while-hidden
+#   PI_GOAL_ENABLE_CREATE_GOAL=true → create_goal callable-while-hidden + functional execute
+#
+# I/O guarantees (tested by tests/pi-goal-wrapper.test.sh):
+#   - stdout passthrough: byte-identical to `pi`
+#   - stderr passthrough: byte-identical to `pi`
+#   - stdin passthrough: piped input reaches pi unchanged
+#   - exit code passthrough: same exit code as `pi`
+#   - arg passthrough: all flags/args forwarded unchanged
+#   - NO output swallowing, NO input tampering, NO redirection
+#
+# Deploy: cp bin/pi-goal ~/.local/bin/pi-goal && chmod +x ~/.local/bin/pi-goal
+
+export PI_GOAL_ENABLE="${PI_GOAL_ENABLE:-true}"
+export PI_GOAL_ENABLE_START_GOAL="${PI_GOAL_ENABLE_START_GOAL:-true}"
+export PI_GOAL_ENABLE_CREATE_GOAL="${PI_GOAL_ENABLE_CREATE_GOAL:-true}"
+exec pi "$@"

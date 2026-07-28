@@ -10,3 +10,7 @@ coverage/
 # Git worktrees (local checkouts) — never commit.
 .worktrees/
 .wt-*/
+
+# Local exception: track pi-goal CLI wrapper (overrides global /bin/ ignore)
+!bin/
+!bin/pi-goal
