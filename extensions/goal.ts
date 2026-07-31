@@ -3931,11 +3931,15 @@ ${objective}` : objective,
 				// Clear auditor progress to restore normal widget state
 				auditProgress = null;
 				goalWidgetComponent?.invalidate();
+				if (auditor.gateFailure) {
+					try { ctx.ui.notify(`Pre-audit gate failed: ${auditor.gateFailure}`, "error"); } catch {}
+				}
 				const rejectionText = [
 					"Goal audit rejected.",
 					"",
 					"Goal completion rejected by independent auditor.",
 					auditor.model ? `Auditor model: ${auditor.model}${auditor.thinkingLevel ? `:${auditor.thinkingLevel}` : ""}` : undefined,
+					auditor.gateFailure ? `Pre-audit gate failed: ${auditor.gateFailure}` : undefined,
 					auditor.error ? `Auditor error: ${auditor.error}` : undefined,
 					"",
 					auditor.output || "Auditor produced no approval marker.",

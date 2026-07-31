@@ -88,6 +88,24 @@ export interface CommandHooksConfig {
 	[command: string]: boolean | CommandHookConfig | undefined;
 }
 
+export interface PreAuditHookPassCriteria {
+	status: number;
+	regex: string;
+	stream: "stdout" | "stderr" | "both";
+	combinator: "AND" | "OR";
+	negate: boolean;
+}
+
+export interface PreAuditHooksConfig {
+	enabled: boolean;
+	globalScript?: string;
+	localScript?: string;
+	passCriteria?: PreAuditHookPassCriteria;
+	injectOutput: boolean;
+	maxOutputChars: number;
+	timeoutMs: number;
+}
+
 export interface GoalSettings {
 	disableTasks?: boolean;
 	disableContracts?: boolean;
@@ -179,6 +197,7 @@ export interface GoalSettings {
 	 * event-sourced goal_events.jsonl ledger or auditor-trace.jsonl.
 	 */
 	logging?: GoalLoggingConfig;
+	preAuditHooks?: PreAuditHooksConfig;
 }
 
 /**
@@ -271,6 +290,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"auditorTimeoutMs",
 	"auditorTimeoutFloorMs",
 	"logging",
+	"preAuditHooks",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -440,6 +460,103 @@ function asCommandHooksBlock(raw: unknown): CommandHooksConfig | undefined {
 		if (Object.keys(cfg).length > 0) out[cmd] = cfg;
 	}
 	return out;
+}
+
+/** Validate + coerce the preAuditHooks block. Throws on unknown nested keys. */
+function asPreAuditHooksBlock(raw: unknown): PreAuditHooksConfig | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const knownNested = new Set([
+		"enabled",
+		"globalScript",
+		"localScript",
+		"passCriteria",
+		"injectOutput",
+		"maxOutputChars",
+		"timeoutMs",
+	]);
+	const unknownNested = Object.keys(rec).filter((k) => !knownNested.has(k));
+	if (unknownNested.length > 0) {
+		throw new Error(
+			`Unknown preAuditHooks nested key(s): ${unknownNested.join(", ")}`,
+		);
+	}
+
+	// enabled defaults to false when block present.
+	const enabled = rec.enabled === true || rec.enabled === "true";
+
+	// globalScript / localScript: optional non-empty strings.
+	const globalScript = asNonEmptyString(rec.globalScript);
+	const localScript = asNonEmptyString(rec.localScript);
+
+	// injectOutput defaults to true.
+	let injectOutput = true;
+	if (rec.injectOutput === false || rec.injectOutput === "false") injectOutput = false;
+
+	// maxOutputChars defaults to 5000.
+	let maxOutputChars = 5000;
+	if (typeof rec.maxOutputChars === "number") maxOutputChars = rec.maxOutputChars;
+	else if (typeof rec.maxOutputChars === "string" && rec.maxOutputChars.trim() !== "") {
+		const n = Number(rec.maxOutputChars);
+		if (Number.isFinite(n)) maxOutputChars = n;
+	}
+
+	// timeoutMs defaults to 30000.
+	let timeoutMs = 30000;
+	if (typeof rec.timeoutMs === "number") timeoutMs = rec.timeoutMs;
+	else if (typeof rec.timeoutMs === "string" && rec.timeoutMs.trim() !== "") {
+		const n = Number(rec.timeoutMs);
+		if (Number.isFinite(n)) timeoutMs = n;
+	}
+
+	// passCriteria: always populated with defaults when block present.
+	let passCriteria: PreAuditHookPassCriteria = {
+		status: 0,
+		regex: "",
+		stream: "both",
+		combinator: "AND",
+		negate: false,
+	};
+	const knownCritNested = new Set(["status", "regex", "stream", "combinator", "negate"]);
+	if (rec.passCriteria !== undefined) {
+		if (!rec.passCriteria || typeof rec.passCriteria !== "object" || Array.isArray(rec.passCriteria)) {
+			throw new Error(`Invalid preAuditHooks.passCriteria (must be an object)`);
+		}
+		const critRec = rec.passCriteria as Record<string, unknown>;
+		const unknownCritNested = Object.keys(critRec).filter((k) => !knownCritNested.has(k));
+		if (unknownCritNested.length > 0) {
+			throw new Error(
+				`Unknown preAuditHooks.passCriteria nested key(s): ${unknownCritNested.join(", ")}`,
+			);
+		}
+		let status = 0;
+		if (typeof critRec.status === "number") status = critRec.status;
+		else if (typeof critRec.status === "string" && critRec.status.trim() !== "") {
+			const n = Number(critRec.status);
+			if (Number.isFinite(n)) status = n;
+		}
+		const regex = typeof critRec.regex === "string" ? critRec.regex : "";
+		let stream: PreAuditHookPassCriteria["stream"] = "both";
+		if (critRec.stream === "stdout" || critRec.stream === "stderr" || critRec.stream === "both") {
+			stream = critRec.stream;
+		}
+		let combinator: PreAuditHookPassCriteria["combinator"] = "AND";
+		if (critRec.combinator === "AND" || critRec.combinator === "OR") {
+			combinator = critRec.combinator;
+		}
+		const negate = critRec.negate === true || critRec.negate === "true";
+		passCriteria = { status, regex, stream, combinator, negate };
+	}
+
+	return {
+		enabled,
+		globalScript,
+		localScript,
+		passCriteria,
+		injectOutput,
+		maxOutputChars,
+		timeoutMs,
+	};
 }
 
 /**
@@ -659,6 +776,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (auditorTimeoutFloorMsRaw !== undefined) settings.auditorTimeoutFloorMs = auditorTimeoutFloorMsRaw;
 	const logging = asLoggingConfig(record.logging);
 	if (logging) settings.logging = logging;
+	const preAuditHooks = asPreAuditHooksBlock(record.preAuditHooks);
+	if (preAuditHooks) settings.preAuditHooks = preAuditHooks;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
 	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
 	// Read the raw mode value (not the legacy-validated one) so unified modes
@@ -762,6 +881,7 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		auditorTimeoutMs: asPositiveInt(env[PI_GOAL_AUDITOR_TIMEOUT_MS_ENV]) ?? fileConfig.auditorTimeoutMs,
 		auditorTimeoutFloorMs: asPositiveInt(env[PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV]) ?? fileConfig.auditorTimeoutFloorMs,
 		logging: resolveLoggingFromEnv(env, fileConfig.logging),
+		preAuditHooks: fileConfig.preAuditHooks,
 	};
 }
 
@@ -857,6 +977,10 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
 	const logging = settings.logging ? asLoggingConfig(settings.logging) : undefined;
 	if (logging) clean.logging = logging;
+	if (settings.preAuditHooks) {
+		const paClean = asPreAuditHooksBlock(settings.preAuditHooks);
+		if (paClean) clean.preAuditHooks = paClean;
+	}
 	if (auditorTimeoutMs !== undefined) clean.auditorTimeoutMs = auditorTimeoutMs;
 	if (auditorTimeoutFloorMs !== undefined) clean.auditorTimeoutFloorMs = auditorTimeoutFloorMs;
 	const configPath = goalSettingsPath(cwd);
@@ -894,6 +1018,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
 	if (clean.logging) persisted.logging = clean.logging;
+	if (clean.preAuditHooks) persisted.preAuditHooks = clean.preAuditHooks;
 	if (clean.auditorTimeoutMs !== undefined) persisted.auditorTimeoutMs = clean.auditorTimeoutMs;
 	if (clean.auditorTimeoutFloorMs !== undefined) persisted.auditorTimeoutFloorMs = clean.auditorTimeoutFloorMs;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
