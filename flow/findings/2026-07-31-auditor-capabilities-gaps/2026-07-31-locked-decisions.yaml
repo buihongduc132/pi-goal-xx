@@ -1,0 +1,123 @@
+- id: LD1
+  turn: turn2
+  parts: ["decisions-locked", "architecture-clarification"]
+  user_quote: |
+    "OT1: NOT DEFER"
+  decision: Must implement early disapproval — auditor can abort mid-stream when it finds disqualifying issue
+  status: locked
+
+- id: LD2
+  turn: turn2
+  parts: ["decisions-locked", "architecture-clarification"]
+  user_quote: |
+    "OT4: not defer"
+  decision: Must implement pre-audit hooks — standalone system user installs or not, separate from auditor
+  status: locked
+
+- id: LD3
+  turn: turn2
+  parts: ["decisions-locked"]
+  user_quote: |
+    "OT2: defer"
+  decision: Defer cross-audit context persistence — auditor continues with fresh context per launch
+  status: locked
+
+- id: LD4
+  turn: turn2
+  parts: ["decisions-locked"]
+  user_quote: |
+    "OT3: ok"
+  decision: Structured output schema is optional — implement when convenient, not blocking
+  status: locked
+
+- id: LD5
+  turn: turn3
+  parts: ["deferral-correction"]
+  user_quote: |
+    "Ot4: user will wire this dynamically; if none , then let it to the auditor"
+  decision: OT4 is dynamic opt-in — if no hook configured, auditor runs as normal. NOT deferrable.
+  status: locked
+
+- id: LD6
+  turn: turn3
+  parts: ["deferral-correction"]
+  user_quote: |
+    "Ot6: NOT defer"
+  decision: Must implement output injection — hook output injected into auditor context (max 5k chars default). NOT deferrable.
+  status: locked
+
+- id: LD7
+  turn: turn3
+  parts: ["deferral-correction"]
+  user_quote: |
+    "Ot7: not defer"
+  decision: Must implement global/local script chaining. NOT deferrable.
+  status: locked
+
+- id: LD8
+  turn: findings-resolve-threads
+  parts: ["ot5-schema"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |
+    Pre-audit hook YAML schema. Nested block `preAuditHooks` with `passCriteria` sub-block:
+    ```yaml
+    preAuditHooks:
+      enabled: true                          # MUST be true to load (mirrors commandHooks.enabled)
+      globalScript: "/abs/path/check.sh"     # optional absolute
+      localScript: "./.pi/hooks/pre-audit.sh" # optional cwd-relative
+      passCriteria:
+        status: 0                            # exit code = pass (default 0)
+        regex: "PASS|SUCCESS"                # pattern vs stdout+stderr (default "" = skip)
+        stream: "both"                       # stdout | stderr | both (default both)
+        combinator: "AND"                    # AND | OR — combine status+regex (default AND)
+        negate: false                        # invert final result (default false)
+      injectOutput: true                     # inject script output into auditor prompt [LD6]
+      maxOutputChars: 5000                   # cap [LD6, default 5000]
+      timeoutMs: 30000                       # hook execution timeout (default 30s)
+    ```
+  status: locked
+  auto_decided: true
+  resolves: OT5
+  tradeoff: |
+    Alternatives considered:
+    (a) flat schema (preAuditHooks.statusCheck) — rejected; nesting groups related criteria.
+    (b) criteria-as-list ([{type:status,value:0},{type:regex,...}]) — rejected; user said combinator
+        is single AND/OR, not a list. List implies N-way combination user never requested.
+    Chosen: nested passCriteria block with combinator+negate — matches user's exact wording
+    ("AND OR" + "negate"), mirrors existing nested blocks (auditorExclude/auditorInclude).
+    Adds 3 fields user did not specify but required for safe production use:
+      - stream: which stream regex tests (default both — explicit is safer than implicit)
+      - timeoutMs: hook must not hang auditor (command-hook-loader has no equivalent;
+        auditor has auditorTimeoutMs = precedent for explicit timeout)
+      - status: configurable exit code (default 0; some tools use exit 2 = warning)
+    Evidence: turn2 [user] quote, turn2 architecture sketch, references.md command-hook-loader.ts
+    pattern (enabled + per-command block), goal-settings.ts auditorExclude/auditorInclude pattern
+    (nested filter block).
+
+- id: LD9
+  turn: findings-resolve-threads
+  parts: ["ot8-signal-mechanism"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |
+    OT1 early disapproval signal mechanism: use dedicated tool call `early_disapprove(reason)`.
+    Auditor calls this tool when it finds a disqualifying issue → streaming detector catches
+    tool_execution_start event for `early_disapprove` → abort session immediately.
+    This avoids false positives from quoted `<disapproved/>` markers in body text
+    (parseAuditorDecision last-occurrence fix — Bug #1, auditor-decision-parser.test.ts:38-91).
+    Tool call provides structured reason, clean separation of concerns, and immediate detection.
+  status: locked
+  auto_decided: true
+  resolves: OT8
+  tradeoff: |
+    Alternatives considered:
+    (a) Watch text_delta for <disapproved/> mid-stream → abort — REJECTED (Rank 1 CRITICAL gotcha).
+        parseAuditorDecision uses last-occurrence because <disapproved/> appears mid-report as
+        quoted evidence. Streaming detection will false-positive on quoted markers.
+    (b) Require marker at END of complete message turn — REJECTED. Defeats streaming purpose
+        (must wait for full message, no early abort benefit).
+    (c) Different sentinel for streaming (tool call or structured first-token signal) — CHOSEN.
+        Tool call `early_disapprove(reason)` is detectable immediately (tool_execution_start event),
+        provides structured reason, cannot be confused with quoted markers in body text.
+    Chosen: tool call approach. Evidence: turn3a-gotcha-cross-cutting-design.md §Rank 1
+    (OT1 directly contradicts last-occurrence parser), auditor-decision-parser.test.ts:38-91
+    (Bug #1 regression test proves marker-in-body-text is real scenario).
