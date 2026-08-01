@@ -4,6 +4,7 @@
  * Reads `.pi/pi-goal-xx-settings.json` with env var overrides:
  *   PI_GOAL_DISABLE_TASKS     — "true"/"1" to disable, "false"/"0"/other = use file config
  *   PI_GOAL_DISABLE_CONTRACTS — "true"/"1" to disable, "false"/"0"/other = use file config
+ *   PI_GOAL_DISABLE_BLOCKING_TOOLS — "true"/"1" hide propose_goal_tweak (default), "false"/"0" re-enable
  *   PI_GOAL_DISABLED_TOOLS    — comma-separated list of tool names to hide entirely
  *   PI_GOAL_ENABLE_START_GOAL — "true" to opt-in start_goal callable-while-hidden
  *   PI_GOAL_ENABLE_CREATE_GOAL — "true" to opt-in create_goal callable-while-hidden + functional execute
@@ -197,6 +198,7 @@ export interface GoalSettings {
 	 * event-sourced goal_events.jsonl ledger or auditor-trace.jsonl.
 	 */
 	logging?: GoalLoggingConfig;
+	disableBlockingTools?: boolean;
 	preAuditHooks?: PreAuditHooksConfig;
 }
 
@@ -251,6 +253,7 @@ export const PI_GOAL_FILE_ENV = "PI_GOAL_FILE";
  * (prompt in TUI, auto-resume in non-TUI).
  */
 export const PI_GOAL_AUTO_RESUME_ENV = "PI_GOAL_AUTO_RESUME";
+export const PI_GOAL_DISABLE_BLOCKING_TOOLS_ENV = "PI_GOAL_DISABLE_BLOCKING_TOOLS";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -290,6 +293,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"auditorTimeoutMs",
 	"auditorTimeoutFloorMs",
 	"logging",
+	"disableBlockingTools",
 	"preAuditHooks",
 ]);
 
@@ -776,6 +780,9 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (auditorTimeoutFloorMsRaw !== undefined) settings.auditorTimeoutFloorMs = auditorTimeoutFloorMsRaw;
 	const logging = asLoggingConfig(record.logging);
 	if (logging) settings.logging = logging;
+	// disableBlockingTools: opt-out flag. Defaults true (in loadGoalSettings).
+	const disableBlockingTools = asBool(record.disableBlockingTools);
+	if (disableBlockingTools !== undefined) settings.disableBlockingTools = disableBlockingTools;
 	const preAuditHooks = asPreAuditHooksBlock(record.preAuditHooks);
 	if (preAuditHooks) settings.preAuditHooks = preAuditHooks;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
@@ -881,6 +888,8 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		auditorTimeoutMs: asPositiveInt(env[PI_GOAL_AUDITOR_TIMEOUT_MS_ENV]) ?? fileConfig.auditorTimeoutMs,
 		auditorTimeoutFloorMs: asPositiveInt(env[PI_GOAL_AUDITOR_TIMEOUT_FLOOR_MS_ENV]) ?? fileConfig.auditorTimeoutFloorMs,
 		logging: resolveLoggingFromEnv(env, fileConfig.logging),
+		// disableBlockingTools: default TRUE (hide blockers). Env overrides.
+		disableBlockingTools: asBool(env[PI_GOAL_DISABLE_BLOCKING_TOOLS_ENV]) ?? fileConfig.disableBlockingTools ?? true,
 		preAuditHooks: fileConfig.preAuditHooks,
 	};
 }
@@ -977,6 +986,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (heartbeatMs !== undefined && heartbeatMs !== 60_000) clean.heartbeatMs = heartbeatMs;
 	const logging = settings.logging ? asLoggingConfig(settings.logging) : undefined;
 	if (logging) clean.logging = logging;
+	// disableBlockingTools: persist only when explicitly false (opt-out).
+	if (settings.disableBlockingTools === false) clean.disableBlockingTools = false;
 	if (settings.preAuditHooks) {
 		const paClean = asPreAuditHooksBlock(settings.preAuditHooks);
 		if (paClean) clean.preAuditHooks = paClean;
@@ -1018,6 +1029,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.leaseMs !== undefined) persisted.leaseMs = clean.leaseMs;
 	if (clean.heartbeatMs !== undefined) persisted.heartbeatMs = clean.heartbeatMs;
 	if (clean.logging) persisted.logging = clean.logging;
+	if (clean.disableBlockingTools === false) persisted.disableBlockingTools = false;
 	if (clean.preAuditHooks) persisted.preAuditHooks = clean.preAuditHooks;
 	if (clean.auditorTimeoutMs !== undefined) persisted.auditorTimeoutMs = clean.auditorTimeoutMs;
 	if (clean.auditorTimeoutFloorMs !== undefined) persisted.auditorTimeoutFloorMs = clean.auditorTimeoutFloorMs;

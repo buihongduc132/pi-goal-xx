@@ -729,6 +729,15 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (state.goal?.status === "active") {
 				for (const name of goalExecutionWorkTools) active.add(name);
 			}
+			// Blocker-tool gate: when disableBlockingTools is true (default), hide
+			// propose_goal_tweak so the goal runs e2e uninterrupted. complete_goal
+			// is NEVER hidden (required to finish). The block/question/pause agent
+			// tools were removed from this fork; propose_goal_tweak is the only
+			// remaining tool that can interrupt the goal flow.
+			const settings = cachedCwd ? loadGoalSettings(cachedCwd) : {};
+			if (settings.disableBlockingTools !== false) {
+				active.delete(PROPOSE_TWEAK_TOOL_NAME);
+			}
 			// Per-tool disable: hide any tool listed in settings.disabledTools.
 			// All tool names are eligible (lifecycle included); the user accepts
 			// breakage if they disable a lifecycle tool. Unknown tool names are
