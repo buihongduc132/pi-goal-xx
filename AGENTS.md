@@ -33,3 +33,8 @@ Ref: `flow/bugs/2026-07-07_propose-goal-draft-rpc-crash.md`
 Context: PR #21 safeFireAndForget wrapper. 6 `pi.sendMessage` calls written with braces-without-return, rejections floated.
 Solutions: Use implicit return `() => expr` or `() => { return expr; }`. Type `fn` as `() => unknown` not `() => void` so TS flags missing return.
 Ref: `flow/lesson_learn/2_arrow-implicit-return-promise-chain.md`
+
+3: start_goal has no deduplication — creates duplicate goal files on every call.
+Context: replaceGoal() → createGoal() → newGoalId() always mints fresh ID, never checks disk. 4 goals with same objective accumulated in goal-dashboard/.pi/goals/.
+Solutions: Added findDuplicateActiveGoal() in goal-files.ts (whitespace-normalized objective scan). Wired REJECT into start_goal/create_goal/propose_goal_draft, WARN into /goals-set. Dedup in caller not replaceGoal (re-creation paths need excludeGoalId bypass).
+Ref: `flow/lesson_learn/3_start-goal-no-dedup.md`
