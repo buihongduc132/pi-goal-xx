@@ -290,3 +290,29 @@ export function readActiveGoalPool(ctx: GoalFileContext): Map<string, GoalRecord
 	}
 	return pool;
 }
+
+/** Normalize an objective string for dedup comparison: trim + collapse internal whitespace. */
+export function normalizeObjectiveForDedup(objective: string): string {
+	return objective.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Find an existing active goal with the same objective (whitespace-insensitive).
+ * Returns the first matching goal, excluding one by ID when re-creating.
+ * Completed goals are excluded (they are already readActiveGoalFiles-filtered).
+ */
+export function findDuplicateActiveGoal(
+	ctx: GoalFileContext,
+	objective: string,
+	excludeGoalId?: string,
+): GoalRecord | null {
+	const normalized = normalizeObjectiveForDedup(objective);
+	if (!normalized) return null;
+	for (const goal of readActiveGoalFiles(ctx)) {
+		if (excludeGoalId && goal.id === excludeGoalId) continue;
+		if (normalizeObjectiveForDedup(goal.objective) === normalized) {
+			return goal;
+		}
+	}
+	return null;
+}
