@@ -111,6 +111,7 @@ import {
 	archiveGoalFile,
 	atomicWriteGoalFile,
 	ensureDirectory,
+	findDuplicateActiveGoal,
 	GOALS_DIR,
 	mergeGoalPromptFromDisk,
 	parseGoalFile,
@@ -2362,6 +2363,11 @@ Verification contract:
 		if (missingSnippets && missingSnippets.length > 0) {
 			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
 		}
+		// Dedup warning: notify if an active/paused goal with the same objective exists (but proceed — user invoked this directly).
+		const existingGoal = findDuplicateActiveGoal(ctx, raw);
+		if (existingGoal) {
+			ctx.ui.notify(`Note: a ${existingGoal.status} goal (${existingGoal.id}) with the same objective already exists. The old goal file will remain — use /goal-archive ${existingGoal.id} to clean it up.`, "warning");
+		}
 		clearContinuationState();
 		clearActiveAccounting();
 		confirmationIntent = null;
@@ -2925,6 +2931,16 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 					details: goalDetails(state.goal),
 				};
 			}
+			// Dedup guard: refuse to create if an active/paused goal with the same objective exists.
+			const existingDisk = findDuplicateActiveGoal(ctx, raw);
+			const existingMemory = state.goal && state.goal.status !== "complete" && state.goal.objective.trim().replace(/\s+/g, " ") === raw.trim().replace(/\s+/g, " ") ? state.goal : null;
+			const existing = existingDisk ?? existingMemory;
+			if (existing) {
+				return {
+					content: [{ type: "text", text: `create_goal REJECTED: a ${existing.status} goal (${existing.id}) with the same objective already exists. Use /goal-focus ${existing.id} to switch to it, or /goal-archive ${existing.id} to clear it first.` }],
+					details: goalDetails(existing),
+				};
+			}
 			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
 			if (missingSnippets && missingSnippets.length > 0) {
 				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
@@ -2992,6 +3008,16 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 				return {
 					content: [{ type: "text", text: `start_goal REJECTED: objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.` }],
 					details: goalDetails(state.goal),
+				};
+			}
+			// Dedup guard: refuse to create if an active/paused goal with the same objective exists.
+			const existingDisk = findDuplicateActiveGoal(ctx, raw);
+			const existingMemory = state.goal && state.goal.status !== "complete" && state.goal.objective.trim().replace(/\s+/g, " ") === raw.trim().replace(/\s+/g, " ") ? state.goal : null;
+			const existing = existingDisk ?? existingMemory;
+			if (existing) {
+				return {
+					content: [{ type: "text", text: `start_goal REJECTED: a ${existing.status} goal (${existing.id}) with the same objective already exists. Use /goal-focus ${existing.id} to switch to it, or /goal-archive ${existing.id} to clear it first.` }],
+					details: goalDetails(existing),
 				};
 			}
 			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
@@ -3081,6 +3107,16 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 
 			// All schema gates passed. Decide how to confirm.
 			const objective = validation.objective;
+			// Dedup guard: refuse to propose if an active/paused goal with the same objective exists.
+			const existingDisk = findDuplicateActiveGoal(ctx, objective);
+			const existingMemory = state.goal && state.goal.status !== "complete" && state.goal.objective.trim().replace(/\s+/g, " ") === objective.trim().replace(/\s+/g, " ") ? state.goal : null;
+			const existing = existingDisk ?? existingMemory;
+			if (existing) {
+				return {
+					content: [{ type: "text", text: `propose_goal_draft REJECTED: a ${existing.status} goal (${existing.id}) with the same objective already exists. Use /goal-focus ${existing.id} to switch to it, or /goal-archive ${existing.id} to clear it first.` }],
+					details: goalDetails(existing),
+				};
+			}
 			const autoContinueFlag = params.autoContinue ?? true;
 			const sisyphusFlag = validation.expectedSisyphus;
 			// Build confirmation text: goal + optional task list
