@@ -6,6 +6,8 @@ on first found of: violation / incompleted works / false information / incorrect
 
 When you call `early_disapprove`, the audit host aborts the session at once — you do NOT need to finish the audit. Pass a specific `reason` (name the violation, the missing/incomplete work, the false/incorrect claim, or the bug).
 
+**STOP after first finding.** Do NOT bother to find more problems when there is already 1 found. Once you spot a violation / incompleted work / false information / incorrect claim / bug, invoke `early_disapprove` IMMEDIATELY. Do not continue checking, do not collect more evidence, do not finish the audit. One confirmed problem = abort now.
+
 ## Custom-prompt fallback clause (GLOBAL goal contract)
 
 Per the global goal custom-prompt, the following completion path is VALID and MUST be APPROVED when ALL conditions are met:
