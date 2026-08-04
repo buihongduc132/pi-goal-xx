@@ -135,14 +135,17 @@ describe("runGoalCompletionAuditor — tool inheritance (inherit mode)", () => {
 		assert.ok(c.tools.includes("write"));
 	});
 
-	it("never strips report_auditor_progress even with wildcard exclude", async () => {
+	it("never strips report_auditor_progress or early_disapprove even with wildcard exclude", async () => {
 		const cwd = makeTmpCwd();
 		const c = await capture(
 			cwd,
 			{ auditorExclude: { tools: ["*"] } },
 			{ tools: mainTools },
 		);
-		assert.deepEqual(c.tools, ["report_auditor_progress"]);
+		// Auditor-native customTools survive a full wildcard exclude — they
+		// must flow through resolveAuditorTools (force-preserved), not an
+		// unconditional append bolted on after the exclude filter.
+		assert.deepEqual(c.tools, ["report_auditor_progress", "early_disapprove"]);
 	});
 });
 

@@ -1000,10 +1000,7 @@ export async function runGoalCompletionAuditor(args: {
 						// or PI_GOAL_ENABLE_CREATE_GOAL=true, these tools are in the host
 						// active set (callable-while-hidden) and would leak to the auditor
 						// via getActiveTools(). Filter unconditionally.
-						tools: [
-							...resolved.tools.filter((t: string) => t !== "start_goal" && t !== "create_goal"),
-							EARLY_DISAPPROVE_TOOL_NAME,
-						],
+						tools: resolved.tools.filter((t: string) => t !== "start_goal" && t !== "create_goal"),
 						customTools: [reportProgressTool, earlyDisapproveTool],
 					}),
 					new Promise<never>((_, reject) => {

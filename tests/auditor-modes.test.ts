@@ -45,9 +45,13 @@ describe("resolveAuditorTools — inherit mode", () => {
 		assert.equal(out.includes("gitnexus_context"), false);
 		assert.ok(out.includes("write"));
 	});
-	it("always keeps report_auditor_progress even if excluded", () => {
+	it("always keeps report_auditor_progress and early_disapprove even if excluded", () => {
 		const out = resolveAuditorTools(mainTools, { auditorExclude: { tools: ["*"] } });
-		assert.deepEqual(out, ["report_auditor_progress"]);
+		// Both are auditor-native customTools: they must survive a full wildcard
+		// exclude (the auditor cannot function without them). Regression guard
+		// for the 5b43b1b early_disapprove-allowlist bypass that appended
+		// early_disapprove AFTER the exclude filter, ignoring exclude semantics.
+		assert.deepEqual(out, ["report_auditor_progress", "early_disapprove"]);
 	});
 	it("falls back to baseline when mainTools is empty", () => {
 		const out = resolveAuditorTools([], {});
