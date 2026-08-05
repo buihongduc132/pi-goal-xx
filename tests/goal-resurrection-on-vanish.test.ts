@@ -67,7 +67,7 @@ function readTrace(): Record<string, unknown>[] {
 	return readTraceAt(cwd);
 }
 
-describe("goal resurrection RED — vanished focused goal", () => {
+describe("goal resurrection RED — vanished focused goal", { concurrency: false }, () => {
 	it("requires resurrection when activePath exists but disk pool becomes empty", async () => {
 		// ARRANGE: load one active goal, establishing in-memory focus and activePath.
 		const goalId = "vanish-active-001";
@@ -125,10 +125,15 @@ describe("goal resurrection RED — vanished focused goal", () => {
 		fs.writeFileSync(path.join(cwd, ".pi", "goals"), "not a directory");
 
 		// ACT: reconcile against a non-directory goal store.
-		await invokeTool(pi, ctx, "get_goal", {});
+		const result = await invokeTool(pi, ctx, "get_goal", {});
 
-		// ASSERT: error must be observable, not silently converted to resurrection.
-		assert.ok(readTrace().some((entry) => entry.level === "error" && entry.step === "reconcile.goal_read_error"));
+		// ASSERT: ENOTDIR is not equivalent to ENOENT and must be observable.
+		assert.match(String((result as any)?.content?.[0]?.text ?? ""), /No goal|unfocused/i);
+		const readError = readTrace().find((entry) => entry.step === "reconcile.goal_read_error");
+		assert.ok(readError, "non-ENOENT read failure must be surfaced");
+		assert.equal(readError.errorCode, "ENOTDIR");
+		assert.equal(readError.absenceClass, "read-error");
+		assert.notEqual(readError.absenceClass, "enoent");
 	});
 
 	it("records deliberate tombstone deletion as blocked, not accidental absence", async () => {
@@ -168,5 +173,35 @@ describe("goal resurrection RED — vanished focused goal", () => {
 		// ASSERT: worker stays unfocused and cannot resurrect leader memory.
 		assert.match(String((result as any)?.content?.[0]?.text ?? ""), /No goal|unfocused/i);
 		assert.equal(readTrace().some((entry) => entry.step === "reconcile.goal_restored_from_memory"), false);
+	});
+
+	it("requires resurrection through repeated cwd oscillation without losing the source copy", async () => {
+		// ARRANGE: focus one goal in cwd A and create two empty worktree pools.
+		const goalId = "vanish-oscillation-001";
+		const goalPathA = writeGoalFile(cwd, { id: goalId, status: "active", autoContinue: false });
+		const { pi, ctx } = freshPi();
+		await emit(pi, ctx, "session_start", { reason: "resume" });
+		assert.match(String((await invokeTool(pi, ctx, "get_goal", {}))?.content?.[0]?.text ?? ""), /vanish-oscillation-001/);
+		const cwdA = cwd;
+		const cwdB = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-vanish-oscillation-b-"));
+		const cwdC = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-vanish-oscillation-c-"));
+		for (const dir of [cwdB, cwdC]) fs.mkdirSync(path.join(dir, ".pi", "goals"), { recursive: true });
+
+		// ACT: oscillate A → B → A → C → B; every switch must restore from memory.
+		for (const nextCwd of [cwdB, cwdA, cwdC, cwdB]) {
+			ctx.cwd = nextCwd;
+			const result = await invokeTool(pi, ctx, "get_goal", {});
+			assert.match(String((result as any)?.content?.[0]?.text ?? ""), /vanish-oscillation-001/);
+			assert.ok(fs.readdirSync(path.join(nextCwd, ".pi", "goals")).some((name) => name.includes(goalId)));
+		}
+
+		// ASSERT: original persistence remains and each drift is auditable.
+		assert.ok(fs.existsSync(goalPathA));
+		const trace = [readTraceAt(cwdA), readTraceAt(cwdB), readTraceAt(cwdC)].flat();
+		const restored = trace.filter((entry) => entry.step === "reconcile.goal_restored_from_memory");
+		assert.ok(restored.length >= 4, "each cwd switch must emit a restoration trace");
+		assert.ok(restored.every((entry) => entry.originCwd === cwdA || typeof entry.originCwd === "string"));
+		fs.rmSync(cwdB, { recursive: true, force: true });
+		fs.rmSync(cwdC, { recursive: true, force: true });
 	});
 });
