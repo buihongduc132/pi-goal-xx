@@ -478,4 +478,62 @@ describe("Validator M1-M20 checks (RED phase — all should FAIL)", () => {
       "Validator should FAIL when worktree branch doesn't match objective (M20)",
     );
   });
+
+  // ── M4: Location check (repo-not-on-main → parent .pi/goals/) ────────
+  it("M4: FAILS when goal file is in a side worktree, not main worktree's .pi/goals/", () => {
+    // Create a repo with multiple worktrees:
+    // - main worktree on 'main' branch
+    // - side worktree on 'dev' branch
+    // Goal file in side worktree's .pi/goals/ should FAIL
+    const m4Dir = path.join(tmpDir, "m4-location");
+    const repoDir = path.join(m4Dir, "repo");
+    const mainWtDir = path.join(m4Dir, "main-wt");
+    const sideWtDir = path.join(m4Dir, "side-wt");
+
+    fs.mkdirSync(m4Dir, { recursive: true });
+
+    try {
+      // Create repo with initial commit on 'main'
+      fs.mkdirSync(repoDir, { recursive: true });
+      execSync("git init", { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+      execSync('git config user.email "test@test.com"', { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+      execSync('git config user.name "Test"', { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+      execSync('git symbolic-ref HEAD refs/heads/main', { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+      fs.writeFileSync(path.join(repoDir, "README.md"), "main");
+      execSync("git add .", { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+      execSync('git commit -m "init main"', { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+
+      // Create side worktree on 'dev' branch
+      execSync("git branch dev", { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+      execSync(`git worktree add "${sideWtDir}" dev`, { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+    } catch (e: any) {
+      assert.fail(`M4 git setup failed: ${e.message?.slice(0, 200)}`);
+      return;
+    }
+
+    // Write goal file in SIDE worktree's .pi/goals/ (side is on dev, not main)
+    const sideGoalsDir = path.join(sideWtDir, ".pi", "goals");
+    fs.mkdirSync(sideGoalsDir, { recursive: true });
+    const goalPath = path.join(sideGoalsDir, VALID_FILENAME);
+    const content = buildGoalFile({
+      objective: GOOD_OBJECTIVE.replace("{{WT_PATH}}", tmpDir),
+      verificationContract: GOOD_CONTRACT,
+    });
+    fs.writeFileSync(goalPath, content);
+
+    const result = runValidator(goalPath);
+    // Should FAIL because side worktree is on dev, not main
+    const hasM4Error = result.stdout.includes("M4") || result.stderr.includes("M4");
+    assert.ok(
+      hasM4Error,
+      "Validator should FAIL with M4 error when goal is in side worktree, not main worktree's .pi/goals/. Got: " + result.stdout.slice(0, 300),
+    );
+
+    // Cleanup worktree
+    try {
+      execSync(`git worktree remove "${sideWtDir}"`, { cwd: repoDir, encoding: "utf8", stdio: "pipe" });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
 });

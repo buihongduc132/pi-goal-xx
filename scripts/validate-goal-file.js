@@ -110,6 +110,81 @@ function worktreeBranch(wtPath) {
   return safeExec('git branch --show-current', { cwd: wtPath });
 }
 
+// ── M4 helper: walk up to find git repo root ─────────────────────────
+function findGitRoot(startDir) {
+  let dir = startDir;
+  for (let i = 0; i < 15; i++) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null; // reached filesystem root
+    dir = parent;
+  }
+  return null;
+}
+
+function currentBranch(repoRoot) {
+  // Prefer symbolic-ref (fails on detached HEAD)
+  let branch = safeExec('git symbolic-ref --short HEAD', { cwd: repoRoot });
+  if (branch) return branch.trim();
+  // Detached HEAD — return '(detached)'
+  return '(detached)';
+}
+
+function checkLocation4Goal(filePath) {
+  // .pi/goals/<file>  → repo root is 3 levels up
+  const goalsDir = dirname(filePath); // .../.pi/goals
+  const dotPiDir = dirname(goalsDir); // .../.pi
+  const repoRoot = findGitRoot(dotPiDir);
+  if (!repoRoot) {
+    return { pass: null, warn: true, msg: 'M4: no git repo found above .pi/goals/ (likely tmp dir, cannot enforce location rule)', detail: { reason: 'no-git-repo' } };
+  }
+  const branch = currentBranch(repoRoot);
+  if (branch === 'main') {
+    return { pass: true, detail: { branch, reason: 'on-main' } };
+  }
+  if (branch === '(detached)') {
+    return { pass: null, warn: true, msg: 'M4: detached HEAD — cannot determine main vs side branch', detail: { branch, reason: 'detached' } };
+  }
+  // Repo is on non-main branch. Find the main worktree via `git worktree list`.
+  const worktreeList = safeExec('git worktree list --porcelain', { cwd: repoRoot });
+  if (!worktreeList) {
+    return { pass: null, warn: true, msg: 'M4: cannot run git worktree list — cannot find main worktree', detail: { branch, reason: 'no-worktree-list' } };
+  }
+  // Parse porcelain format to find worktree on 'main' branch
+  const lines = worktreeList.split('\n');
+  let mainWorktreePath = null;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('worktree ')) {
+      const wtPath = lines[i].slice(9).trim();
+      // Look ahead for branch line
+      for (let j = i + 1; j < lines.length && lines[j] !== ''; j++) {
+        if (lines[j].startsWith('branch ')) {
+          const wtBranch = lines[j].slice(7).trim().replace('refs/heads/', '');
+          if (wtBranch === 'main') {
+            mainWorktreePath = wtPath;
+            break;
+          }
+        }
+      }
+      if (mainWorktreePath) break;
+    }
+  }
+  if (!mainWorktreePath) {
+    return { pass: null, warn: true, msg: `M4: repo on branch "${branch}" but no worktree on 'main' branch exists — cannot enforce location rule`, detail: { branch, reason: 'no-main-worktree' } };
+  }
+  // Main worktree exists. Goal file SHOULD be in mainWorktreePath/.pi/goals/, NOT here.
+  const goalsInThisRepo = join(repoRoot, '.pi', 'goals');
+  const goalIsInThisRepo = filePath.startsWith(goalsInThisRepo + '/') || filePath === join(goalsInThisRepo, basename(filePath));
+  if (goalIsInThisRepo) {
+    return {
+      pass: false,
+      msg: `M4: goal file is in repo on branch "${branch}" (not main), but goal is NOT in main worktree's .pi/goals/. SOUL J-r: "main worktree .pi/goals/, NEVER side worktrees". Move to ${join(mainWorktreePath, '.pi', 'goals')}`,
+      detail: { branch, mainWorktree: mainWorktreePath, reason: 'should-be-in-main', thisRepo: repoRoot }
+    };
+  }
+  return { pass: true, detail: { branch, reason: 'correctly-in-main', mainWorktree: mainWorktreePath } };
+}
+
 // ── Objective window extraction ────────────────────────────────────────
 function extractObjectiveWindow(content) {
   const start = content.indexOf('\n# Goal Prompt');
@@ -437,6 +512,33 @@ function validateFile(filePath, repoName) {
     } else {
       checks.M14 = { pass: true, state: found.derivedState };
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // M4: Location check (SOUL J-r: "main worktree .pi/goals/, NEVER side worktrees")
+  // ════════════════════════════════════════════════════════════════════
+  // If the repo containing the goal file is NOT on `main` branch, the goal
+  // file MUST live in the PARENT repo's .pi/goals/ instead.
+  //
+  // Algorithm:
+  //   1. Walk up from goal file dir to find git repo root (.git dir or file)
+  //   2. Check current branch via `git -C <root> symbolic-ref --short HEAD`
+  //      (returns 'main'/'dev' or fails on detached HEAD)
+  //   3. If branch != 'main': walk to parent dir, check if it's a git repo too
+  //      - If yes: confirm goal file is under PARENT's .pi/goals/ (not this repo)
+  //      - If no: WARN (no parent repo — orphan goal, can't enforce)
+  //   4. If branch == 'main': PASS
+  //   5. If no git repo found: WARN (likely tmp dir, can't enforce)
+
+  const m4Result = checkLocation4Goal(filePath);
+  if (m4Result.pass === false) {
+    errors.push(m4Result.msg);
+    checks.M4 = { pass: false, ...m4Result.detail };
+  } else if (m4Result.warn) {
+    warnings.push(m4Result.msg);
+    checks.M4 = { pass: false, warn: true, ...m4Result.detail };
+  } else {
+    checks.M4 = { pass: true, ...m4Result.detail };
   }
 
   // ════════════════════════════════════════════════════════════════════
