@@ -343,24 +343,22 @@ describe("Validator M1-M20 checks (RED phase — all should FAIL)", () => {
   // NOTE: The validator currently rejects symlinks as a SIDE EFFECT
   // (parseGoalFile returns null because the resolved path differs).
   // There is no EXPLICIT symlink check with a clear error message.
-  // This test verifies the validator rejects symlinks — it already does,
-  // but the GREEN phase should add an explicit lstat() check with a
-  // descriptive error message instead of relying on parser failure.
+  // GREEN phase should add an explicit lstat() check with a descriptive
+  // error message instead of relying on parser failure.
   it("M12: FAILS when goal file is a symlink (explicit check, not parser side-effect)", () => {
-    const realFile = path.join(tmpDir, "real-goal-file.md");
+    // Use a dedicated subdir to avoid filename collisions with other tests
+    const m12Dir = path.join(tmpDir, "m12-symlink");
+    fs.mkdirSync(m12Dir, { recursive: true });
+
+    const realFile = path.join(m12Dir, "real-goal-file.md");
     const content = buildGoalFile({
-      objective: GOOD_OBJECTIVE.replace("{{WT_PATH}}", tmpDir),
+      objective: GOOD_OBJECTIVE.replace("{{WT_PATH}}", m12Dir),
       verificationContract: GOOD_CONTRACT,
     });
     fs.writeFileSync(realFile, content);
 
-    const symlinkPath = path.join(tmpDir, VALID_FILENAME);
-    try {
-      fs.symlinkSync(realFile, symlinkPath);
-    } catch {
-      // If symlink fails (e.g. permissions), skip
-      return;
-    }
+    const symlinkPath = path.join(m12Dir, VALID_FILENAME);
+    fs.symlinkSync(realFile, symlinkPath);
 
     const result = runValidator(symlinkPath);
     // Validator already rejects symlinks (parseGoalFile returns null).
