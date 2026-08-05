@@ -439,6 +439,107 @@ function validateFile(filePath, repoName) {
     }
   }
 
+  // ════════════════════════════════════════════════════════════════════
+  // P1 CHECKS (M15-M18) — WARN severity, ceremony completeness
+  // ════════════════════════════════════════════════════════════════════
+
+  // ── M15: worktree pre-flight (node_modules + prisma + .env) ──
+  if (wt && wt.path && checks.M1?.pass) {
+    const missing = [];
+    if (!existsSync(join(wt.path, 'node_modules'))) missing.push('node_modules/');
+    // Prisma client may live in different paths depending on layout — check both common locations
+    const prismaCandidates = [
+      join(wt.path, 'backend', 'node_modules', '.prisma'),
+      join(wt.path, 'node_modules', '.prisma'),
+      join(wt.path, 'backend', 'src', 'db', 'prisma', 'generated'),
+    ];
+    const prismaOk = prismaCandidates.some(p => existsSync(p));
+    if (!prismaOk) missing.push('prisma-generated-client');
+    // .env check — common locations
+    const envCandidates = [
+      join(wt.path, 'backend', '.env'),
+      join(wt.path, '.env'),
+    ];
+    const envOk = envCandidates.some(p => existsSync(p));
+    if (!envOk) missing.push('.env');
+    if (missing.length > 0) {
+      warnings.push(`M15: worktree pre-flight incomplete — missing [${missing.join(', ')}] (can be deferred to execution, but flag for awareness)`);
+      checks.M15 = { pass: false, warn: true, missing };
+    } else {
+      checks.M15 = { pass: true, msg: 'all pre-flight present' };
+    }
+  } else {
+    checks.M15 = { pass: false, warn: true, msg: 'no worktree to check pre-flight' };
+  }
+
+  // ── M16: YOLO mode determined (WARN) ──
+  // Look for AGENTS.md in repo containing the goal file's parent repo, then in parent of that.
+  // If found and mentions YOLO → report. If not found → WARN (unverified).
+  const goalsDir = dirname(filePath);
+  const repoRoot = dirname(dirname(goalsDir)); // .pi/goals → .pi → repo
+  const agmCandidates = [
+    join(repoRoot, 'AGENTS.md'),
+    join(dirname(repoRoot), 'AGENTS.md'), // parent repo
+    join(process.cwd(), 'AGENTS.md'),
+  ];
+  let yoloDetected = null; // null = unknown, true/false = determined
+  for (const ag of agmCandidates) {
+    if (existsSync(ag)) {
+      try {
+        const txt = readFileSync(ag, 'utf8');
+        if (/YOLO/i.test(txt)) {
+          // If YOLO mode is described as the project's mode → true. Otherwise just present → unknown.
+          if (/operate under the \*\*YOLO\*\*/i.test(txt) || /YOLO mode/i.test(txt)) {
+            yoloDetected = true;
+          } else {
+            yoloDetected = false; // mentioned but not the active mode
+          }
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  if (yoloDetected === true) {
+    warnings.push('M16: YOLO mode detected in AGENTS.md — PR skill should auto-merge + deploy after verifier passes');
+    checks.M16 = { pass: true, yolo: true };
+  } else if (yoloDetected === false) {
+    checks.M16 = { pass: true, yolo: false };
+  } else {
+    warnings.push('M16: YOLO mode undetermined — no AGENTS.md found in repo or parent (cannot auto-decide PR+merge+deploy ceremony)');
+    checks.M16 = { pass: false, warn: true };
+  }
+
+  // ── M17: parallel flag validated (WARN) ──
+  const objLower = objWindow.toLowerCase();
+  const mentionsParallel = /parallel/.test(objLower);
+  if (mentionsParallel) {
+    // User mentioned parallel → multiple worktrees expected. Check for >1 worktree path in objective.
+    const allWtMatches = objWindow.match(new RegExp(WORKTREE_FALLBACK_PATH_REGEX.source, 'gmi')) || [];
+    if (allWtMatches.length < 2) {
+      warnings.push(`M17: objective mentions "parallel" but only ${allWtMatches.length} worktree path(s) found — parallel lanes need N worktrees + 1 converge lane (SOUL: parallel lanes)`);
+      checks.M17 = { pass: false, warn: true, found: allWtMatches.length };
+    } else {
+      checks.M17 = { pass: true, worktrees: allWtMatches.length };
+    }
+  } else {
+    // Sequential — fine, just informational
+    checks.M17 = { pass: true, mode: 'sequential' };
+  }
+
+  // ── M18: verifier loop count stated (WARN) ──
+  // Look in verificationContract OR objective for "verifier" mentions. Each mention = 1 loop.
+  const combined = (contract + '\n' + objWindow).toLowerCase();
+  const verifierMentions = (combined.match(/verifier[- ]?loop/g) || []).length;
+  if (verifierMentions === 0) {
+    warnings.push('M18: no "verifier-loop" mention in contract or objective — at least 1 verifier loop (RED + GREEN) is required by ceremony');
+    checks.M18 = { pass: false, warn: true };
+  } else if (verifierMentions === 1) {
+    warnings.push('M18: only 1 verifier-loop mention — sequential goals need RED + GREEN = 2 loops; parallel needs N-lane + 1 converge');
+    checks.M18 = { pass: false, warn: true, count: verifierMentions };
+  } else {
+    checks.M18 = { pass: true, count: verifierMentions };
+  }
+
   return { errors, warnings, checks, goal };
 }
 
