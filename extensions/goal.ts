@@ -3,7 +3,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from
 import { matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import {
 	footerStatus,
 	formatDuration,
@@ -311,6 +311,7 @@ function detailedSummary(goal: GoalRecord | null): string {
 			lines.push(`Next pending task: ${firstPending.id} — ${firstPending.title}`);
 		}
 	}
+	if (goal.originCwd) lines.push(`Restored from: ${goal.originCwd}`);
 	if (goal.activePath) lines.push(`File: ${goal.activePath}`);
 	if (goal.archivedPath) lines.push(`Archive: ${goal.archivedPath}`);
 	if (goal.stopReason) lines.push(`Stop reason: ${goal.stopReason}`);
@@ -973,23 +974,54 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		return openGoalsFromPool(goalsById);
 	}
 
+	function writeTombstone(cwd: string, goalId: string): void {
+		try {
+			const dir = path.join(cwd, GOALS_DIR, ".tombstones");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(path.join(dir, goalId), "deleted\n", "utf8");
+		} catch (err) {
+			logGoalTrace(cwd, { level: "error", step: "goal.tombstone_write_failed", goalId, error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
+	function tombstoneExists(cwd: string, goalId: string): boolean {
+		try { return existsSync(path.join(cwd, GOALS_DIR, ".tombstones", goalId)); } catch { return false; }
+	}
+
 	function reconcileFocusedGoalFromDisk(ctx: ExtensionContext, opts: { preserveMemoryUsage?: boolean } = {}): boolean {
 		const current = state.goal;
+		let poolReadError: NodeJS.ErrnoException | null = null;
+		try {
+			const rootStat = lstatSync(path.resolve(ctx.cwd, GOALS_DIR));
+			if (!rootStat.isDirectory()) poolReadError = Object.assign(new Error("Goal store is not a directory"), { code: "ENOTDIR" });
+		} catch (err) { poolReadError = err as NodeJS.ErrnoException; }
 		const fresh = readActiveGoalPool(ctx);
+		if (poolReadError && poolReadError.code !== "ENOENT") {
+			logGoalTrace(ctx.cwd, { level: "error", step: "reconcile.goal_read_error", errorCode: poolReadError.code, absenceClass: "read-error", error: poolReadError.message });
+		}
 		if (!focusedGoalId) {
 			goalsById = fresh;
 			return true;
 		}
 		const diskGoal = fresh.get(focusedGoalId) ?? null;
 		if (!diskGoal) {
-		if (current && !current.activePath) {
-			goalsById = fresh;
-			goalsById.set(current.id, current);
-			focusedGoalId = current.id;
-			syncActiveGoalEnv(ctx);
-			return true;
-		}
-		logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_vanished", goalId: focusedGoalId, message: "focused goal missing from disk; clearing focus", hadInMemoryGoal: !!current });
+			if (current && current.status !== "complete" && !isWorkerSession() && !tombstoneExists(ctx.cwd, focusedGoalId)
+				&& (!poolReadError || poolReadError.code === "ENOENT")) {
+				const originCwd = current.originCwd ?? cachedCwd ?? ctx.cwd;
+				const restored = writeActiveGoalFile(ctx, { ...current, originCwd });
+				goalsById = fresh;
+				goalsById.set(restored.id, restored);
+				focusedGoalId = restored.id;
+				logGoalTrace(ctx.cwd, { level: "info", step: "reconcile.goal_restored_from_memory", goalId: restored.id, originCwd, newCwd: ctx.cwd });
+				syncActiveGoalEnv(ctx);
+				syncGoalTools();
+				updateUI(ctx);
+				return true;
+			}
+			if (current && tombstoneExists(ctx.cwd, focusedGoalId)) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_resurrection_blocked_tombstone", goalId: focusedGoalId });
+			}
+
 		goalsById = fresh;
 		focusedGoalId = null;
 		clearStoppedRuntimeState();
@@ -2658,6 +2690,8 @@ Verification contract:
 			const selected = await chooseOpenGoal(ctx, "Clear which open goal?");
 			if (!selected) return;
 		}
+		const clearedGoalId = state.goal?.id;
+		if (clearedGoalId) writeTombstone(ctx.cwd, clearedGoalId);
 		const archived = archiveCurrentGoal(ctx, "user");
 		const didArchive = !!archived;
 		resetGetGoalNudgeState(state.goal?.id);
@@ -2687,6 +2721,8 @@ Verification contract:
 			const selected = await chooseOpenGoal(ctx, "Abort which open goal?");
 			if (!selected) return;
 		}
+		const abortedGoalId = state.goal?.id;
+		if (abortedGoalId) writeTombstone(ctx.cwd, abortedGoalId);
 		const archived = archiveCurrentGoal(ctx, "user");
 		const didArchive = !!archived;
 		resetGetGoalNudgeState(state.goal?.id);

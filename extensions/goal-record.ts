@@ -49,8 +49,8 @@ export interface GoalRecord {
 	taskList?: GoalTaskList;
 	/** Plain-text description of what verification evidence is required before completing this goal. */
 	verificationContract?: string;
+	originCwd?: string;
 }
-
 export interface GoalStateEntry {
 	version: 3;
 	goal: GoalRecord | null;
@@ -251,5 +251,6 @@ export function normalizeGoalRecord(value: unknown): GoalRecord | null {
 		skipAuditor: raw.skipAuditor === true ? true : undefined,
 		taskList: normalizeTaskList(raw.taskList),
 		verificationContract: typeof raw.verificationContract === "string" ? raw.verificationContract : undefined,
+		originCwd: typeof raw.originCwd === "string" ? raw.originCwd : undefined,
 	};
 }
