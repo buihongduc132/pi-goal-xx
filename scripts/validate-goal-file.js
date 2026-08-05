@@ -24,7 +24,11 @@ const require = createRequire(import.meta.url);
 
 // ── Dynamic import of pi-goal-xx parse functions ───────────────────────
 import { dirname as pathDirname } from 'path';
-const __filename = fileURLToPath(import.meta.url);
+import { realpathSync } from 'fs';
+// Resolve symlinks: if invoked via a symlink (e.g. hermes profile → repo copy),
+// import.meta.url gives the symlink path, not the target. realpathSync resolves
+// to the real file so __dirname + parent points at the actual repo root.
+const __filename = realpathSync(fileURLToPath(import.meta.url));
 const __dirname = pathDirname(__filename);
 // Script lives at <repo-root>/scripts/validate-goal-file.js — repo root is parent
 const PI_GOAL_XX_PATH = dirname(__dirname);
