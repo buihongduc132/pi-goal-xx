@@ -30,24 +30,32 @@ describe("CLI verify subcommand", () => {
 	});
 
 	it("returns approval hash on successful verifier-loop", async () => {
-		// Mock jewilo by providing a fake PATH with a script
+		// Mock jewilo --json NEW output + completion.json (durable proof)
 		const fakeBin = path.join(dir, "bin");
 		fs.mkdirSync(fakeBin, { recursive: true });
+		const goalId = "test-uuid-1234";
+		const fakeHome = dir;
+		const goalsDir = path.join(fakeHome, ".verifier-loop", "goals", goalId);
+		fs.mkdirSync(goalsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(goalsDir, "completion.json"),
+			JSON.stringify({ hash: "080926-84f5ae38", goalId, roundNumber: 1 }),
+		);
 		const jewiloScript = `#!/bin/sh
-echo "APPROVED_HASH=070526-84f5ae38"
+echo '{"ok":true,"command":"new","goalId":"${goalId}","state":"consensus_pass"}'
 exit 0
 `;
 		fs.writeFileSync(path.join(fakeBin, "jewilo"), jewiloScript, { mode: 0o755 });
 
 		const result = await runVerify({
 			cwd: dir,
-			goalObjective: "test goal for verification",
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+			goalObjective: "test goal for verification".padEnd(500, " "),
+			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: fakeHome },
 		});
 
 		assert.ok(result.success, "verify must succeed");
 		assert.ok(result.hash, "must return approval hash");
-		assert.equal(result.hash, "070526-84f5ae38");
+		assert.equal(result.hash, "080926-84f5ae38");
 	});
 
 	it("returns error when jewilo is not found", async () => {
@@ -74,14 +82,14 @@ exit 0
 		const fakeBin = path.join(dir, "bin");
 		fs.mkdirSync(fakeBin, { recursive: true });
 		const jewiloScript = `#!/bin/sh
-echo "ERROR: verification failed"
+echo '{"ok":false,"command":"new","error":"verification failed"}'
 exit 1
 `;
 		fs.writeFileSync(path.join(fakeBin, "jewilo"), jewiloScript, { mode: 0o755 });
 
 		const result = await runVerify({
 			cwd: dir,
-			goalObjective: "test goal",
+			goalObjective: "test goal".padEnd(500, " "),
 			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
 		});
 
@@ -93,15 +101,15 @@ exit 1
 		const fakeBin = path.join(dir, "bin");
 		fs.mkdirSync(fakeBin, { recursive: true });
 		const jewiloScript = `#!/bin/sh
-echo "some output without hash"
+echo '{"ok":true,"command":"new","goalId":"no-completion-dir","state":"consensus_pass"}'
 exit 0
 `;
 		fs.writeFileSync(path.join(fakeBin, "jewilo"), jewiloScript, { mode: 0o755 });
 
 		const result = await runVerify({
 			cwd: dir,
-			goalObjective: "test goal",
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+			goalObjective: "test goal".padEnd(500, " "),
+			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir },
 		});
 
 		assert.equal(result.success, false, "verify must fail when no hash in output");
@@ -113,40 +121,54 @@ exit 0
 		fs.mkdirSync(fakeBin, { recursive: true });
 		// Script that echoes its arguments to a file so we can inspect
 		const logFile = path.join(dir, "args.log");
+		const goalId = "arg-test-goal";
+		const goalsDir = path.join(dir, ".verifier-loop", "goals", goalId);
+		fs.mkdirSync(goalsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(goalsDir, "completion.json"),
+			JSON.stringify({ hash: "080926-abcdef12", goalId }),
+		);
 		const jewiloScript = `#!/bin/sh
 echo "$@" > "${logFile}"
-echo "APPROVED_HASH=abc123-deadbeef"
+echo '{"ok":true,"goalId":"${goalId}"}'
 exit 0
 `;
 		fs.writeFileSync(path.join(fakeBin, "jewilo"), jewiloScript, { mode: 0o755 });
 
-		const objective = "build the CLI binary with create and verify";
+		const objective = "build the CLI binary with create and verify".padEnd(500, " ");
 		await runVerify({
 			cwd: dir,
 			goalObjective: objective,
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir },
 		});
 
 		const logged = fs.readFileSync(logFile, "utf8");
 		assert.ok(
-			logged.includes(objective) || logged.length > 0,
-			"jewilo must receive goal objective as argument or input",
+			logged.includes(objective.trim()) || logged.includes("NEW"),
+			"jewilo must receive goal objective as argument",
 		);
 	});
 
 	it("returns structured result with success, hash?, error?", async () => {
 		const fakeBin = path.join(dir, "bin");
 		fs.mkdirSync(fakeBin, { recursive: true });
+		const goalId = "shape-test-goal";
+		const goalsDir = path.join(dir, ".verifier-loop", "goals", goalId);
+		fs.mkdirSync(goalsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(goalsDir, "completion.json"),
+			JSON.stringify({ hash: "080926-testhash", goalId }),
+		);
 		const jewiloScript = `#!/bin/sh
-echo "APPROVED_HASH=test-hash-123"
+echo '{"ok":true,"goalId":"${goalId}"}'
 exit 0
 `;
 		fs.writeFileSync(path.join(fakeBin, "jewilo"), jewiloScript, { mode: 0o755 });
 
 		const result = await runVerify({
 			cwd: dir,
-			goalObjective: "test",
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+			goalObjective: "test".padEnd(500, " "),
+			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir },
 		});
 
 		// Result shape: { success: boolean, hash?: string, error?: string }
