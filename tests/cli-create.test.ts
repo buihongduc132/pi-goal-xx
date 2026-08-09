@@ -58,9 +58,28 @@ describe("CLI arg parsing", () => {
 		assert.equal(args.tasks!.tasks[0].id, "t1");
 	});
 
-	it("rejects invalid --tasks JSON", () => {
+	it("parses --tasks as file path", () => {
+		const tasksData = {
+			tasks: [{ id: "t2", title: "from file", status: "pending" }],
+			blockCompletion: true,
+		};
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-tasks-"));
+		const filePath = path.join(tmp, "tasks.json");
+		fs.writeFileSync(filePath, JSON.stringify(tasksData));
+		try {
+			const args = parseArgs(["create", "--objective", "x", "--tasks", filePath]);
+			assert.ok(args.tasks);
+			assert.equal(args.tasks!.tasks.length, 1);
+			assert.equal(args.tasks!.tasks[0].id, "t2");
+			assert.equal(args.tasks!.tasks[0].title, "from file");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects invalid --tasks file path", () => {
 		assert.throws(
-			() => parseArgs(["create", "--objective", "x", "--tasks", "not-json"]),
+			() => parseArgs(["create", "--objective", "x", "--tasks", "/tmp/nonexistent-tasks.json"]),
 			/--tasks.*invalid/i,
 		);
 	});
