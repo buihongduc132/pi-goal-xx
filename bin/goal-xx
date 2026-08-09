@@ -1,0 +1,28 @@
+#!/bin/sh
+# goal-xx — CLI binary wrapper for pi-goal-xx goal creation + verification.
+#
+# Invokes src/cli/main.ts via Node.js with --experimental-strip-types (Node 22+).
+#
+# Resolution order:
+# 1. GOAL_XX_REPO env var (set by mise deploy-cli task)
+# 2. Relative to this script (development: bin/goal-xx → repo root)
+# 3. Error with helpful message
+
+set -e
+
+if [ -n "$GOAL_XX_REPO" ]; then
+	REPO_ROOT="$GOAL_XX_REPO"
+else
+	SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+	REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+
+MAIN="$REPO_ROOT/src/cli/main.ts"
+
+if [ ! -f "$MAIN" ]; then
+	echo "error: goal-xx cannot find main.ts at $MAIN" >&2
+	echo "Set GOAL_XX_REPO to the pi-goal-xx repository root." >&2
+	exit 1
+fi
+
+exec node --experimental-strip-types "$MAIN" "$@"

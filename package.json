@@ -26,10 +26,14 @@
   },
   "files": [
     "extensions",
+    "src",
     "README.md",
     "docs",
     "LICENSE"
   ],
+  "bin": {
+    "goal-xx": "src/cli/main.ts"
+  },
   "pi": {
     "extensions": [
       "extensions/goal.ts"
