@@ -14,6 +14,15 @@ function cleanup(dir: string) {
 	fs.rmSync(dir, { recursive: true, force: true });
 }
 
+/** Build a hermetic env that strips VERIFIER_LOOP_HOME (which leaks from real machine config). */
+function hermeticEnv(overrides: Record<string, string>): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = {};
+	for (const [k, v] of Object.entries(process.env)) {
+		if (k !== "VERIFIER_LOOP_HOME") env[k] = v;
+	}
+	return { ...env, ...overrides };
+}
+
 describe("CLI verify subcommand", () => {
 	let dir: string;
 
@@ -50,7 +59,7 @@ exit 0
 		const result = await runVerify({
 			cwd: dir,
 			goalObjective: "test goal for verification".padEnd(500, " "),
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: fakeHome },
+			env: hermeticEnv({ PATH: `${fakeBin}:${process.env.PATH}`, HOME: fakeHome }),
 		});
 
 		assert.ok(result.success, "verify must succeed");
@@ -90,7 +99,7 @@ exit 1
 		const result = await runVerify({
 			cwd: dir,
 			goalObjective: "test goal".padEnd(500, " "),
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+			env: hermeticEnv({ PATH: `${fakeBin}:${process.env.PATH}` }),
 		});
 
 		assert.equal(result.success, false, "verify must fail on non-zero exit");
@@ -109,7 +118,7 @@ exit 0
 		const result = await runVerify({
 			cwd: dir,
 			goalObjective: "test goal".padEnd(500, " "),
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir },
+			env: hermeticEnv({ PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir }),
 		});
 
 		assert.equal(result.success, false, "verify must fail when no hash in output");
@@ -139,7 +148,7 @@ exit 0
 		await runVerify({
 			cwd: dir,
 			goalObjective: objective,
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir },
+			env: hermeticEnv({ PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir }),
 		});
 
 		const logged = fs.readFileSync(logFile, "utf8");
@@ -168,7 +177,7 @@ exit 0
 		const result = await runVerify({
 			cwd: dir,
 			goalObjective: "test".padEnd(500, " "),
-			env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir },
+			env: hermeticEnv({ PATH: `${fakeBin}:${process.env.PATH}`, HOME: dir }),
 		});
 
 		// Result shape: { success: boolean, hash?: string, error?: string }

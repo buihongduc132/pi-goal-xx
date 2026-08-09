@@ -32,6 +32,10 @@ export function runCreate(opts: CreateOptions): CreateResult {
 
 	let fullObjective = opts.objective;
 
+	if (opts.draftId) {
+		fullObjective += `\n\nDraft-ID: ${opts.draftId}`;
+	}
+
 	if (opts.worktree) {
 		fullObjective += `\n\nWorktree: ${opts.worktree} — all code lands here; main checkout untouched.`;
 	}
