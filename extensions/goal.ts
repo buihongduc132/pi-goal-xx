@@ -3937,11 +3937,10 @@ ${objective}` : objective,
 						details: goalDetails(state.goal),
 					};
 				} else {
-					// ── Continue working → pause the goal ──────────────
-					pauseActiveGoal(ctx);
+					// ── Continue working → goal stays active (upstream parity) ──
 					setTurnStopped(state.goal?.id ?? null);
 					return {
-						content: [{ type: "text", text: "Goal paused — user chose to continue working after skipping audit." }],
+						content: [{ type: "text", text: "Audit aborted — the goal remains active and work continues." }],
 						details: state.goal ? goalDetails(state.goal) : undefined,
 					};
 				}
@@ -4586,10 +4585,10 @@ promptGuidelines: [
 		const tokens = assistantTurnTokens(message);
 		accountProgress(ctx, { completedTurnTokens: tokens });
 
-		if (isAbortedAssistantMessage(message)) {
-			pauseActiveGoal(ctx);
-			return;
-		}
+		// Abort-tolerant: runtime aborts (timeouts, MCP slow init, provider 5xx,
+		// tool-execution cancels) must NOT pause the goal. Only explicit user Esc
+		// (syncTerminalInputPause) or /goal-pause pauses. Fall through; agent_end
+		// queues the next continuation so the auto-run chain survives.
 		refreshGoalDisplayFromDisk(ctx);
 
 		// Archive a goal that was marked complete by complete_goal but whose archival
@@ -4656,7 +4655,7 @@ promptGuidelines: [
 	});
 
 	pi.on("message_end", async (event, ctx) => {
-		if (isAbortedAssistantMessage(event.message)) pauseActiveGoal(ctx);
+		// Abort-tolerant: runtime aborts do not pause (see turn_end note).
 		const raw = asRecord(event.message);
 		if (raw?.role === "custom" && raw.customType === GOAL_EVENT_ENTRY && raw.display !== false) {
 			return { message: { ...event.message, display: false } as typeof event.message };
@@ -4894,10 +4893,10 @@ promptGuidelines: [
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		if (endedGoalId && state.goal.id !== endedGoalId) return;
 		if (!reconcileFocusedGoalFromDisk(ctx)) return;
-		if (hasAbortedAssistantMessage(event.messages) || ctx.signal?.aborted) {
-			pauseActiveGoal(ctx);
-			return;
-		}
+		// Abort-tolerant: runtime aborts / ctx.signal.aborted do NOT pause.
+		// Only explicit user Esc (syncTerminalInputPause) or /goal-pause pauses.
+		// Fall through to queueContinuation so the auto-run chain survives
+		// transient runtime aborts (timeouts, MCP init, provider failures).
 		persist(ctx);
 		updateUI(ctx);
 		queueContinuation(ctx);
