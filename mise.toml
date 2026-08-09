@@ -1,0 +1,35 @@
+[tasks.test]
+run = "node --experimental-strip-types --test tests/*.test.ts"
+
+[tasks.check]
+run = "tsc --noEmit"
+
+[tasks.deploy-cli]
+description = "Build + install goal-xx CLI to ~/.local/bin/goal-xx (globally usable)"
+run = """
+REPO_ROOT="{{ config_root }}"
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$BIN_DIR"
+
+# Create production wrapper with hardcoded repo path
+cat > "$BIN_DIR/goal-xx" << 'WRAPPER'
+#!/bin/sh
+# Installed by mise deploy-cli. GOAL_XX_REPO set to repo root.
+export GOAL_XX_REPO="__REPO_ROOT__"
+exec "$GOAL_XX_REPO/bin/goal-xx" "$@"
+WRAPPER
+
+# Replace placeholder with actual repo path
+sed -i "s|__REPO_ROOT__|$REPO_ROOT|g" "$BIN_DIR/goal-xx"
+chmod +x "$BIN_DIR/goal-xx"
+
+echo "goal-xx installed to $BIN_DIR/goal-xx (repo: $REPO_ROOT)"
+echo "Test: goal-xx create --objective 'test goal'"
+"""
+
+[tasks.undeploy-cli]
+description = "Remove goal-xx CLI from ~/.local/bin"
+run = """
+rm -f "$HOME/.local/bin/goal-xx"
+echo "goal-xx removed from ~/.local/bin"
+"""
