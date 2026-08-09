@@ -1,4 +1,6 @@
 import { normalizeTaskList, type GoalTaskList } from "../../extensions/goal-record.ts";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export interface LaneDef {
 	name: string;
@@ -54,8 +56,21 @@ export function parseArgs(args: string[]): ParsedArgs {
 				break;
 			case "--tasks": {
 				const raw = args[++i];
+				let parsed: unknown;
 				try {
-					const parsed = JSON.parse(raw);
+					// Try JSON string first
+					parsed = JSON.parse(raw);
+				} catch {
+					// Fall back to file path
+					try {
+						const resolved = path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
+						const content = fs.readFileSync(resolved, "utf8");
+						parsed = JSON.parse(content);
+					} catch {
+						throw new Error("--tasks invalid: failed to parse JSON or invalid task list");
+					}
+				}
+				try {
 					const normalized = normalizeTaskList(parsed);
 					if (!normalized) throw new Error("empty");
 					result.tasks = normalized;
