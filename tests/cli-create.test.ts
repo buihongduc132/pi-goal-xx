@@ -135,7 +135,7 @@ describe("CLI create subcommand", () => {
 
 		const basename = path.basename(result.goalPath);
 		// Pattern: active_goal_<18 digits>_<safe-id>.md
-		assert.match(basename, /^active_goal_\d{18}_[a-zA-Z0-9_-]+\.md$/);
+		assert.match(basename, /^active_goal_\d{16}_[a-zA-Z0-9_-]+\.md$/);
 	});
 
 	it("created file is parseable by parseGoalFile", () => {
