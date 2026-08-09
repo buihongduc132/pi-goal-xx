@@ -23,6 +23,8 @@ export interface GoalWidgetRecord extends GoalDisplayRecordLike {
 	pauseSuggestedAction?: string;
 	taskList?: GoalTaskList | null;
 	verificationContract?: string;
+	/** Tri-state liveness signal: true=live holder, false=stale, undefined=legacy fallback. */
+	liveLockHolder?: boolean;
 }
 
 export interface AuditorWidgetProgress {
@@ -46,6 +48,8 @@ export interface GoalWidgetOptions {
 	getAuditorProgress?: () => AuditorWidgetProgress | null;
 	getSettings?: () => GoalSettings;
 	getDebugMode?: () => boolean;
+	/** Tri-state liveness signal: true=live holder, false=stale, undefined=legacy. */
+	getLiveLockHolder?: () => boolean | undefined;
 }
 
 function fit(value: string, width: number): string {
@@ -78,6 +82,11 @@ function displayIcon(goal: GoalWidgetRecord): { icon: string; color: GoalWidgetC
 			? { icon: "⊘", color: "warning", label: "blocked" }
 			: { icon: "◐", color: "muted", label: "paused" };
 	}
+	if (goal.status === "active" && goal.autoContinue) {
+		if (goal.liveLockHolder === false) return { icon: "⌽", color: "muted", label: "stale" };
+		if (goal.sisyphus) return { icon: "◆", color: "accent", label: "sisyphus running" };
+		return { icon: "●", color: "accent", label: "goal running" };
+	}
 	if (goal.sisyphus) return { icon: "◆", color: "accent", label: goal.autoContinue ? "sisyphus running" : "sisyphus idle" };
 	return goal.autoContinue ? { icon: "●", color: "accent", label: "goal running" } : { icon: "○", color: "muted", label: "goal idle" };
 }
@@ -109,6 +118,7 @@ function findFirstPending(tasks: GoalTask[]): GoalTask | undefined {
 
 function headingMeta(goal: GoalWidgetRecord, otherOpenGoalCount = 0, disableTasks = false): string {
 	const bits: string[] = [];
+	if (goal.sisyphus) bits.push("sisyphus");
 	if (goal.status === "active" && goal.autoContinue) bits.push("auto");
 	if (goal.usage.activeSeconds > 0) bits.push(formatDuration(goal.usage.activeSeconds));
 	if (goal.usage.tokensUsed > 0) bits.push(formatTokenValue(goal.usage.tokensUsed));
@@ -120,20 +130,17 @@ function headingMeta(goal: GoalWidgetRecord, otherOpenGoalCount = 0, disableTask
 	return bits.join(" · ");
 }
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-function spinnerFrame(): string {
-	return SPINNER[Math.floor(Date.now() / 80) % SPINNER.length]!;
-}
-
 export function renderAuditorWidgetLines(progress: AuditorWidgetProgress, theme: Theme, width: number): string[] {
 	const safeWidth = Math.max(1, width);
 	const isActive = progress.phase !== "done";
 	const isThinking = progress.phase === "thinking";
+	// Static (non-animated) icon while auditing. A spinning frame here forced the
+	// widget to redraw ~12×/s purely to advance the glyph — noisy and wasteful.
+	// The elapsed-time display only changes once per second (see auditAnimationTimer).
 	const icon = isActive
 		? isThinking
 			? theme.fg("muted", "⟡")
-			: theme.fg("accent", spinnerFrame())
+			: theme.fg("accent", "●")
 		: theme.fg("success", "✓");
 	const label = isActive
 		? isThinking
@@ -287,6 +294,7 @@ export class GoalWidgetComponent implements Component {
 	private getAuditorProgress: () => AuditorWidgetProgress | null;
 	private getSettings: () => GoalSettings;
 	private getDebugMode: () => boolean;
+	private getLiveLockHolder: () => boolean | undefined;
 
 	constructor(options: GoalWidgetOptions) {
 		this.theme = options.theme;
@@ -296,6 +304,7 @@ export class GoalWidgetComponent implements Component {
 		this.getAuditorProgress = options.getAuditorProgress ?? (() => null);
 		this.getSettings = options.getSettings ?? (() => ({}));
 		this.getDebugMode = options.getDebugMode ?? (() => false);
+		this.getLiveLockHolder = options.getLiveLockHolder ?? (() => undefined);
 	}
 
 	update(): void {
@@ -355,7 +364,9 @@ export class GoalWidgetComponent implements Component {
 
 	render(width: number): string[] {
 		const settings = this.getSettings();
-		let lines = renderGoalWidgetLines(this.getGoal(), this.theme, width, {
+		const rawGoal = this.getGoal();
+		const goal = rawGoal ? { ...rawGoal, liveLockHolder: this.getLiveLockHolder() } : null;
+		let lines = renderGoalWidgetLines(goal, this.theme, width, {
 			openGoalCount: this.getOpenGoalCount(),
 			auditorProgress: this.getAuditorProgress(),
 			disableTasks: settings.disableTasks,

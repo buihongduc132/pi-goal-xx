@@ -1,0 +1,4 @@
+{
+  "provider": "bhd-litellm",
+  "model": "role-smart"
+}

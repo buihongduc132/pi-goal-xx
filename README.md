@@ -16,6 +16,8 @@ The extension is designed around one rule: **the user owns intent; the agent exe
 - [Agent Tools](#agent-tools) — Tools available to the AI agent
 - [Tools That Interrupt](#tools-that-interrupt) — Tools that pause/stop the running state
 - [Auditor Subscriptions](#auditor-subscriptions) — Async event forwarding to auditor
+- [Pre-audit Hooks](#pre-audit-hooks) — Optional standalone gate scripts that run before the auditor launches
+- [Early Disapproval](#early-disapproval) — Auditor can abort mid-stream on disqualifying issues
 - [Configuration](#configuration) — Settings file and environment variables
 - [Configurable Auditor](#configurable-auditor) — Modes, wildcard filters, prompt files
 - [Multi-session Goal Focus](#multi-session-goal-focus) — Lease-based advisory lock for concurrent sessions
@@ -40,6 +42,8 @@ The extension is designed around one rule: **the user owns intent; the agent exe
 - **Built-in questionnaire tools** — During drafting, agents can ask structured questions through `goal_question` and `goal_questionnaire` without depending on external packages.
 - **Disk-backed state** — Active and archived goals persist in `.pi/goals/`. Goal state survives session compaction, workspace switches, and context churn.
 - **Configurable settings** — Tune the auditor model, disable the task system or contracts, and set subtask depth through `/goal-settings` or `.pi/pi-goal-xx-settings.json`.
+- **Pre-audit hooks** — Optional standalone pass/fail gate scripts (`globalScript` + `localScript`) that run BEFORE the completion auditor launches. Dynamic opt-in: no-op when unconfigured or disabled. Nested `passCriteria` block with status / regex / stream / combinator / negate. Hook output is sanitized and optionally injected into the auditor prompt (≤5k chars, wrapped in `<hook-output>` markers).
+- **Early disapproval** — The auditor can call `early_disapprove(reason)` mid-stream to abort the session immediately on a disqualifying issue (missing output, broken contract, etc.). Structured tool call (not raw text matching) preserves the `parseAuditorDecision` last-occurrence parser semantics.
 - **Worker session isolation** — When spawned as a pi-agent-teams worker (`PI_TEAMS_WORKER=1`), the extension skips goal focus inheritance from the leader's branch context. Workers start goal-unfocused and can still read goal files from disk without inheriting the leader's active goal.
 
 > **Fork lineage:** pi-goal-xx ← [pi-goal-x](https://github.com/tmonk/pi-goal-x) ← [@capyup/pi-goal](https://github.com/capyup/pi-goal)
@@ -279,6 +283,192 @@ This feature is planned but not in the current release. Current `goal_question` 
 
 ---
 
+## Pre-audit hooks
+
+**Pre-audit hooks** are optional standalone shell scripts that run BEFORE the completion auditor launches. They act as a programmable gate: if any configured hook fails its pass criteria, the audit is short-circuited with a `gateFailure` reason and the auditor never runs. This is useful for fast-failing obvious contract violations (no tests run, lint failures, missing build artifacts) without spending auditor tokens.
+
+This is a **standalone system**, separate from the auditor itself — it lives in `extensions/pre-audit-hooks.ts`, not in the auditor module. The user installs hooks or not; when unconfigured, the auditor runs as normal.
+
+### Configuration
+
+In `.pi/pi-goal-xx-settings.json`:
+
+```json
+{
+  "preAuditHooks": {
+    "enabled": true,
+    "globalScript": "/home/user/.pi/hooks/pre-audit.sh",
+    "localScript": "./.pi/hooks/pre-audit.sh",
+    "passCriteria": {
+      "status": 0,
+      "regex": "PASS|SUCCESS",
+      "stream": "both",
+      "combinator": "AND",
+      "negate": false
+    },
+    "injectOutput": true,
+    "maxOutputChars": 5000,
+    "timeoutMs": 30000
+  }
+}
+```
+
+### Field reference
+
+| Field | Default | Purpose |
+|---|---:|---|
+| `enabled` | `false` | MUST be `true` to load any hooks. Block present but `enabled` omitted → defaults to `false` (no gate). |
+| `globalScript` | unset | Absolute path to a global hook script (e.g. `~/.pi/hooks/pre-audit.sh`). |
+| `localScript` | unset | cwd-relative path to a project-local hook script (e.g. `./.pi/hooks/pre-audit.sh`). |
+| `passCriteria.status` | `0` | Exit code that counts as "pass". Some tools use exit 2 = warning — set accordingly. |
+| `passCriteria.regex` | `""` | Pattern tested against the configured stream. Empty = skip regex check. |
+| `passCriteria.stream` | `"both"` | Which stream the regex tests: `stdout`, `stderr`, or `both` (concatenated). |
+| `passCriteria.combinator` | `"AND"` | How to combine status + regex: `AND` (both must pass) or `OR` (either passes). |
+| `passCriteria.negate` | `false` | Invert the final result (status non-zero = pass, regex miss = pass). |
+| `injectOutput` | `true` | When `true`, sanitized hook output is injected into the auditor prompt (LD6). |
+| `maxOutputChars` | `5000` | Cap on injected output length, applied AFTER sanitization. |
+| `timeoutMs` | `30000` | Per-hook execution timeout. Hanging script returns FAIL with a timeout error. |
+
+### Chaining semantics (LD7)
+
+When BOTH `globalScript` and `localScript` are configured, they run as a chain with **AND semantics**:
+
+- Global runs first, then local.
+- Each hook evaluates its own `passCriteria` independently (negate is per-hook, not global).
+- Overall result is PASS only if BOTH hooks pass. Either failing → overall FAIL.
+
+If only one script is configured, only that one runs. If neither is configured but `enabled: true`, the gate is a no-op (PASS with reason `"no hooks configured"`).
+
+### Sanitization (OT10)
+
+Hook output is treated as **untrusted input**. Before injection into the auditor prompt, the executor:
+
+1. Strips ANSI escape codes
+2. Strips null bytes
+3. Replaces non-UTF8 byte sequences with the Unicode replacement character
+4. Redacts common secret patterns (API keys, bearer tokens, etc.)
+5. Truncates to `maxOutputChars` AFTER sanitization (clean output, not raw)
+6. Wraps the result in `<hook-output>...</hook-output>` markers (OT14) so the auditor can distinguish injected data from its own reasoning
+
+### ReDoS protection (OT13)
+
+Regex evaluation is wrapped in a 1-second timeout (`Promise.race`). A catastrophic regex (e.g. `(a+)+$` against crafted input) returns FAIL with reason `"regex evaluation timed out (possible ReDoS)"` instead of hanging the audit indefinitely.
+
+### Failure modes (OT9)
+
+| Failure | Behavior |
+|---|---|
+| Script not found | FAIL with reason `"script not found: <path>"` |
+| Script times out | FAIL with reason `"script timeout after <ms>ms"` |
+| Script crashes (non-zero) | FAIL with the script's exit code in the per-hook result |
+| Invalid config (unknown key, bad stream/combinator) | Settings parse throws at load time |
+
+### Result shape (OT12)
+
+When the gate fails, `runGoalCompletionAuditor` returns early WITHOUT launching an auditor session:
+
+```json
+{
+  "approved": false,
+  "disapproved": true,
+  "output": "",
+  "gateFailure": "<reason>"
+}
+```
+
+`gateFailure` is a distinct field from `error` (which is reserved for infrastructure failures). The verdict computation in `complete_goal` treats `gateFailure` as `disapproved` (not `error`), so the user sees "Pre-audit gate failed: ..." rather than a confusing "Auditor error".
+
+### Example: gate on test pass
+
+`.pi/pi-goal-xx-settings.json`:
+
+```json
+{
+  "preAuditHooks": {
+    "enabled": true,
+    "localScript": "./scripts/pre-audit.sh",
+    "passCriteria": {
+      "status": 0,
+      "regex": "",
+      "stream": "both",
+      "combinator": "AND",
+      "negate": false
+    },
+    "injectOutput": true,
+    "maxOutputChars": 3000,
+    "timeoutMs": 60000
+  }
+}
+```
+
+`.pi/hooks/pre-audit.sh` (must be executable):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+npm test --silent
+```
+
+When `npm test` exits 0, the gate passes and the auditor runs (with the test output injected). When it exits non-zero, the gate fails and the audit is skipped with a clear gate-failure reason.
+
+---
+
+## Early disapproval
+
+**Early disapproval** lets the auditor abort its own session mid-stream when it finds a disqualifying issue that cannot be recovered from (missing goal output, a critical file does not exist, a contract item is unmet and unverifiable). Without this feature, the auditor must run to completion and parse a `<disapproved/>` marker from its final text output.
+
+### The tool: `early_disapprove(reason)`
+
+The auditor has access to a dedicated tool:
+
+```
+earlier_disapprove(reason: string)
+```
+
+Calling this tool immediately:
+
+1. Aborts the auditor session (no further tool calls, no further text generation).
+2. Returns a result with `earlyDisapproved: true` and `earlyDisapprovalReason: <reason>`.
+3. Marks the goal as `disapproved` (same effect as `<disapproved/>` in the final output).
+
+### Why a tool call, not text matching (LD9 / OT8)
+
+The previous proposal was to watch the auditor's `text_delta` stream for `<disapproved/>` and abort immediately. **This is broken.** `parseAuditorDecision` uses a last-occurrence strategy precisely because `<disapproved/>` can appear mid-report as quoted evidence (Bug #1 — see `tests/auditor-decision-parser.test.ts:38-91`). Streaming text-delta matching would false-positive on any auditor output that quotes the disapproved marker in body text.
+
+A dedicated tool call solves this cleanly:
+
+- **Structured signal**: the `tool_execution_start` event with `toolName === "early_disapprove"` cannot be confused with body text.
+- **Structured reason**: the `reason` parameter is captured verbatim, no parsing ambiguity.
+- **No parser drift**: the existing `parseAuditorDecision` last-occurrence semantics are preserved for normal `<approved/>`/`<disapproved/>` output.
+
+### When to use it
+
+The auditor prompt instructs the model:
+
+> Use `early_disapprove(reason)` IMMEDIATELY if you find a disqualifying issue early in your audit (e.g., the goal output is missing, a critical file doesn't exist, a contract is unmet). This tool will abort the audit session and mark the goal as disapproved without running further checks. Do NOT use it for borderline cases — only for clear early disqualifications.
+
+For borderline cases, the auditor should run to completion and emit `<approved/>` or `<disapproved/>` as normal.
+
+### Safety (OT16)
+
+The auditor's tools are read-only (`read`, `grep`, `find`, `ls`, `bash`, `report_auditor_progress`, `early_disapprove`). An abort mid-tool-call therefore cannot leave half-applied state — there are no side-effecting tools to interrupt. This is defense-in-depth: even if the abort fires while a `bash` invocation is running, the bash subprocess is the only thing torn down; no project files are mutated by the auditor itself.
+
+### Result shape
+
+```json
+{
+  "approved": false,
+  "disapproved": true,
+  "output": "<whatever text was captured before abort>",
+  "earlyDisapproved": true,
+  "earlyDisapprovalReason": "Goal output file does not exist at the claimed path."
+}
+```
+
+`earlyDisapproved` overrides the parsed verdict (which would be `disapproved: false` since no `<disapproved/>` marker was emitted).
+
+---
+
 ## Drafting behavior
 
 `/goals` and `/sisyphus` start a lightweight intent discussion, not a heavy runtime sub-state. The agent clarifies, researches, and grills only when needed, may proceed directly for fully specified requests, and then calls `propose_goal_draft` to show the user a Confirm / Continue Chatting dialog. `goal_question` and `goal_questionnaire` are available when structured input helps, but plain conversation is acceptable.
@@ -388,6 +578,7 @@ Configured interactively via `/goal-settings`, or edited directly:
 | `disabled` | `false` | When `true`, skip the completion audit entirely |
 | `disabledTools` | `[]` | Tool names to hide entirely (never registered, agent never sees them). All tool names are eligible including lifecycle tools (`complete_goal`/`pause_goal`/`abort_goal`); you accept breakage if you disable a lifecycle tool. Unknown tool names are silently skipped. |
 | `auditorSubscriptions` | `[]` | Events to forward asynchronously to the auditor channel (non-blocking). Each entry: `{event: string, mode: "async"}`. Arbitrary event strings allowed (lifecycle: `pause`, `abort`, `complete`, `audit_started`; task: `task_skip`, `contract_violation`; any custom string). Unmatched event names are silently skipped. |
+| `preAuditHooks` | unset | Optional standalone gate scripts that run BEFORE the auditor launches. Nested block with `enabled`, `globalScript`, `localScript`, `passCriteria` (status/regex/stream/combinator/negate), `injectOutput`, `maxOutputChars`, `timeoutMs`. See [Pre-audit hooks](#pre-audit-hooks). |
 | `auditorMode` | `"inherit"` | Auditor resource mode: `"inherit"` (start with all main-session resources, opt out via `auditorExclude`) or `"minimal"` (start with baseline read-only tools, opt in via `auditorInclude`). |
 | `auditorExclude` | `{}` | Resources to exclude in `inherit` mode. Object with `tools`, `mcp`, `skills`, `extensions` arrays; glob patterns allowed (`*`, `?`). |
 | `auditorInclude` | `{}` | Resources to add in `minimal` mode. Same shape as `auditorExclude`; matched against the main session's resources. |
@@ -459,7 +650,7 @@ The runtime goal/continuation system prompts that drive the **active goal agent*
 
 Global prompt file: `~/.pi/goal-prompt.md`  •  Local prompt file: `<cwd>/.pi/goal-prompt.md`
 
-The resolved block is appended to both `goalPrompt()` (agent start) and `continuationPrompt()` (checkpoint resume), after the Sisyphus discipline block when present. The `/goal` and `/sisyphus` **drafting** instructions live in pi-core's tool schema and are not reachable from this package.
+The resolved block is appended to both `goalPrompt()` (agent start) and `continuationPrompt()` (checkpoint resume), after the Sisyphus discipline block when present. The `/goal` and `/sisyphus` **drafting** instructions are also customizable via `prompts.goal-drafting` (see unified prompt configuration).
 
 ### Examples
 
@@ -578,7 +769,9 @@ extensions/goal-pool.ts            open-goal pool, focus resolution, list/select
 extensions/goal-core.ts            display helpers
 extensions/goal-draft.ts           lightweight confirmation prompt, proposal validation, drafting tool gate
 extensions/goal-policy.ts          lifecycle, pause/resume/complete, and Sisyphus policy
-extensions/goal-auditor.ts         independent pi auditor agent for completion approval, config, and progress tracking
+extensions/goal-auditor.ts         independent pi auditor agent for completion approval, config, progress tracking, pre-audit gate, and early-disapproval detection
+extensions/pre-audit-hooks.ts       standalone pre-audit hook executor (settings schema lives in goal-settings.ts)
+extensions/early-disapprove-tool.ts `early_disapprove(reason)` tool definition for mid-stream auditor abort
 extensions/goal-ledger.ts         event append, read, validation, sanitization, and reconstruction
 extensions/goal-questionnaire.ts   built-in question UI and question tool registration
 extensions/goal-tool-names.ts      centralized published tool names and allowlists
@@ -615,6 +808,12 @@ The `upstream` remote should point to `https://github.com/tmonk/pi-goal-x.git`.
 This repository can be validated locally with tests and packaging checks. Publishing a new npm version, pushing tags, and running `pi update` are explicit release steps and are not part of ordinary implementation goals unless requested.
 
 ## Recent changes
+
+### v0.1.2 (2026-07-31)
+
+- **Pre-audit hooks** — Optional standalone gate scripts (`globalScript` + `localScript`) that run BEFORE the completion auditor launches. Dynamic opt-in via the `preAuditHooks` settings block with nested `passCriteria` (status / regex / stream / combinator / negate). Global+local chaining with AND semantics (LD7). Sanitized output injection into the auditor prompt (≤5k chars, wrapped in `<hook-output>` markers — LD6, OT10, OT14). ReDoS timeout protection (OT13). Distinct `gateFailure` result field (OT12). Implements LD2, LD5, LD6, LD7, LD8 from `flow/findings/2026-07-31-auditor-capabilities-gaps/`.
+- **Early disapproval** — New `early_disapprove(reason)` auditor tool. The auditor can abort its session mid-stream on a disqualifying issue, returning `earlyDisapproved: true` + `earlyDisapprovalReason`. Tool call signal (not raw text-delta matching) preserves the `parseAuditorDecision` last-occurrence parser semantics (Bug #1, OT8 CRITICAL). Implements LD1, LD9.
+- 93 new tests added across 6 files (`pre-audit-hooks-settings`, `pre-audit-hooks-executor`, `early-disapprove-tool`, `goal-auditor-early-disapprove`, `goal-auditor-preaudit-integration`, `goal-auditor-prompt-instruction`); all pass.
 
 ### v0.1.0 (2026-07-03)
 

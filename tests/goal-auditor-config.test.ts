@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -135,14 +135,17 @@ describe("runGoalCompletionAuditor — tool inheritance (inherit mode)", () => {
 		assert.ok(c.tools.includes("write"));
 	});
 
-	it("never strips report_auditor_progress even with wildcard exclude", async () => {
+	it("never strips report_auditor_progress or early_disapprove even with wildcard exclude", async () => {
 		const cwd = makeTmpCwd();
 		const c = await capture(
 			cwd,
 			{ auditorExclude: { tools: ["*"] } },
 			{ tools: mainTools },
 		);
-		assert.deepEqual(c.tools, ["report_auditor_progress"]);
+		// Auditor-native customTools survive a full wildcard exclude — they
+		// must flow through resolveAuditorTools (force-preserved), not an
+		// unconditional append bolted on after the exclude filter.
+		assert.deepEqual(c.tools, ["report_auditor_progress", "early_disapprove"]);
 	});
 });
 
@@ -172,6 +175,16 @@ describe("runGoalCompletionAuditor — minimal mode", () => {
 });
 
 describe("runGoalCompletionAuditor — prompt resolution", () => {
+	let savedAgentDir: string | undefined;
+	beforeEach(() => {
+		savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-aud-isolated-agent");
+	});
+	afterEach(() => {
+		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+	});
+
 	it("uses hardcoded default when no inline/file prompts", async () => {
 		const cwd = makeTmpCwd();
 		let promptedText = "";

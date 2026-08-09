@@ -168,5 +168,34 @@ describe("path helpers", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// cfg.file source (prompts.auditor.file) — RED PHASE
+// ---------------------------------------------------------------------------
+// `cfg.file` is NOT yet honored by loadAuditorPrompt (it delegates to
+// resolvePrompt, which ignores cfg.file). The test below MUST fail until
+// GREEN adds cfg.file support. The auditor must still append its fact layer
+// (spec invariant: "Goal data always injected") in every mode.
+describe("loadAuditorPrompt — cfg.file source (prompts.auditor.file)", () => {
+	it("loads prompts.auditor.file body and appends the fact layer", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-aud-file-"));
+		try {
+			const fileAbs = path.join(dir, "verifier-like.md");
+			fs.writeFileSync(fileAbs, "VERIFIER-FROM-FILE", "utf8");
+			const r = loadAuditorPrompt(
+				{ prompts: { auditor: { file: fileAbs } } },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				sb.home,
+				{ factLayer: "FACT-LAYER" },
+			);
+			assert.ok(r.prompt.includes("VERIFIER-FROM-FILE"), "auditor prompt must contain cfg.file body");
+			assert.equal(r.source, "local");
+			assert.ok(r.prompt.includes("FACT-LAYER"), "fact layer must still be appended (goal data invariant)");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 // Use GoalSettings type to keep the import.
 ((): GoalSettings => ({}))();

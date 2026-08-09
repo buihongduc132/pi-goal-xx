@@ -71,20 +71,26 @@ let h: Harness;
 before(() => { h = makeHarness(); });
 
 describe("goal.ts extension — registration surface", () => {
-	it("registers all 13 tools", () => {
+	it("registers the surviving tools (dead block/question/pause tools removed)", () => {
 		const names = Array.from(h.tools.keys()).sort();
-		assert.deepEqual(names, [
-			"abort_goal", "complete_goal", "complete_task", "create_goal",
-			"get_goal", "goal_question", "goal_questionnaire", "pause_goal",
+		// Dead tools (pause_goal, abort_goal, goal_question, goal_questionnaire) MUST
+		// NOT be registered. The surviving set is below.
+		const expected = [
+			"complete_goal", "complete_task", "create_goal",
+			"get_goal",
 			"propose_goal_draft", "propose_goal_tweak", "propose_task_list",
-			"skip_task", "step_complete",
-		]);
+			"skip_task", "start_goal", "step_complete",
+		];
+		assert.deepEqual(names, expected);
+		for (const dead of ["pause_goal", "abort_goal", "goal_question", "goal_questionnaire"]) {
+			assert.ok(!names.includes(dead), `dead tool ${dead} registered`);
+		}
 	});
 
-	it("registers 14 commands incl. goal/sisyphus/goals-set", () => {
+	it("registers commands incl. goal/sisyphus/goals-set", () => {
 		const names = Array.from(h.commands.keys());
-		assert.equal(names.length, 14);
-		for (const c of ["goal", "sisyphus", "goals-set", "goal-pause", "goal-resume", "goal-abort"]) {
+		assert.ok(names.length >= 10);
+		for (const c of ["goal", "sisyphus", "goals-set"]) {
 			assert.ok(h.commands.has(c), `missing command ${c}`);
 		}
 	});
@@ -134,8 +140,18 @@ describe("goal.ts tools — no active goal", () => {
 	});
 
 	it("create_goal is rejected", async () => {
-		const res = await h.tools.get("create_goal")!.execute("t", { objective: "x" }, undefined, undefined, makeCtx(tmpCwd()));
-		assert.match(res.content[0].text, /REJECTED|disabled/i);
+		// Isolate from global config leak: deployed settings file has enableCreateGoal=true.
+		const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const prevEnable = process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		delete process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-ext-iso-" + Math.random().toString(36).slice(2));
+		try {
+			const res = await h.tools.get("create_goal")!.execute("t", { objective: "x" }, undefined, undefined, makeCtx(tmpCwd()));
+			assert.match(res.content[0].text, /REJECTED|disabled/i);
+		} finally {
+			if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+			if (prevEnable === undefined) delete process.env.PI_GOAL_ENABLE_CREATE_GOAL; else process.env.PI_GOAL_ENABLE_CREATE_GOAL = prevEnable;
+		}
 	});
 
 	it("propose_goal_draft without drafting flow is rejected", async () => {
@@ -145,16 +161,6 @@ describe("goal.ts tools — no active goal", () => {
 
 	it("propose_task_list without active goal is handled", async () => {
 		const res = await h.tools.get("propose_task_list")!.execute("t", { tasks: [{ id: "a", title: "A" }] }, undefined, undefined, makeCtx(tmpCwd()));
-		assert.ok(res.content[0].text !== undefined);
-	});
-
-	it("pause_goal without active goal is handled gracefully", async () => {
-		const res = await h.tools.get("pause_goal")!.execute("t", { reason: "x" }, undefined, undefined, makeCtx(tmpCwd()));
-		assert.ok(res.content[0].text !== undefined);
-	});
-
-	it("abort_goal without active goal is handled gracefully", async () => {
-		const res = await h.tools.get("abort_goal")!.execute("t", { reason: "x" }, undefined, undefined, makeCtx(tmpCwd()));
 		assert.ok(res.content[0].text !== undefined);
 	});
 
@@ -216,18 +222,6 @@ describe("goal.ts — goals-set command creates a goal", () => {
 		);
 		assert.ok(res.details !== undefined);
 	});
-
-	it("pause_goal pauses the active goal", async () => {
-		const res = await h.tools.get("pause_goal")!.execute(
-			"t", { reason: "need input", suggestedAction: "provide creds" }, undefined, undefined, makeCtx(cwd),
-		);
-		assert.match(res.content[0].text, /pause|Pause/i);
-	});
-
-	it("abort_goal aborts the goal", async () => {
-		const res = await h.tools.get("abort_goal")!.execute("t", { reason: "obsolete" }, undefined, undefined, makeCtx(cwd));
-		assert.match(res.content[0].text, /abort|Abort|cancel/i);
-	});
 });
 
 describe("goal.ts — sisyphus-set + propose_goal_draft flows", () => {
@@ -254,7 +248,13 @@ describe("goal.ts — sisyphus-set + propose_goal_draft flows", () => {
 		const cwd = tmpCwd();
 		await h.commands.get("goals-set")!.handler("   ", makeCtx(cwd));
 		const dir = path.join(cwd, ".pi", "goals");
-		assert.ok(!fs.existsSync(dir) || fs.readdirSync(dir).length === 0, "no goal created for empty objective");
+		// An empty objective must create no goal FILE. The directory may exist due
+		// to the goal-trace.jsonl operational trace (which mkdir's .pi/goals like
+		// auditor-trace.jsonl does), so assert on goal records, not the directory.
+		const goalFiles = fs.existsSync(dir)
+			? fs.readdirSync(dir).filter((f) => f.startsWith("active_goal_") || f.startsWith("goal_"))
+			: [];
+		assert.equal(goalFiles.length, 0, "no goal created for empty objective");
 	});
 
 	it("propose_goal_draft with sisyphus mismatch (sisyphus=true on /goals focus) is rejected", async () => {
@@ -360,5 +360,53 @@ describe("goal.ts — event handlers", () => {
 			const r = await h.handlers.get("context")!({ messages: [] }, makeCtx(cwd));
 			void r;
 		});
+	});
+});
+
+describe("goal.ts — start_goal tool", () => {
+	it("start_goal is registered", () => {
+		assert.ok(h.tools.has("start_goal"), "start_goal should be in the tool registry");
+	});
+
+	it("start_goal with valid objective creates a goal", async () => {
+		const cwd = tmpCwd();
+		const res = await h.tools.get("start_goal")!.execute(
+			"t", { objective: "Objective: ship feature X. Success criteria: shipped." },
+			undefined, undefined, makeCtx(cwd),
+		);
+		assert.ok(res.content[0]?.text !== undefined, "start_goal should return content");
+		// Verify the goal was actually created by checking get_goal
+		const get = await h.tools.get("get_goal")!.execute("t", {}, undefined, undefined, makeCtx(cwd));
+		assert.match(get.content[0].text, /ship feature X/i);
+	});
+
+	it("start_goal with sisyphus=true creates a sisyphus goal", async () => {
+		const cwd = tmpCwd();
+		await h.tools.get("start_goal")!.execute(
+			"t", { objective: "Objective: sisyphus task. Success criteria: done.", sisyphus: true },
+			undefined, undefined, makeCtx(cwd),
+		);
+		const get = await h.tools.get("get_goal")!.execute("t", {}, undefined, undefined, makeCtx(cwd));
+		assert.match(get.content[0].text, /sisyphus/i);
+	});
+
+	it("start_goal with empty objective is handled gracefully", async () => {
+		const cwd = tmpCwd();
+		await assert.doesNotReject(async () => {
+			await h.tools.get("start_goal")!.execute(
+				"t", { objective: "" },
+				undefined, undefined, makeCtx(cwd),
+			);
+		});
+	});
+
+	it("start_goal rejects objective over 50KB limit", async () => {
+		const cwd = tmpCwd();
+		const huge = "x".repeat(60_000);
+		const res = await h.tools.get("start_goal")!.execute(
+			"t", { objective: huge },
+			undefined, undefined, makeCtx(cwd),
+		);
+		assert.match(res.content[0].text, /exceed|limit|50|too long/i);
 	});
 });

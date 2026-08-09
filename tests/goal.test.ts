@@ -74,14 +74,18 @@ describe("goal extension — load + registration", () => {
 		for (const name of expected) assert.ok(names.includes(name), `missing command: ${name}`);
 	});
 
-	it("registers the goal execution tools", () => {
+	it("registers the goal execution tools (dead block/question/pause tools removed)", () => {
 		const names = registeredToolNames(pi);
 		const expected = [
-			"get_goal", "complete_goal", "pause_goal", "abort_goal",
+			"get_goal", "complete_goal",
 			"propose_goal_tweak", "propose_task_list",
 			"complete_task", "skip_task",
 		];
 		for (const name of expected) assert.ok(names.includes(name), `missing tool: ${name}`);
+		// The four dead tools MUST NOT be registered.
+		for (const dead of ["pause_goal", "abort_goal", "goal_question", "goal_questionnaire"]) {
+			assert.ok(!names.includes(dead), `dead tool ${dead} must not be registered`);
+		}
 	});
 
 	it("registers the creation/drafting tools", () => {
@@ -101,9 +105,12 @@ describe("goal extension — load + registration", () => {
 		}
 	});
 
-	it("does not register the question tool by default (no focused goal)", () => {
-		// syncGoalTools runs during load; question tool only appears with active goal
-		assert.ok(!pi.getActiveTools().includes("goal_question"));
+	it("never registers the dead question / pause / abort tools", () => {
+		// goal_question / goal_questionnaire / pause_goal / abort_goal are removed
+		// entirely from this fork.
+		for (const dead of ["goal_question", "goal_questionnaire", "pause_goal", "abort_goal"]) {
+			assert.ok(!pi.getActiveTools().includes(dead), `dead tool ${dead} surfaced in active tools`);
+		}
 	});
 
 	it("registers a custom message renderer for the goal entry type", () => {
@@ -156,6 +163,10 @@ describe("propose_goal_draft tool — headless auto-confirm", () => {
 		const cwd = tmpWorkspace();
 		const pi = setupPi(cwd);
 		goalExtension(pi);
+		// Isolate from global config leak: deployed ~/.pi/agent/pi-goal-xx-settings.json
+		// has enableCreateGoal=true. This test asserts the DEFAULT (disabled) behavior.
+		delete process.env.PI_GOAL_ENABLE_CREATE_GOAL;
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pgxx-goal-test-iso-" + Math.random().toString(36).slice(2));
 		const ctx = createMockCtx(pi, { cwd });
 		const result = await invokeTool(pi, ctx, "create_goal", {
 			objective: "x", autoContinue: false, sisyphus: false,
@@ -164,42 +175,8 @@ describe("propose_goal_draft tool — headless auto-confirm", () => {
 	});
 });
 
-describe("pause_goal tool", () => {
-	it("pauses an active goal (requires a goal first)", async () => {
-		const cwd = tmpWorkspace();
-		const pi = setupPi(cwd);
-		goalExtension(pi);
-		const ctx = createMockCtx(pi, { cwd });
-		await createGoalViaCommand(pi, ctx, "Pause me", false);
-		const ctx2 = createMockCtx(pi, { cwd });
-		const result = await invokeTool(pi, ctx2, "pause_goal", {
-			reason: "testing",
-		}) as any;
-		assert.ok(result);
-		const ctx3 = createMockCtx(pi, { cwd });
-		const get = await invokeTool(pi, ctx3, "get_goal", {}) as any;
-		const text: string = get.content[0].text;
-		assert.match(text, /pause/i);
-	});
-});
-
-describe("abort_goal tool", () => {
-	it("aborts the focused goal", async () => {
-		const cwd = tmpWorkspace();
-		const pi = setupPi(cwd);
-		goalExtension(pi);
-		const ctx = createMockCtx(pi, { cwd });
-		await createGoalViaCommand(pi, ctx, "Abort me", false);
-		const ctx2 = createMockCtx(pi, { cwd });
-		const result = await invokeTool(pi, ctx2, "abort_goal", {
-			reason: "done with it",
-		}) as any;
-		assert.ok(result);
-		const ctx3 = createMockCtx(pi, { cwd });
-		const get = await invokeTool(pi, ctx3, "get_goal", {}) as any;
-		assert.match(get.content[0].text as string, /no.*goal/i);
-	});
-});
+// pause_goal and abort_goal tools are removed from this fork.
+// (Block/question/pause lifecycle is owned by complete_goal + plain user message.)
 
 describe("propose_task_list tool", () => {
 	it("stores a proposed task list on the focused goal", async () => {

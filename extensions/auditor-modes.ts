@@ -16,6 +16,7 @@ import {
 	excludePatterns,
 	type AuditorPatternCache,
 } from "./auditor-patterns.ts";
+import { EARLY_DISAPPROVE_TOOL_NAME } from "./early-disapprove-tool.ts";
 
 /** Baseline tools always available to the auditor. */
 export const AUDITOR_BASELINE_TOOLS: readonly string[] = [
@@ -25,6 +26,7 @@ export const AUDITOR_BASELINE_TOOLS: readonly string[] = [
 	"ls",
 	"bash",
 	"report_auditor_progress",
+	EARLY_DISAPPROVE_TOOL_NAME,
 ];
 
 /** Resolve the auditor's effective mode, defaulting to "inherit". */
@@ -48,11 +50,13 @@ export function resolveAuditorTools(
 ): string[] {
 	const mode = resolveAuditorMode(settings);
 	const progressTool = "report_auditor_progress";
+	const earlyDisapproveTool = EARLY_DISAPPROVE_TOOL_NAME;
 	if (mode === "minimal") {
 		const include = settings?.auditorInclude?.tools ?? [];
 		const added = include.length > 0 ? applyPatterns(include, mainTools, cache) : [];
 		const merged = new Set<string>([...AUDITOR_BASELINE_TOOLS, ...added]);
 		merged.add(progressTool);
+		merged.add(earlyDisapproveTool);
 		return Array.from(merged);
 	}
 	// inherit
@@ -61,6 +65,7 @@ export function resolveAuditorTools(
 	const filtered = exclude.length > 0 ? excludePatterns(exclude, source, cache) : [...source];
 	const merged = new Set<string>(filtered);
 	merged.add(progressTool); // never strip the progress reporter
+	merged.add(earlyDisapproveTool); // never strip the fail-fast disapproval tool
 	return Array.from(merged);
 }
 

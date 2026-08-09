@@ -1,6 +1,6 @@
 {
   "name": "pi-goal-xx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Goal mode extension for pi: persistent long-running objectives, /goal-set drafting, Sisyphus prompt style, autoContinue, verification contracts, recursive task lists, and an above-editor status overlay. Fork of pi-goal-x (which forked @capyup/pi-goal).",
   "license": "MIT",
   "author": "buihongduc132",
@@ -9,6 +9,7 @@
     "pi-package",
     "pi",
     "pi-extension",
+    "pi-coding-agent",
     "goal",
     "sisyphus",
     "autoresearch",
@@ -25,10 +26,14 @@
   },
   "files": [
     "extensions",
+    "src",
     "README.md",
     "docs",
     "LICENSE"
   ],
+  "bin": {
+    "goal-xx": "src/cli/main.ts"
+  },
   "pi": {
     "extensions": [
       "extensions/goal.ts"
@@ -36,8 +41,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "test:coverage": "c8 --all --include='extensions/**' --exclude='tests/**' --exclude='node_modules/**' --reporter=text --reporter=json node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test --test-force-exit tests/*.test.ts",
+    "test:coverage": "c8 --all --include='extensions/**' --exclude='tests/**' --exclude='node_modules/**' --reporter=text --reporter=json node --experimental-strip-types --test --test-force-exit tests/*.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

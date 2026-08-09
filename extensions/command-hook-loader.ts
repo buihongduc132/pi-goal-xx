@@ -21,6 +21,7 @@
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { GoalSettings, CommandHookConfig, CommandHooksConfig } from "./goal-settings.ts";
+import { logGoalTrace, previewError } from "./goal-trace.ts";
 
 /** Default hooks directory (relative to cwd). */
 const DEFAULT_HOOKS_DIR = ".pi/pi-goal-xx/hooks/";
@@ -95,6 +96,7 @@ export async function loadHook(
 		} catch (err) {
 			// Error isolation: a malformed hook file does NOT crash the extension.
 			// Callers receive undefined and fall back to the built-in handler.
+			logGoalTrace(cwd, { level: "warn", step: "hook.import_failed", message: `failed to import hook ${p}`, error: previewError(err) });
 			return undefined;
 		}
 	};
@@ -207,6 +209,7 @@ export function wrapHandler(
 			} catch (err) {
 				// Override-handler errors propagate (user opted into full control).
 				notify(ctx, `Override hook for /${name} threw: ${(err as Error).message}`);
+				logGoalTrace(cwd, { level: "error", step: "hook.override_failed", message: `override hook for /${name} threw`, error: previewError(err) });
 				throw err;
 			}
 		};
@@ -224,6 +227,7 @@ export function wrapHandler(
 				}
 			} catch (err) {
 				notify(ctx, `Pre-hook for /${name} failed: ${(err as Error).message}. Falling back to original args.`);
+				logGoalTrace(cwd, { level: "warn", step: "hook.pre_failed", message: `pre-hook for /${name} failed`, error: previewError(err) });
 				effectiveArgs = args;
 			}
 		}
@@ -233,6 +237,7 @@ export function wrapHandler(
 				await hook.post(effectiveArgs, ctx, result);
 			} catch (err) {
 				notify(ctx, `Post-hook for /${name} failed: ${(err as Error).message}`);
+				logGoalTrace(cwd, { level: "warn", step: "hook.post_failed", message: `post-hook for /${name} failed`, error: previewError(err) });
 			}
 		}
 		return result;

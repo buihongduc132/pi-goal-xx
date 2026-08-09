@@ -2,6 +2,8 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
 import * as crypto from "node:crypto";
+import * as path from "node:path";
+import { existsSync, lstatSync } from "node:fs";
 import {
 	footerStatus,
 	formatDuration,
@@ -14,7 +16,9 @@ import {
 	buildTweakConfirmationText,
 	extractVerificationContract,
 	goalDraftingPrompt,
+	MAX_OBJECTIVE_LENGTH,
 	renderConfirmationTasks,
+	resolveGoalDraftingBlock,
 	validateGoalDraftProposal,
 	type GoalDraftingFocus,
 } from "./goal-draft.ts";
@@ -22,6 +26,8 @@ import {
 	runGoalCompletionAuditor,
 } from "./goal-auditor.ts";
 import {
+	DEFAULT_AUDITOR_TIMEOUT_MS,
+	DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS,
 	goalSettingsPath,
 	isAuditorEnabledByDefault,
 	loadGoalSettings,
@@ -33,23 +39,29 @@ import {
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
 import {
+	logGoalTrace,
+	resolveTraceSink,
+	traceStep,
+	goalTraceLogPath,
+	previewBytes,
+	wrapExecuteWithTrace,
+	type GoalTraceSinkConfig,
+} from "./goal-trace.ts";
+import {
 	isInteractiveTui,
 	proposalDialogFailureMessage,
-	registerQuestionnaireTools,
 	shouldAutoConfirmProposal,
 	showProposalDialog,
 } from "./goal-questionnaire.ts";
 import {
-	ABORT_GOAL_TOOL_NAME,
 	ACTIVE_GOAL_TOOL_NAMES,
 	COMPLETE_TASK_TOOL_NAME,
 	CREATE_GOAL_TOOL_NAME,
+	START_GOAL_TOOL_NAME,
 	POST_STOP_ALLOWED_TOOLS,
 	PROPOSE_DRAFT_TOOL_NAME,
 	PROPOSE_TASK_LIST_TOOL_NAME,
 	PROPOSE_TWEAK_TOOL_NAME,
-	QUESTIONNAIRE_TOOL_NAME,
-	QUESTION_TOOL_NAME,
 	SISYPHUS_STEP_TOOL_NAME,
 	GOAL_PROGRESS_TOOL_NAMES,
 	lifecycleToolNamesForGoalStatus,
@@ -85,14 +97,24 @@ import {
 	type GoalLedgerEvent,
 } from "./goal-ledger.ts";
 import { buildCompactionSummary } from "./goal-compaction.ts";
+import {
+	DEFAULT_ACTIVE_ENV_NAME,
+	DEFAULT_ACTIVE_ENV_TEMPLATE,
+	buildActiveEnvContext,
+	clearActiveGoalEnv,
+	resolveActiveEnvValue,
+	setActiveGoalEnv,
+} from "./goal-env-runtime.ts";
 import { lazyWrapCommand } from "./command-hook-loader.ts";
 import { wrapToolDefinition } from "./tool-prompt-wrapper.ts";
 import {
 	archiveGoalFile,
 	atomicWriteGoalFile,
 	ensureDirectory,
+	findDuplicateActiveGoal,
 	GOALS_DIR,
 	mergeGoalPromptFromDisk,
+	parseGoalFile,
 	readActiveGoalPool,
 	safeUnlinkGoalFile,
 	sanitizeGoalPaths,
@@ -115,8 +137,12 @@ import {
 	acquireLock,
 	isLockHeld,
 	readLock,
+	readLockDetailed,
+	reapStaleLock,
 	refreshLease,
 	releaseLock,
+	reapOrphanedLocks,
+	lockDir,
 	type LockOwner,
 } from "./goal-lock.ts";
 import {
@@ -134,18 +160,14 @@ import { showTaskListOverlay } from "./widgets/task-list-overlay.ts";
 
 import {
 	abortGoalCommandMessage,
-	buildAbortedByAgentGoal,
 	buildCompletionReport,
 	buildGoalCreatedReport,
-	buildPausedByAgentGoal,
 	buildTaskSummary,
 	clearGoalCommandMessage,
 	shouldArmPostCompactReminder,
 	shouldInjectPostCompactReminder,
 	taskCompletionBlockWarning,
-	validateGoalAbort,
 	validateGoalCompletion,
-	validatePauseGoal,
 	checkSubtasksComplete,
 	findSubtaskDepthViolation,
 	findTaskInTree,
@@ -174,11 +196,25 @@ const GOAL_PROGRESS_TOOL_SET = new Set<string>(GOAL_PROGRESS_TOOL_NAMES);
 
 
 /**
- * Tools that are NEVER blocked by the post-stop in-turn block. After pause_goal,
- * abort_goal, or complete_goal fires, the agent should
+ * Tools that are NEVER blocked by the post-stop in-turn block. After
+ * complete_goal fires, the agent should
  * yield the turn; we block all subsequent tool calls except these read-only inspections.
  */
 const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
+
+/**
+ * Resolve the cwd to use when the status-refresh timer must bail out of a
+ * stale ctx. NEVER read the captured ctx's `.cwd` getter here — on a stale
+ * ctx that getter calls runner.assertActive() and throws, re-throwing inside
+ * the catch handler and crashing the host. Use the cached cwd instead.
+ *
+ * Extracted as a pure, exported helper so the catch handler's stale-cwd
+ * resolution is unit-testable in isolation (the timer closure itself is not
+ * exported).
+ */
+export function resolveStaleRefreshCwd(cachedCwd: string | null): string {
+	return cachedCwd ?? process.cwd();
+}
 
 /**
  * When non-null, /goal-tweak drafting is in progress for this goal id and the
@@ -450,6 +486,22 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Cached cwd so syncGoalTools (which has no ctx parameter) can read settings.
 	// Set on every turn_start / extension lifecycle entry.
 	let cachedCwd: string | null = null;
+	// Resolved trace sink (level floor + toStderr) cached alongside cachedCwd.
+	// Reloaded whenever settings change; defaults to "info" until first load.
+	let cachedTraceSink: GoalTraceSinkConfig = resolveTraceSink(undefined);
+	/** Resolve the trace sink from current settings, caching the result. */
+	function traceSink(): GoalTraceSinkConfig {
+		return cachedTraceSink;
+	}
+	/** Refresh cached cwd and the trace-sink derived from current settings. */
+	function setCwdAndRefreshSink(cwd: string): void {
+		cachedCwd = cwd;
+		try {
+			cachedTraceSink = resolveTraceSink(loadGoalSettings(cwd).logging);
+		} catch {
+			cachedTraceSink = resolveTraceSink(undefined);
+		}
+	}
 	const state = {
 		get goal(): GoalRecord | null {
 			return focusedGoalFromPool(goalsById, focusedGoalId);
@@ -458,32 +510,116 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// Unit E task 4.8b: when focus is cleared (null) or changes to a
 			// different goal id, release the previous goal's focus lock BEFORE
 			// reassignment. This single chokepoint covers ALL setGoal(null)
-			// paths (clear, replace-topic, aborted) automatically — abort is
-			// terminal so it releases explicitly (honors the "MUST NOT hold
-			// locks" invariant); pause relies on lazy reap-on-acquire (see
-			// pause_goal comment).
+			// paths (clear, replace-topic, cleared) automatically — a terminal
+			// clear is terminal so it releases explicitly (honors the "MUST NOT hold
+			// locks" invariant); user-initiated pause (/goal-pause) relies on lazy
+			// reap-on-acquire.
 			const prevId = focusedGoalId;
 			const changing = prevId !== null && (next === null || next.id !== prevId);
 			if (changing && cachedCwd) {
 				try {
 					releaseLock(cachedCwd, prevId, { sessionId: SELF_SESSION_ID, pid: process.pid });
 				} catch (err) {
-					console.warn(`[goal] failed to release lock on goal clear/change ${prevId}:`, err);
+					logGoalTrace(cachedCwd, { level: "warn", step: "lock.release_failed", goalId: prevId, message: `failed to release lock on goal clear/change ${prevId}`, error: err instanceof Error ? err.message : String(err) });
 				}
 				stopHeartbeatTimer();
 			}
 			if (next) {
 				goalsById.set(next.id, next);
 				focusedGoalId = next.id;
+				if (cachedCwd) syncActiveGoalEnvCwd(cachedCwd);
 				return;
 			}
 			if (focusedGoalId) goalsById.delete(focusedGoalId);
 			focusedGoalId = null;
+			if (cachedCwd) syncActiveGoalEnvCwd(cachedCwd);
 		},
 	};
 	let continuationQueuedFor: string | null = null;
 	let continuationScheduledFor: string | null = null;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	// Message send mutex: serializes all pi.sendMessage / pi.sendUserMessage
+	// calls so a second send cannot race past isStreaming=true before the
+	// first's prompt() resolves the streamingBehavior option. Without this,
+	// concurrent sends surface as "Agent is already processing" errors emitted
+	// from the <runtime> bindCore catch handlers in agent-session.
+	let messageSendChain: Promise<void> = Promise.resolve();
+	// G7: counter of sends that have been queued but not yet resolved.
+	// When it returns to 0, the chain tail is reset to a fresh
+	// Promise.resolve() so the linked-promise chain (each link references its
+	// predecessor) can be GC'd instead of growing unbounded for the session
+	// lifetime.
+	let pendingSends = 0;
+	function serializedSend<T>(fn: () => T | Promise<T>): Promise<T> {
+		pendingSends++;
+		const run = messageSendChain.then(fn);
+		// Swallow rejections on the chain itself so a failed send never poisons
+		// subsequent sends; the caller still sees the real rejection from `run`.
+		// G7: decrement + reset when drained on BOTH resolve and reject paths.
+		const drain = () => {
+			pendingSends--;
+			if (pendingSends === 0) {
+				messageSendChain = Promise.resolve();
+			}
+		};
+		messageSendChain = run.then(drain, drain);
+		return run;
+	}
+	// Fire-and-forget wrapper for pi.sendMessage calls that return void.
+	// Catches rejections and logs them via auditor trace to prevent process crashes.
+	// Used for all 6 sendMessage calls in complete_goal (Bug 1b fix).
+	function safeFireAndForget(fn: () => unknown, context: string, cwd: string): void {
+		Promise.resolve()
+			.then(fn)
+			.catch((err) => {
+				try {
+					logAuditorTrace(cwd, {
+						ts: nowIso(),
+						phase: "send_failure",
+						context,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				} catch {
+					// trace logging must never crash
+				}
+			});
+	}
+	/**
+	 * G4: writeActiveGoalFile can throw if the disk is full, the path is
+	 * unsafe, or permissions deny the write. Every caller wraps the write in
+	 * this helper so a persistence failure is surfaced to the agent instead
+	 * of crashing the tool. Without it, the in-memory goal would look updated
+	 * while the on-disk file stayed stale — the agent would never learn the
+	 * save failed.
+	 *
+	 * Returns the canonical post-write record on success, or an error object
+	 * the caller surfaces to the user/context.
+	 */
+	function tryWriteActiveGoalFile(
+		ctx: ExtensionContext,
+		goal: GoalRecord,
+		alreadyCommitted = false,
+	): { goal: GoalRecord; ok: true } | { error: string; ok: false } {
+		try {
+			return { goal: writeActiveGoalFile(ctx, goal), ok: true };
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const memoryHint = alreadyCommitted
+				? "The in-memory goal was updated but persistence failed; please retry."
+				: "The goal changes were not committed to disk; please retry.";
+			const text = `Goal state could not be saved to disk: ${msg}. ${memoryHint}`;
+			try { ctx.ui.notify(text, "error"); } catch {}
+			try {
+				logAuditorTrace(ctx.cwd, {
+					ts: nowIso(),
+					phase: "write_failure",
+					context: "writeActiveGoalFile",
+					error: msg,
+				});
+			} catch {}
+			return { error: text, ok: false };
+		}
+	}
 	let runningGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
 	let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -502,10 +638,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Per-turn flags reset in turn_start (#4, C9 fix).
 	// goalWorkToolCalledThisTurn: tracks whether a real goal-work tool was called.
 	//   If false at turn_end, we don't queue another autoContinue (empty chat turn).
-	// turnStoppedFor: set by pause_goal / complete_goal / propose_goal_tweak
+	// turnStoppedFor: set by complete_goal / propose_goal_tweak
 	//   after their successful execute. Once set, pi.on("tool_call") blocks all
 	//   subsequent in-turn tool calls except POST_STOP_ALLOWED_TOOLS. This is the
-	//   schema fix for "agent keeps writing files after pause_goal".
+	//   schema fix for "agent keeps writing files after a lifecycle stop".
 	// turnSeq: lightweight generation counter, incremented at each turn start.
 	//   Used to scope turnStoppedFor so stale markers from prior turns or sessions
 	//   cannot poison a resumed active goal.
@@ -535,7 +671,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		try {
 			const initialTools = pi.getActiveTools();
 			if (!Array.isArray(initialTools)) {
-				console.error("[pi-goal] syncGoalTools: pi.getActiveTools() did not return an array, got", typeof initialTools);
+				logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "pi.getActiveTools() did not return an array", gotType: typeof initialTools });
 				return;
 			}
 			const disabledToolsSet = cachedCwd
@@ -543,8 +679,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				: new Set<string>();
 			const active = new Set(initialTools);
 			for (const name of goalExecutionWorkTools) active.add(name);
-			active.delete(QUESTION_TOOL_NAME);
-			active.delete(QUESTIONNAIRE_TOOL_NAME);
 			for (const name of ACTIVE_GOAL_TOOL_NAMES) active.delete(name);
 			const phase = confirmationIntent !== null ? "drafting" : tweakDraftingFor !== null ? "tweakDrafting" : "normal";
 			const lifecycleTools = lifecycleToolNamesForGoalStatus(state.goal?.status, phase);
@@ -554,11 +688,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// not expose it as an active work tool.
 			active.delete(SISYPHUS_STEP_TOOL_NAME);
 			// propose_goal_tweak is always available for active/paused goals via lifecycle tools.
-			// During a /goal-tweak drafting flow, additionally expose question tools.
 			if (state.goal && tweakDraftingFor === state.goal.id) {
 				active.add(PROPOSE_TWEAK_TOOL_NAME);
-				active.add(QUESTION_TOOL_NAME);
-				active.add(QUESTIONNAIRE_TOOL_NAME);
 			}
 			// Outside of active/paused states, remove propose_goal_tweak
 			if (!state.goal || state.goal.status === "complete") {
@@ -570,14 +701,43 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// question turns, compaction, or active-tool resync.
 			active.add(PROPOSE_DRAFT_TOOL_NAME);
 			// create_goal stays hidden — hard invariant: user must confirm via propose_goal_draft.
-			active.delete(CREATE_GOAL_TOOL_NAME);
-			if (confirmationIntent !== null) {
-				active.add(QUESTION_TOOL_NAME);
-				active.add(QUESTIONNAIRE_TOOL_NAME);
-			} else if (state.goal?.status === "active") {
+			// Opt-in: PI_GOAL_ENABLE_CREATE_GOAL=true (or settings.enableCreateGoal=true) keeps
+			// create_goal in the active set (callable-while-hidden). Q1 decision (b): when
+			// enabled, execute() also creates a goal (startNow=false).
+			const enableCreateGoal = cachedCwd
+				? !!loadGoalSettings(cachedCwd).enableCreateGoal
+				: false;
+			if (enableCreateGoal) {
+				active.add(CREATE_GOAL_TOOL_NAME);
+			} else {
+				active.delete(CREATE_GOAL_TOOL_NAME);
+			}
+			// start_goal stays hidden from the LLM and subagents by default. It is the
+			// agent-facing equivalent of /goals-set (create + start auto-run). The
+			// knowledge of how/when to call it is provided via prompt/skill context (TBD).
+			// Because it is absent from the active set, it does not leak to subagents
+			// (the goal-auditor inherits tools via pi.getActiveTools()).
+			// Opt-in: PI_GOAL_ENABLE_START_GOAL=true (or settings.enableStartGoal=true) keeps
+			// start_goal in the active set (callable-while-hidden, quiet-prose).
+			const enableStartGoal = cachedCwd
+				? !!loadGoalSettings(cachedCwd).enableStartGoal
+				: false;
+			if (enableStartGoal) {
+				active.add(START_GOAL_TOOL_NAME);
+			} else {
+				active.delete(START_GOAL_TOOL_NAME);
+			}
+			if (state.goal?.status === "active") {
 				for (const name of goalExecutionWorkTools) active.add(name);
-				active.add(QUESTION_TOOL_NAME);
-				active.add(QUESTIONNAIRE_TOOL_NAME);
+			}
+			// Blocker-tool gate: when disableBlockingTools is true (default), hide
+			// propose_goal_tweak so the goal runs e2e uninterrupted. complete_goal
+			// is NEVER hidden (required to finish). The block/question/pause agent
+			// tools were removed from this fork; propose_goal_tweak is the only
+			// remaining tool that can interrupt the goal flow.
+			const settings = cachedCwd ? loadGoalSettings(cachedCwd) : {};
+			if (settings.disableBlockingTools !== false) {
+				active.delete(PROPOSE_TWEAK_TOOL_NAME);
 			}
 			// Per-tool disable: hide any tool listed in settings.disabledTools.
 			// All tool names are eligible (lifecycle included); the user accepts
@@ -586,7 +746,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			for (const disabledName of disabledToolsSet) active.delete(disabledName);
 			pi.setActiveTools(Array.from(active));
 		} catch (err) {
-			console.error("[pi-goal] syncGoalTools error:", err instanceof Error ? err.message : String(err));
+			logGoalTrace(cachedCwd ?? process.cwd(), { level: "error", step: "syncGoalTools", message: "syncGoalTools threw", error: err instanceof Error ? err.message : String(err) });
 		}
 	}
 
@@ -638,13 +798,28 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				stopStatusRefresh();
 				return;
 			}
-			const displayGoal = goalForDisplay();
-			if (displayGoal) {
-				const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
-				statusRefreshCtx.ui.setStatus("goal", `${footerStatus(displayGoal)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+			try {
+				const displayGoal = goalForDisplay();
+				if (displayGoal) {
+					const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
+					const liveLock = isLockHeldBySelf(statusRefreshCtx.cwd, focusedGoalId);
+					statusRefreshCtx.ui.setStatus("goal", `${footerStatus(displayGoal, liveLock)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+				}
+				// Live-tick the above-editor widget so duration/tokens update.
+				goalWidgetComponent?.update();
+			} catch (err) {
+				// ctx may be stale after session replacement / reload — the captured
+				// statusRefreshCtx's .ui getter calls assertActive() which throws once
+				// the session is replaced. Stop the timer and log; NEVER let a stale-ctx
+				// throw escape a timer callback (that crashes the host process).
+				//
+				// Do NOT read statusRefreshCtx?.cwd here — its getter also calls
+				// assertActive() and would re-throw INSIDE this catch, escaping the
+				// timer and crashing the host. Use the cached cwd instead.
+				const _staleCwd = resolveStaleRefreshCwd(cachedCwd);
+				stopStatusRefresh();
+				logGoalTrace(_staleCwd, { level: "warn", step: "statusRefresh.stopped_stale_ctx", message: "status refresh timer stopped (ctx likely stale)", error: err instanceof Error ? err.message : String(err) });
 			}
-			// Live-tick the above-editor widget so duration/tokens update.
-			goalWidgetComponent?.update();
 		}, STATUS_REFRESH_MS);
 		statusRefreshTimer.unref?.();
 	}
@@ -734,9 +909,18 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const leaseMs = resolveLeaseMs();
 		heartbeatTimer = setInterval(() => {
 			try {
-				refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
+				const result = refreshLease(cwd, goalId, selfLockOwner(), leaseMs);
+				if (result.lostLock) {
+					stopHeartbeatTimer();
+					logGoalTrace(cwd, { level: "warn", step: "heartbeat.lost", goalId, message: "focus lock lost during heartbeat" });
+					statusRefreshCtx?.ui.notify(
+						`Goal ${goalId} focus lock lost — another session took over or the lease lapsed. Use /goal-resume to reacquire.`,
+						"warning",
+					);
+					if (statusRefreshCtx) updateUI(statusRefreshCtx);
+				}
 			} catch (err) {
-				console.warn(`[goal] heartbeat refresh failed for ${goalId}:`, err);
+				logGoalTrace(cwd, { level: "warn", step: "heartbeat.refresh_failed", goalId, message: "heartbeat refresh threw", error: err instanceof Error ? err.message : String(err) });
 			}
 		}, interval);
 		heartbeatTimer.unref?.();
@@ -764,9 +948,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (result.ok) {
 			startHeartbeatTimer(cwd, goalId);
 		} else if (result.heldByOther) {
-			console.warn(
-				`[goal] focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
-			);
+			logGoalTrace(cwd, {
+				level: "warn",
+				step: "lock.acquire_failed_held_by_other",
+				goalId,
+				message: `focus ${goalId} held by session ${result.heldByOther.owner.sessionId} (pid ${result.heldByOther.owner.pid})`,
+				ownerSessionId: result.heldByOther.owner.sessionId,
+				ownerPid: result.heldByOther.owner.pid,
+			});
 		}
 		return result;
 	}
@@ -793,28 +982,32 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		const diskGoal = fresh.get(focusedGoalId) ?? null;
 		if (!diskGoal) {
-			if (current && !current.activePath) {
-				goalsById = fresh;
-				goalsById.set(current.id, current);
-				focusedGoalId = current.id;
-				return true;
-			}
+		if (current && !current.activePath) {
 			goalsById = fresh;
-			focusedGoalId = null;
-			clearStoppedRuntimeState();
-			if (current) resetGetGoalNudgeState(current.id);
-			if (tweakDraftingFor !== null) tweakDraftingFor = null;
-			syncGoalTools();
-			updateUI(ctx);
-			return false;
+			goalsById.set(current.id, current);
+			focusedGoalId = current.id;
+			syncActiveGoalEnv(ctx);
+			return true;
 		}
-		const reconciled = current && opts.preserveMemoryUsage
-			? mergeFocusedGoalWithDisk({ memoryGoal: current, diskGoal })
-			: diskGoal;
+		logGoalTrace(ctx.cwd, { level: "warn", step: "reconcile.goal_vanished", goalId: focusedGoalId, message: "focused goal missing from disk; clearing focus", hadInMemoryGoal: !!current });
 		goalsById = fresh;
-		goalsById.set(reconciled.id, reconciled);
-		focusedGoalId = reconciled.id;
-		if (reconciled.status !== "active" || !reconciled.autoContinue) clearContinuationState();
+		focusedGoalId = null;
+		clearStoppedRuntimeState();
+		if (current) resetGetGoalNudgeState(current.id);
+		if (tweakDraftingFor !== null) tweakDraftingFor = null;
+		syncActiveGoalEnv(ctx);
+		syncGoalTools();
+		updateUI(ctx);
+		return false;
+	}
+	const reconciled = current && opts.preserveMemoryUsage
+		? mergeFocusedGoalWithDisk({ memoryGoal: current, diskGoal })
+		: diskGoal;
+	goalsById = fresh;
+	goalsById.set(reconciled.id, reconciled);
+	focusedGoalId = reconciled.id;
+	syncActiveGoalEnv(ctx);
+	if (reconciled.status !== "active" || !reconciled.autoContinue) clearContinuationState();
 		if (reconciled.status !== "active") clearActiveAccounting();
 		return true;
 	}
@@ -837,13 +1030,34 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				} catch {}
 			}
 			if (focusedGoalId) {
-				acquireFocusedLock(ctx.cwd, focusedGoalId);
+				const acquireResult = acquireFocusedLock(ctx.cwd, focusedGoalId);
+				if (!acquireResult.ok) {
+					// Lock acquisition failed (held by another live session) — revert focus.
+					// Without this check, two sessions can both "focus" the same stale goal
+					// and run it concurrently. See flow/troubleshootings/2026-07-26_dual-session-stale-goal-race.md
+					if (acquireResult.heldByOther) {
+						try {
+							ctx.ui.notify(
+								`Goal focused but not running — held by session ${acquireResult.heldByOther.owner.sessionId} (pid ${acquireResult.heldByOther.owner.pid}). Use /goal-focus to take over.`,
+								"warning",
+							);
+						} catch {}
+					}
+					focusedGoalId = previousGoalId;
+				} else {
+					clearContinuationState();
+					clearActiveAccounting();
+					resetGetGoalNudgeState(previousGoalId);
+					resetGetGoalNudgeState(focusedGoalId);
+					if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
+				}
+			} else {
+				clearContinuationState();
+				clearActiveAccounting();
+				resetGetGoalNudgeState(previousGoalId);
+				resetGetGoalNudgeState(focusedGoalId);
+				if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
 			}
-			clearContinuationState();
-			clearActiveAccounting();
-			resetGetGoalNudgeState(previousGoalId);
-			resetGetGoalNudgeState(focusedGoalId);
-			if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
 		}
 		appendFocusEntry(focusedGoalId, reason);
 		// Append ledger event for focus changes
@@ -856,8 +1070,49 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		} catch {
 			// Ledger append failure should not crash focus change
 		}
+		syncActiveGoalEnv(ctx);
 		syncGoalTools();
 		updateUI(ctx);
+	}
+
+	/**
+	 * Reflect the currently focused goal into env[goalActiveEnvName]. Sets to
+	 * the resolved template value when a goal is focused; clears the var when no
+	 * goal is focused. Errors are swallowed so env drift never breaks focus.
+	 */
+	function syncActiveGoalEnv(ctx: ExtensionContext): void {
+		syncActiveGoalEnvCwd(ctx.cwd);
+	}
+
+	// Track the previously-managed env name so we can clear it when the user
+	// changes goalActiveEnvName while a goal is focused (comment 3619924996).
+	// Without this, switching names leaves the OLD variable dangling in env.
+	let lastActiveEnvName: string | null = null;
+
+	/**
+	 * Cwd-only variant so the `state.goal` setter (which only has cachedCwd)
+	 * can sync the env signal without needing a full ExtensionContext.
+	 */
+	function syncActiveGoalEnvCwd(cwd: string): void {
+		try {
+			const settings = loadGoalSettings(cwd);
+			const name = settings.goalActiveEnvName || DEFAULT_ACTIVE_ENV_NAME;
+			const template = settings.goalActiveEnvTemplate || DEFAULT_ACTIVE_ENV_TEMPLATE;
+			// If the configured name changed since last sync, clear the stale var.
+			if (lastActiveEnvName !== null && lastActiveEnvName !== name) {
+				clearActiveGoalEnv(process.env, lastActiveEnvName);
+			}
+			if (focusedGoalId) {
+				const value = resolveActiveEnvValue(template, buildActiveEnvContext(cwd, focusedGoalId));
+				setActiveGoalEnv(process.env, name, value);
+				lastActiveEnvName = name;
+			} else {
+				clearActiveGoalEnv(process.env, name);
+				lastActiveEnvName = null;
+			}
+		} catch {
+			// Never let env-var drift crash focus change.
+		}
 	}
 
 	function updateFocusedGoal(next: GoalRecord, ctx: ExtensionContext, shouldPersist = true): void {
@@ -870,12 +1125,123 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		if (shouldPersist) persist(ctx);
 		else syncGoalTools();
+		syncActiveGoalEnv(ctx);
 		updateUI(ctx);
 	}
 
 	function armFocusedContinuation(ctx: ExtensionContext): void {
 		beginAccounting();
 		if (state.goal?.status === "active" && state.goal.autoContinue) queueContinuation(ctx);
+	}
+
+	/**
+	 * Feature (b): Load a goal .md file from PI_GOAL_FILE / settings.goalFile,
+	 * focus it, and (if active/paused) leave it ready for the session_start
+	 * tail to arm continuation. The helper does NOT acquire locks or queue
+	 * continuations itself — the existing session_start tail (lines ~4613-4631)
+	 * is the single auto-run chokepoint (D6) and handles lock-acquire +
+	 * queueContinuation uniformly.
+	 *
+	 * Returns `{ handled: true }` whenever the env path was entered (success OR
+	 * a notified error). `handled: false` only when no path resolves.
+	 *
+	 * Status transitions (applyStatusForEnvLoad):
+	 *   - complete → notify, no run
+	 *   - paused   → flip to active + autoContinue + clear stopReason (explicit
+	 *                "load and RUN" instruction; opt out via settings.goalFile omit)
+	 *   - active   → no-op
+	 *
+	 * Ignored in worker sessions (PI_TEAMS_WORKER=1) — workers never inherit
+	 * focus. The caller (session_start) pre-checks isWorkerSession(); we
+	 * re-check defensively here.
+	 */
+	function loadAndFocusGoalFile(ctx: ExtensionContext, filePath: string): { handled: boolean } {
+		if (isWorkerSession()) return { handled: false };
+		// 1. Resolve absolute path (absolute as-is; relative → ctx.cwd).
+		const abs = path.isAbsolute(filePath) ? filePath : path.resolve(ctx.cwd, filePath);
+		// 2. Stat: reject symlinks, dirs, missing. Mirrors parseGoalFile's own
+		//    symlink guard for the EXTERNAL path (the source file may live
+		//    outside .pi/goals, so isSafeActivePath is not applicable here).
+		try {
+			const st = lstatSync(abs);
+			if (st.isSymbolicLink() || !st.isFile()) {
+				try { ctx.ui.notify(`PI_GOAL_FILE is not a regular file: ${filePath}`, "error"); } catch {}
+				return { handled: true };
+			}
+		} catch {
+			try { ctx.ui.notify(`PI_GOAL_FILE not found: ${filePath}`, "error"); } catch {}
+			return { handled: true };
+		}
+		// 3. Parse via the SAME parser the pool reader uses.
+		const parsed = parseGoalFile(abs);
+		if (!parsed) {
+			try { ctx.ui.notify(`PI_GOAL_FILE could not be parsed as a goal file: ${filePath}`, "error"); } catch {}
+			return { handled: true };
+		}
+		// 4. Branch: already in pool (same id) vs not.
+		if (goalsById.has(parsed.id)) {
+			const existing = goalsById.get(parsed.id);
+			if (existing) {
+				setFocusedGoalId(existing.id, ctx, "selected");
+				applyStatusForEnvLoad(ctx, existing);
+			}
+			return { handled: true };
+		}
+		// 5. Not-in-pool: copy into .pi/goals/ durably via the canonical writer,
+		//    then focus. writeActiveGoalFile computes a safe activePath under
+		//    GOALS_DIR, sanitizes paths, and atomic-writes — so even a malicious
+		//    PI_GOAL_FILE cannot escape .pi/goals/ on the write side.
+		let persisted: GoalRecord;
+		try {
+			const writeResult = tryWriteActiveGoalFile(ctx, parsed, false);
+			if (!writeResult.ok) {
+				// tryWriteActiveGoalFile already notified the error.
+				return { handled: true };
+			}
+			persisted = writeResult.goal;
+		} catch (err) {
+			try { ctx.ui.notify(`PI_GOAL_FILE could not be copied into .pi/goals: ${err instanceof Error ? err.message : String(err)}`, "error"); } catch {}
+			return { handled: true };
+		}
+		// Insert into the in-memory pool AND focus in one move. setFocusedGoalId
+		// validates goalId ∈ goalsById, so set it first.
+		goalsById.set(persisted.id, persisted);
+		setFocusedGoalId(persisted.id, ctx, "selected");
+		applyStatusForEnvLoad(ctx, persisted);
+		return { handled: true };
+	}
+
+	/**
+	 * Apply the PI_GOAL_FILE status-transition rules to the currently-focused
+	 * goal. Called AFTER setFocusedGoalId so state.goal is the focused record.
+	 * The session_start tail (lock-acquire + queueContinuation) arms auto-run
+	 * once status is active.
+	 */
+	function applyStatusForEnvLoad(ctx: ExtensionContext, goal: GoalRecord): void {
+		const current = state.goal;
+		if (!current || current.id !== goal.id) return;
+		if (current.status === "complete") {
+			try { ctx.ui.notify(`Loaded goal is already complete (not started): ${truncateText(current.objective, 60)}`, "info"); } catch {}
+			return;
+		}
+		if (current.status === "paused") {
+			// Explicit "load and RUN" instruction: flip paused → active.
+			// Mirrors the session_start pause-resume path and handleGoalResume.
+			setGoal(
+				{
+					...current,
+					status: "active",
+					autoContinue: true,
+					stopReason: undefined,
+					pauseReason: undefined,
+					pauseSuggestedAction: undefined,
+				},
+				ctx,
+				true,
+				undefined,
+			);
+		}
+		// active: no-op — tail arms continuation.
 	}
 
 	function removeFocusedGoal(ctx: ExtensionContext, reason: GoalFocusReason): void {
@@ -885,6 +1251,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		clearStoppedRuntimeState();
 		resetGetGoalNudgeState(previousGoalId);
 		appendFocusEntry(null, reason);
+		syncActiveGoalEnv(ctx);
 		syncGoalTools();
 		updateUI(ctx);
 	}
@@ -954,7 +1321,21 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			if (ctx) {
 				syncGoalPromptFromDisk(ctx);
 				const next = state.goal;
-				if (next) state.goal = next.status === "complete" ? archiveGoalFile(ctx, next) : writeActiveGoalFile(ctx, next);
+				if (next) {
+					if (next.status === "complete") {
+						// G4: wrap archival too (archiveGoalFile can throw on the same
+						// disk-failure class). On failure keep the prior in-memory goal.
+						try {
+							state.goal = archiveGoalFile(ctx, next);
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							try { ctx.ui.notify(`Goal state could not be saved to disk: ${msg}. The in-memory goal was updated but persistence failed; please retry.`, "error"); } catch {}
+						}
+					} else {
+						const writeResult = tryWriteActiveGoalFile(ctx, next, true);
+						if (writeResult.ok) state.goal = writeResult.goal;
+					}
+				}
 			}
 		}
 		pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
@@ -1024,6 +1405,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 							getAuditorProgress: () => auditProgress,
 							getSettings: () => loadGoalSettings(ctx.cwd),
 							getDebugMode: () => debugMode,
+						getLiveLockHolder: () => isLockHeldBySelf(ctx.cwd, focusedGoalId),
 						});
 						return goalWidgetComponent;
 					},
@@ -1039,7 +1421,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 		const displayGoal = goalForDisplay() ?? state.goal;
 		const otherCount = otherOpenGoalCount(goalsById, focusedGoalId);
-		ctx.ui.setStatus("goal", `${footerStatus(displayGoal)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
+		const liveLock = isLockHeldBySelf(ctx.cwd, focusedGoalId);
+		ctx.ui.setStatus("goal", `${footerStatus(displayGoal, liveLock)}${otherCount > 0 ? ` (+${otherCount} open)` : ""}`);
 
 		if (!widgetRegistered) {
 			ctx.ui.setWidget(
@@ -1053,6 +1436,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 						getAuditorProgress: () => auditProgress,
 						getSettings: () => loadGoalSettings(ctx.cwd),
 						getDebugMode: () => debugMode,
+						getLiveLockHolder: () => isLockHeldBySelf(ctx.cwd, focusedGoalId),
 					});
 					return goalWidgetComponent;
 				},
@@ -1127,6 +1511,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		clearStoppedRuntimeState();
 		runningGoalId = null;
+		syncActiveGoalEnv(ctx);
 		updateUI(ctx);
 	}
 
@@ -1274,10 +1659,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				const prevId = prev.id;
 				state.goal = null;
 				if (focusedGoalId === prevId) {
-					goalsById.delete(prevId);
-					focusedGoalId = null;
-				}
-				clearStoppedRuntimeState();
+				goalsById.delete(prevId);
+				focusedGoalId = null;
+			}
+			syncActiveGoalEnv(ctx);
+			clearStoppedRuntimeState();
 				syncGoalTools();
 				updateUI(ctx);
 				ctx.ui.notify("Debug goal removed", "info");
@@ -1540,21 +1926,23 @@ Verification contract:
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
-		pi.sendMessage<GoalEventDetails>(
-			{
-				customType: GOAL_EVENT_ENTRY,
-				content: continuationPrompt(goal, settings, ctx.cwd),
-				display: false,
-				details: {
-					kind: "checkpoint",
-					goalId: goal.id,
-					status: goal.status,
-					objective: goal.objective,
-					timestamp: Date.now(),
+		void serializedSend(() => {
+			pi.sendMessage<GoalEventDetails>(
+				{
+					customType: GOAL_EVENT_ENTRY,
+					content: continuationPrompt(goal, settings, ctx.cwd),
+					display: false,
+					details: {
+						kind: "checkpoint",
+						goalId: goal.id,
+						status: goal.status,
+						objective: goal.objective,
+						timestamp: Date.now(),
+					},
 				},
-			},
-			{ triggerTurn: true, deliverAs: "followUp" },
-		);
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		});
 	}
 
 
@@ -1572,7 +1960,7 @@ Verification contract:
 		// on a previously-held lock (session_compact, session_tree) correctly
 		// block when the lease lapsed — auto-run is NOT fail-open (D7).
 		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
-			console.warn(`[goal] auto-run blocked: focus ${goalId} not locked by self`);
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.blocked", goalId, message: "continuation blocked: focus lock not held by self" });
 			return;
 		}
 		if (continuationQueuedFor === goalId || continuationScheduledFor === goalId) return;
@@ -1580,7 +1968,8 @@ Verification contract:
 		let delay = CONTINUATION_IDLE_RETRY_MS;
 		try {
 			delay = ctx.isIdle() && !ctx.hasPendingMessages() ? 0 : CONTINUATION_IDLE_RETRY_MS;
-		} catch {
+		} catch (err) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.idle_check_failed", goalId, message: "ctx.isIdle()/hasPendingMessages() threw", error: err instanceof Error ? err.message : String(err) });
 			return;
 		}
 		continuationScheduledFor = goalId;
@@ -1635,8 +2024,10 @@ Verification contract:
 		reconcileFocusedGoalFromDisk(ctx);
 		clearContinuationState();
 		clearActiveAccounting();
-		if (!state.goal) {
-			if (openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if (open.length > 1 || !state.goal) {
+			if (open.length > 0) {
 				const selected = await chooseOpenGoal(ctx, "Tweak which open goal?");
 				if (!selected) return;
 			} else {
@@ -1666,21 +2057,23 @@ Verification contract:
 		);
 		const draftId = `tweak-${focused.id}-${Date.now().toString(36)}`;
 		try {
-			pi.sendMessage<GoalEventDetails>(
-				{
-					customType: GOAL_EVENT_ENTRY,
-					content: goalTweakDraftingPrompt(focused, trimmed, loadGoalSettings(ctx.cwd), ctx.cwd),
-					display: false,
-					details: {
-						kind: "drafting",
-						goalId: draftId,
-						objective: trimmed,
-						focus: sisyphusOn ? "sisyphus" : "goal",
-						timestamp: Date.now(),
+			void serializedSend(() => {
+				pi.sendMessage<GoalEventDetails>(
+					{
+						customType: GOAL_EVENT_ENTRY,
+						content: goalTweakDraftingPrompt(focused, trimmed, loadGoalSettings(ctx.cwd), ctx.cwd),
+						display: false,
+						details: {
+							kind: "drafting",
+							goalId: draftId,
+							objective: trimmed,
+							focus: sisyphusOn ? "sisyphus" : "goal",
+							timestamp: Date.now(),
+						},
 					},
-				},
-				{ triggerTurn: true, deliverAs: ctx.isIdle() ? "followUp" : "steer" },
-			);
+					{ triggerTurn: true, deliverAs: ctx.isIdle() ? "followUp" : "steer" },
+				);
+			});
 		} catch (err) {
 			tweakDraftingFor = null;
 			syncGoalTools();
@@ -1708,7 +2101,9 @@ Verification contract:
 		};
 		syncGoalTools();
 		try {
-			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus, loadGoalSettings(ctx.cwd), ctx.cwd), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+			void serializedSend(() => {
+				pi.sendUserMessage(goalDraftingPrompt(trimmed, focus, loadGoalSettings(ctx.cwd), ctx.cwd), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+			});
 		} catch (err) {
 			ctx.ui.notify(`Could not start ${label.toLowerCase()}: ${(err as Error).message}`, "error");
 		}
@@ -1716,8 +2111,12 @@ Verification contract:
 
 	async function chooseOpenGoal(ctx: ExtensionContext, title: string): Promise<GoalRecord | null> {
 		reconcileFocusedGoalFromDisk(ctx);
-		if (state.goal && state.goal.status !== "complete") return state.goal;
 		const open = openGoals();
+		// Only fast-return the focused goal when there's 0-1 open goals.
+		// With 2+ open goals, ALWAYS show the picker so the user can select
+		// which goal to operate on (bug fix: early return blocked selection).
+		if (open.length <= 1 && state.goal && state.goal.status !== "complete") return state.goal;
+		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) return null;
 		if (open.length === 1) {
 			const only = open[0];
@@ -1725,16 +2124,21 @@ Verification contract:
 			setFocusedGoalId(only.id, ctx, "selected");
 			return state.goal;
 		}
-		if (!ctx.hasUI) {
+		if (!isInteractiveTui(ctx)) {
+			// Bug fix: non-TUI with 2+ goals must NOT auto-focus. Return null.
+			// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+			// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+			// can we selecting the GOAL?"
 			ctx.ui.notify(buildUnfocusedOpenGoalsSummary(open.length), "warning");
 			return null;
 		}
 		const shortIds = resolveShortIdsForPool(open);
-		const heldByOther = computeHeldByOther(open, ctx.cwd);
-		const sorted = sortGoalsForPicker(open);
+		const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+		const sorted = sortGoalsForPicker(open, liveLockHolderSet);
 		const labels = sorted.map((item) => goalSelectorLabel(item, focusedGoalId, {
 			shortId: shortIds.get(item.id),
 			heldByOtherSession: heldByOther.get(item.id) ?? null,
+			liveLockHolder: liveLockHolderSet ? liveLockHolderSet.has(item.id) : undefined,
 		}));
 		const byLabel = new Map(labels.map((label, index) => [label, sorted[index]?.id]));
 		const selected = await ctx.ui.select(title, labels);
@@ -1750,28 +2154,62 @@ Verification contract:
 	/**
 	 * Unit F — /goal-focus override flow (D5, LD2). Checks the focus lock on a
 	 * goal BEFORE setFocusedGoalId is called. Returns true if focus may proceed,
-	 * false if it should be aborted (declined or headless-refused).
+	 * false if it should be aborted (declined or refused).
 	 *
 	 * - No lock / stale lock → silent proceed (setFocusedGoalId reaps+acquires).
 	 * - Held by self → proceed.
-	 * - Held by another LIVE session → confirm dialog; on confirm, forcibly
-	 *   release + proceed; on decline, abort.
-	 * - Headless (!ctx.hasUI) → refuse with a warning (cannot prompt).
+	 * - Held by another LIVE session:
+	 *   - Feature (c): in non-TUI (or PI_GOAL_AUTO_CONFIRM=1) → auto-takeover
+	 *     (release + proceed + warn). Non-TUI launches get full goal
+	 *     functionality without a prompt.
+	 *   - TUI without opt-in → confirm dialog; on confirm, forcibly release +
+	 *     proceed; on decline, abort. On TUI decline, refuse + notify.
 	 */
 	/**
 	 * Compute the set of open goals held by OTHER live sessions, for surfacing
-	 * a lock-owner pill in the picker/list. Pure read; does not reap or release.
+	 * a lock-owner pill in the picker/list. Read+reap-stale (D5): STALE locks
+	 * observed here are reaped on sight so they don't persist indefinitely until
+	 * another session attempts acquisition. HELD locks are never reaped.
 	 */
-	function computeHeldByOther(goals: GoalRecord[], cwd: string): Map<string, string> {
-		const out = new Map<string, string>();
-		for (const g of goals) {
-			const lock = readLock(cwd, g.id);
-			if (!lock) continue;
-			if (lock.owner.sessionId === SELF_SESSION_ID) continue;
-			if (!isLockHeld(lock)) continue;
-			out.set(g.id, lock.owner.sessionId);
+	/**
+	 * Compute lock info for display: (1) goals held by OTHER live sessions
+	 * (for the lock-owner pill), and (2) the set of goals with ANY live lock
+	 * holder (self or other) for liveness display.
+	 *
+	 * When `.locks/` dir is absent, returns null sets (legacy fallback — all
+	 * active+autoContinue goals show 'running' unchanged).
+	 *
+	 * Uses readLockDetailed to distinguish missing (→ stale) from error (→ undefined).
+	 * Also reaps stale locks on the read path (D5 from staleness fix).
+	 */
+	function computeLockInfo(goals: GoalRecord[], cwd: string): { heldByOther: Map<string, string>; liveLockHolderSet: Set<string> | null } {
+		// If locking is not enabled in this cwd (.locks/ dir absent), return null
+		// to signal legacy fallback to all consumers.
+		let locksDirExists = false;
+		try {
+			locksDirExists = existsSync(lockDir(cwd));
+		} catch {
+			locksDirExists = false;
 		}
-		return out;
+		if (!locksDirExists) {
+			return { heldByOther: new Map(), liveLockHolderSet: null };
+		}
+		const heldByOther = new Map<string, string>();
+		const liveLockHolderSet = new Set<string>();
+		for (const g of goals) {
+			// Bug #2 fix (D5): reap stale locks on the read path.
+			reapStaleLock(cwd, g.id);
+			const detailed = readLockDetailed(cwd, g.id);
+			if (detailed.status === "missing") continue; // no lock → not in live set → stale by display
+			if (detailed.status === "error") continue; // can't determine → undefined legacy fallback (skip)
+			const lock = detailed.lock;
+			if (!isLockHeld(lock)) continue; // stale lock → not live
+			liveLockHolderSet.add(g.id);
+			if (lock.owner.sessionId !== SELF_SESSION_ID) {
+				heldByOther.set(g.id, lock.owner.sessionId);
+			}
+		}
+		return { heldByOther, liveLockHolderSet };
 	}
 
 	async function confirmFocusOverride(ctx: ExtensionContext, goalId: string): Promise<boolean> {
@@ -1779,16 +2217,33 @@ Verification contract:
 		if (!lock) return true;
 		if (lock.owner.sessionId === SELF_SESSION_ID) return true;
 		if (!isLockHeld(lock)) {
-			// Stale (PID dead or lease lapsed) — silent reap, proceed.
+			// Stale (PID dead/identity-recycled or lease lapsed) — silent reap, proceed.
+			try {
+				reapStaleLock(ctx.cwd, goalId);
+			} catch {}
+			return true;
+		}
+		// Held by another LIVE session.
+		// Feature (c): in non-TUI the confirm dialog is unusable, so the goal
+		// would be unusable if we refused. shouldAutoConfirmProposal returns
+		// true in non-TUI (regardless of PI_GOAL_AUTO_CONFIRM) AND when
+		// PI_GOAL_AUTO_CONFIRM=1 is set explicitly. Either way → auto-takeover
+		// (release + proceed + warn). Only TUI without opt-in reaches the
+		// confirm dialog below.
+		const autoConfirm = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM, mode: (ctx as any).mode });
+		if (autoConfirm) {
+			ctx.ui.notify(
+				`Goal ${goalId} held by session ${lock.owner.sessionId}; auto-taking over (PI_GOAL_AUTO_CONFIRM).`,
+				"warning",
+			);
 			try {
 				releaseLock(ctx.cwd, goalId);
 			} catch {}
 			return true;
 		}
-		// Held by another LIVE session.
-		if (!ctx.hasUI) {
+		if (!isInteractiveTui(ctx)) {
 			ctx.ui.notify(
-				`Goal ${goalId} is held by session ${lock.owner.sessionId} (pid ${lock.owner.pid}). Cannot prompt for takeover in headless mode.`,
+				`Goal ${goalId} is held by session ${lock.owner.sessionId} (pid ${lock.owner.pid}). Set PI_GOAL_AUTO_CONFIRM=1 to take over.`,
 				"warning",
 			);
 			return false;
@@ -1807,10 +2262,30 @@ Verification contract:
 		return true;
 	}
 
-	async function focusGoalCommand(ctx: ExtensionContext): Promise<void> {
+	async function focusGoalCommand(ctx: ExtensionContext, rawArgs?: string): Promise<void> {
+		// Bug fix: reconcile from disk before reading pool. Without this,
+		// goals created by other sessions after startup are invisible to
+		// the picker (stale in-memory pool).
+		reconcileFocusedGoalFromDisk(ctx);
 		const open = openGoals();
+		reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
 		if (open.length === 0) {
 			ctx.ui.notify("No open goals. Use /goals or /sisyphus to discuss, or /goals-set / /sisyphus-set to start immediately.", "warning");
+			return;
+		}
+		// If rawArgs provided, parse as goal id and focus that specific goal
+		if (rawArgs && rawArgs.trim()) {
+			const targetId = rawArgs.trim();
+			// Match by full id or short suffix
+			const matched = open.find(g => g.id === targetId || g.id.endsWith(`-${targetId}`));
+			if (!matched) {
+				ctx.ui.notify(`Goal not found: ${targetId}. Use /goal-list to see available goals.`, "warning");
+				return;
+			}
+			if (!(await confirmFocusOverride(ctx, matched.id))) return;
+			setFocusedGoalId(matched.id, ctx, "selected");
+			armFocusedContinuation(ctx);
+			ctx.ui.notify(`Focused goal: ${oneLineSummary(matched)}`, "info");
 			return;
 		}
 		if (open.length === 1) {
@@ -1823,16 +2298,23 @@ Verification contract:
 			ctx.ui.notify(`Focused goal: ${oneLineSummary(only)}`, "info");
 			return;
 		}
-		if (!ctx.hasUI) {
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(open, ctx.cwd) }), "info");
+		if (!isInteractiveTui(ctx)) {
+			// Bug fix: non-TUI with 2+ goals must NOT auto-focus. Show list instead.
+			// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+			// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+			// can we selecting the GOAL?"
+			const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther, liveLockHolderSet }), "info");
+			ctx.ui.notify("Use /goal-focus <short-id> to select a specific goal.", "info");
 			return;
 		}
 		const shortIds = resolveShortIdsForPool(open);
-		const heldByOther = computeHeldByOther(open, ctx.cwd);
-		const sorted = sortGoalsForPicker(open);
+		const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+		const sorted = sortGoalsForPicker(open, liveLockHolderSet);
 		const labels = sorted.map((item) => goalSelectorLabel(item, focusedGoalId, {
 			shortId: shortIds.get(item.id),
 			heldByOtherSession: heldByOther.get(item.id) ?? null,
+			liveLockHolder: liveLockHolderSet ? liveLockHolderSet.has(item.id) : undefined,
 		}));
 		const byLabel = new Map(labels.map((label, index) => [label, sorted[index]?.id]));
 		const selected = await ctx.ui.select(`Focus open goal · ${open.length} open`, labels);
@@ -1866,9 +2348,25 @@ Verification contract:
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
+		// G6 (coderabbit review): enforce the 50KB objective cap on direct-start
+		// commands too, matching propose_goal_draft / complete_goal / propose_goal_tweak.
+		// Without this, a >50KB /goals-set objective bypasses every cap and reaches
+		// persistence + later auditor prompts unbounded.
+		if (raw.length > MAX_OBJECTIVE_LENGTH) {
+			ctx.ui.notify(
+				`Objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.`,
+				"error",
+			);
+			return;
+		}
 		const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
 		if (missingSnippets && missingSnippets.length > 0) {
 			ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+		}
+		// Dedup warning: notify if an active/paused goal with the same objective exists (but proceed — user invoked this directly).
+		const existingGoal = findDuplicateActiveGoal(ctx, raw);
+		if (existingGoal) {
+			ctx.ui.notify(`Note: a ${existingGoal.status} goal (${existingGoal.id}) with the same objective already exists. The old goal file will remain — use /goal-archive ${existingGoal.id} to clean it up.`, "warning");
 		}
 		clearContinuationState();
 		clearActiveAccounting();
@@ -1890,8 +2388,10 @@ Verification contract:
 
 	async function handleGoalPause(ctx: ExtensionContext): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal) {
-			if (openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if (open.length > 1 || !state.goal) {
+			if (open.length > 0) {
 				const selected = await chooseOpenGoal(ctx, "Pause which open goal?");
 				if (!selected) return;
 			} else {
@@ -1914,7 +2414,9 @@ Verification contract:
 
 	async function handleGoalResume(ctx: ExtensionContext): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Resume or focus open goal");
 			if (!selected) return;
 			if (selected.status === "active") {
@@ -1923,7 +2425,23 @@ Verification contract:
 				return;
 			}
 		}
-		const resumeGate = validateResumeGoal(state.goal);
+		// Stale-resume fix: validateResumeGoal is a pure file-status gate — it
+		// returns "already running" when status=active+autoContinue, regardless
+		// of lock liveness. But a goal whose file says active+autoContinue is
+		// only "running" if THIS session holds a live focus lock for it. A
+		// stale/missing lock (owning session died or lease lapsed) means the
+		// goal is NOT running — resume must proceed to re-acquire + continue.
+		// Mirrors the UI's "stale" derivation (compactStatusLabel checks
+		// liveLockHolder === false). The downstream acquireFocusedLock handles
+		// heldByOther (another live session) and stale-lock reaping.
+		const resumeGate = (() => {
+			const gate = validateResumeGoal(state.goal);
+			if (gate.ok) return gate;
+			if (/already running/i.test(gate.message) && state.goal && !isLockHeldBySelf(ctx.cwd, state.goal.id)) {
+				return { ok: true } as const;
+			}
+			return gate;
+		})();
 		if (!resumeGate.ok) {
 			const level = resumeGate.message.includes("already running") ? "info" : "warning";
 			ctx.ui.notify(resumeGate.message, level);
@@ -2011,6 +2529,8 @@ Verification contract:
 		if (key === "hooksDir") return config.hooksDir ?? ".pi/pi-goal-xx/hooks/";
 		if (key === "contractTemplates") return config.contractTemplates === false ? "false" : "true";
 		if (key === "contractsDir") return config.contractsDir ?? ".pi/pi-goal-xx/contracts/";
+		if (key === "auditorTimeoutMs") return config.auditorTimeoutMs !== undefined ? String(config.auditorTimeoutMs) : `${DEFAULT_AUDITOR_TIMEOUT_MS} (15min)`;
+		if (key === "auditorTimeoutFloorMs") return config.auditorTimeoutFloorMs !== undefined ? String(config.auditorTimeoutFloorMs) : `${DEFAULT_AUDITOR_TIMEOUT_FLOOR_MS} (1s)`;
 		const fallback = config[key as keyof GoalSettings];
 		return typeof fallback === "string" ? fallback : "(default)";
 	}
@@ -2029,6 +2549,8 @@ Verification contract:
 			`auditorPrompt: ${settingsValue(config, "auditorPrompt")}`,
 			`auditorExclude: ${settingsValue(config, "auditorExclude")}`,
 			`auditorInclude: ${settingsValue(config, "auditorInclude")}`,
+			`auditorTimeoutMs: ${settingsValue(config, "auditorTimeoutMs")}`,
+			`auditorTimeoutFloorMs: ${settingsValue(config, "auditorTimeoutFloorMs")}`,
 		];
 		// Unified prompt config (group 5). Legacy auditor keys are aliases of
 		// prompts.auditor — surface a migration hint when only legacy keys are set.
@@ -2130,7 +2652,9 @@ Verification contract:
 			return;
 		}
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Clear which open goal?");
 			if (!selected) return;
 		}
@@ -2157,7 +2681,9 @@ Verification contract:
 			return;
 		}
 		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
+		const open = openGoals();
+		// Always show picker when 2+ open goals (bug fix: let user select)
+		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Abort which open goal?");
 			if (!selected) return;
 		}
@@ -2183,14 +2709,36 @@ Verification contract:
 		},
 	};
 // Tool-prompt wrapping (group 4, D3). Resolves tool-<name> prompts at load.
+// Also wraps each tool's `execute` in a trace span (tool.<name>) so every tool
+// call — start / end / duration / error — is recorded in goal-trace.jsonl. The
+// span is best-effort: traceStep never lets a trace-write failure affect the
+// wrapped tool. See extensions/goal-trace.ts.
 function regTool<T extends { name: string; promptSnippet?: string; promptGuidelines?: string[] }>(def: T): T {
-	return wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+	const wrapped = wrapToolDefinition(def, loadGoalSettings(cachedCwd ?? process.cwd()), cachedCwd ?? undefined);
+	const toolName = def.name;
+	const originalExecute = (wrapped as { execute?: unknown }).execute;
+	if (typeof originalExecute !== "function") return wrapped;
+	const traced = wrapExecuteWithTrace(`tool.${toolName}`, originalExecute as (...args: unknown[]) => unknown, {
+		getSink: traceSink,
+		spanKind: "CLIENT",
+		fallbackCwd: cachedCwd ?? process.cwd(),
+	});
+	(wrapped as unknown as { execute: unknown }).execute = traced;
+	return wrapped;
 }
 
 // Command-hook wrapping (group 6). Wraps each /goal-* command handler so
 // user hooks (default off) can pre/post/override when enabled in settings.
+// Also wraps the final handler in a trace span (cmd.<name>) so every command
+// invocation — start / end / duration / error — is recorded in goal-trace.jsonl.
 function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: string, def: T): T {
-	return { ...def, handler: lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd()) as T["handler"] };
+	const hookWrapped = lazyWrapCommand(name, def.handler as (args: string, ctx: unknown) => unknown, () => loadGoalSettings(cachedCwd ?? process.cwd()), () => cachedCwd ?? process.cwd());
+	const traced = wrapExecuteWithTrace(`cmd.${name}`, hookWrapped as (...args: unknown[]) => unknown, {
+		getSink: traceSink,
+		spanKind: "SERVER",
+		fallbackCwd: cachedCwd ?? process.cwd(),
+	});
+	return { ...def, handler: traced as T["handler"] };
 }
 
 	pi.registerCommand("goal", wrapCmdDef("goal", {
@@ -2202,14 +2750,17 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		description: "List all open pi goals and show which one this session is focused on.",
 		handler: async (_rawArgs, ctx) => {
 			reconcileFocusedGoalFromDisk(ctx);
-			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther: computeHeldByOther(openGoals(), ctx.cwd) }), "info");
+			const open = openGoals();
+			reapOrphanedLocks(ctx.cwd, new Set(open.map((g) => g.id)));
+			const { heldByOther, liveLockHolderSet } = computeLockInfo(open, ctx.cwd);
+			ctx.ui.notify(buildGoalListText(goalsById, focusedGoalId, { heldByOther, liveLockHolderSet }), "info");
 			updateUI(ctx);
 		},
 	}));
 	pi.registerCommand("goal-focus", wrapCmdDef("goal-focus", {
-		description: "Choose which open goal this session should focus on.",
-		handler: async (_rawArgs, ctx) => {
-			await focusGoalCommand(ctx);
+		description: "Choose which open goal this session should focus on. Use /goal-focus <short-id> to select a specific goal.",
+		handler: async (rawArgs, ctx) => {
+			await focusGoalCommand(ctx, rawArgs);
 		},
 	}));
 	pi.registerCommand("goal-settings", wrapCmdDef("goal-settings", {
@@ -2290,8 +2841,6 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 	}));
 
 
-	registerQuestionnaireTools(pi);
-
 	pi.registerTool(regTool(defineTool({
 		name: "get_goal",
 		label: "Get Goal",
@@ -2317,7 +2866,7 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 				}
 			}
 			const lifecycleHint = view && (view.status === "active" || view.status === "paused")
-				? "\nLifecycle tools: if evidence proves the objective is satisfied, call complete_goal({verificationSummary: \"evidence\"}); if blocked, call pause_goal({reason, suggestedAction?}); if abandoned/obsolete/unsafe, call abort_goal({reason}). For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
+				? "\nLifecycle tools: if evidence proves the objective is satisfied, call complete_goal({verificationSummary: \"evidence\"}). If you are blocked, state the blocker in your final message and stop — the user will intervene. For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
 				: "";
 			const text = view
 				? `${detailedSummary(view)}${lifecycleHint}${nudge}${otherCount > 0 ? `\nOther open goals: ${otherCount} (human can run /goal-list or /goal-focus)` : ""}`
@@ -2341,7 +2890,11 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		name: "create_goal",
 		label: "Create Goal",
 		description: "Create a new active pi goal and focus it. Hidden outside drafting flows; propose_goal_draft is the normal commit path.",
-		promptSnippet: "Create a persistent pi goal when the user explicitly asks for one or when a goal-drafting interview has converged.",
+		// No promptSnippet: intentionally not advertised in the system prompt.
+		// When enabled via PI_GOAL_ENABLE_CREATE_GOAL=1, create_goal enters the
+		// active set (callable) but remains hidden from prose (same pattern as
+		// start_goal). The promptGuidelines below are for model behavior guidance
+		// only when the tool is actually called, not for prose advertisement.
 		promptGuidelines: [
 			"Use create_goal only when the user explicitly asks to start a long-running goal, OR when a /goals or /sisyphus intent discussion has produced a concrete objective.",
 			"Creating a new goal focuses it and leaves other open goals untouched. Do not archive or replace existing goals unless the user explicitly asks through a user command.",
@@ -2354,13 +2907,137 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// Q1 decision (b) functional: when enabled via PI_GOAL_ENABLE_CREATE_GOAL=1
+			// (or settings.enableCreateGoal=true), create_goal actually creates a
+			// goal WITHOUT starting the auto-run loop (startNow=false — distinct
+			// from start_goal which uses startNow=true). Default off: REJECTs.
+			const enableCreateGoal = !!loadGoalSettings(ctx.cwd).enableCreateGoal;
+			if (!enableCreateGoal) {
+				return {
+					content: [{ type: "text", text: "create_goal REJECTED: direct agent creation is disabled. Use /goals or /sisyphus with propose_goal_draft for confirmation, or have the user invoke /goals-set or /sisyphus-set for immediate creation. To enable, set PI_GOAL_ENABLE_CREATE_GOAL=1." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			const raw = (params.objective ?? "").trim();
+			if (!raw) {
+				return {
+					content: [{ type: "text", text: "create_goal REJECTED: no objective provided. Pass a concrete objective." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			if (raw.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{ type: "text", text: `create_goal REJECTED: objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.` }],
+					details: goalDetails(state.goal),
+				};
+			}
+			// Dedup guard: refuse to create if an active/paused goal with the same objective exists.
+			const existingDisk = findDuplicateActiveGoal(ctx, raw);
+			const existingMemory = state.goal && state.goal.status !== "complete" && state.goal.objective.trim().replace(/\s+/g, " ") === raw.trim().replace(/\s+/g, " ") ? state.goal : null;
+			const existing = existingDisk ?? existingMemory;
+			if (existing) {
+				return {
+					content: [{ type: "text", text: `create_goal REJECTED: a ${existing.status} goal (${existing.id}) with the same objective already exists. Use /goal-focus ${existing.id} to switch to it, or /goal-archive ${existing.id} to clear it first.` }],
+					details: goalDetails(existing),
+				};
+			}
+			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
+			const autoContinue = params.autoContinue ?? true;
+			const sisyphus = params.sisyphus ?? false;
+			clearContinuationState();
+			clearActiveAccounting();
+			confirmationIntent = null;
+			syncGoalTools();
+			// startNow=FALSE: create_goal creates the goal but does NOT start the
+			// auto-run enforcement loop. Mirrors propose_goal_draft's post-confirm
+			// behavior. Use start_goal (or /goals-set) for create+start.
+			replaceGoal({ objective, autoContinue, sisyphus }, ctx, false, verificationContract);
 			return {
-				content: [{ type: "text", text: "create_goal REJECTED: direct agent creation is disabled. Use /goals or /sisyphus with propose_goal_draft for confirmation, or have the user invoke /goals-set or /sisyphus-set for immediate creation." }],
+				content: [{ type: "text", text: buildGoalCreatedReport({ objective: raw, detailedSummary: detailedSummary(state.goal) }) }],
 				details: goalDetails(state.goal),
 			};
 		},
 		renderCall(args, theme) {
 			const prefix = args?.sisyphus ? "create_goal sisyphus " : "create_goal ";
+			return new Text(theme.fg("toolTitle", prefix) + theme.fg("muted", args?.objective ?? ""), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			return renderGoalResult(result, theme);
+		},
+	})))
+
+	// start_goal: the agent-facing equivalent of /goals-set. Creates a goal AND
+	// immediately starts the auto-run enforcement loop (startNow=true). Unlike
+	// create_goal (which is hard-locked to reject), start_goal actually creates
+	// and starts the goal. It is HIDDEN from the active tool set by default —
+	// see syncGoalTools where active.delete(START_GOAL_TOOL_NAME) is called.
+	// The knowledge of how/when to call it is provided via prompt/skill context
+	// (TBD — not implemented in this change). Because it is absent from the
+	// active set, it does not leak to subagents (goal-auditor inherits via
+	// pi.getActiveTools()).
+	// No promptSnippet: intentionally not advertised in the system prompt.
+	pi.registerTool(regTool(defineTool({
+		name: START_GOAL_TOOL_NAME,
+		label: "Start Goal",
+		description: "Create a new active pi goal, focus it, and immediately start the auto-run enforcement loop. Hidden from subagents by default; surfaced only via explicit prompt/skill context.",
+		// promptSnippet is statically defined so that when start_goal is in the
+		// active set (PI_GOAL_ENABLE=1 / PI_GOAL_ENABLE_START_GOAL=1), the model
+		// is prompted to start a goal from prose. The host's _rebuildSystemPrompt
+		// auto-gates promptSnippet by active-set membership, so this snippet is
+		// auto-hidden when the tool is inactive (the default) and auto-shown when
+		// the launcher opts the inner pi into goal-creation mode.
+		promptSnippet: "When the user describes a goal or task in prose (a concrete objective to pursue), call start_goal with that objective to create and auto-run a pi goal. Use this instead of asking the user to run a slash command when the inner pi is launched in goal-capable mode.",
+		parameters: Type.Object({
+			objective: Type.String({ description: "Concrete objective to pursue. For Sisyphus goals this MUST be the full plan including numbered steps and per-step done criteria." }),
+			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Defaults to true." })),
+			sisyphus: Type.Optional(Type.Boolean({ description: "When true, mark this as a Sisyphus goal: the agent must execute strictly step-by-step. Default false." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const raw = (params.objective ?? "").trim();
+			if (!raw) {
+				return {
+					content: [{ type: "text", text: "start_goal REJECTED: no objective provided. Pass a concrete objective." }],
+					details: goalDetails(state.goal),
+				};
+			}
+			if (raw.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{ type: "text", text: `start_goal REJECTED: objective is ${raw.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten it and retry.` }],
+					details: goalDetails(state.goal),
+				};
+			}
+			// Dedup guard: refuse to create if an active/paused goal with the same objective exists.
+			const existingDisk = findDuplicateActiveGoal(ctx, raw);
+			const existingMemory = state.goal && state.goal.status !== "complete" && state.goal.objective.trim().replace(/\s+/g, " ") === raw.trim().replace(/\s+/g, " ") ? state.goal : null;
+			const existing = existingDisk ?? existingMemory;
+			if (existing) {
+				return {
+					content: [{ type: "text", text: `start_goal REJECTED: a ${existing.status} goal (${existing.id}) with the same objective already exists. Use /goal-focus ${existing.id} to switch to it, or /goal-archive ${existing.id} to clear it first.` }],
+					details: goalDetails(existing),
+				};
+			}
+			const { objective, verificationContract, missingSnippets } = extractVerificationContract(raw, ctx.cwd, loadGoalSettings(ctx.cwd));
+			if (missingSnippets && missingSnippets.length > 0) {
+				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
+			}
+			const autoContinue = params.autoContinue ?? true;
+			const sisyphus = params.sisyphus ?? false;
+			clearContinuationState();
+			clearActiveAccounting();
+			confirmationIntent = null;
+			syncGoalTools();
+			replaceGoal({ objective, autoContinue, sisyphus }, ctx, true, verificationContract);
+			return {
+				content: [{ type: "text", text: buildGoalCreatedReport({ objective: raw, detailedSummary: detailedSummary(state.goal) }) }],
+				details: goalDetails(state.goal),
+			};
+		},
+		renderCall(args, theme) {
+			const prefix = args?.sisyphus ? "start_goal sisyphus " : "start_goal ";
 			return new Text(theme.fg("toolTitle", prefix) + theme.fg("muted", args?.objective ?? ""), 0, 0);
 		},
 		renderResult(result, _options, theme) {
@@ -2374,21 +3051,25 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 	// Schema gates enforce focus-vs-sisyphus consistency; draftId is ignored for
 	// one-release compatibility with older prompt residue.
 	// In headless mode (no UI), auto-confirms — harness-friendly.
+	const effectiveCwd = cachedCwd ?? process.cwd();
+	const draftingBlock = resolveGoalDraftingBlock(loadGoalSettings(effectiveCwd), cachedCwd ?? undefined);
+	const baseGuidelines = [
+		"Call propose_goal_draft when a /goals or /sisyphus intent discussion has enough information to write a concrete goal. Ask a focused question only when the request is still ambiguous.",
+		"If an answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",
+		"The user will see a full plain-text draft report plus a [Confirm] / [Continue Chatting] choice. Confirm creates the goal; Continue Chatting returns control to you to ask follow-up questions.",
+		"If the tool returns 'continue chatting', ask the user what they want changed. Do NOT propose again immediately with the same content; iterate based on their feedback first.",
+		"The sisyphus field must match the user's confirmation focus: /sisyphus -> sisyphus=true, /goals -> sisyphus=false. The schema enforces this; mismatched proposals are REJECTED.",
+		"For sisyphus goals, preserve the user's requested ordered style and completion standard. Do not add reconnaissance/preflight steps, merge steps, reorder steps, or change the mode without explicit user confirmation.",
+		"create_goal is rejected; propose_goal_draft is the confirmation path. This is intentional — the user wants explicit say in goal creation.",
+		"You may include a Verification contract: section in the objective to specify what verification evidence is required before the goal can be completed. This is optional — if omitted, no per-goal contract enforcement applies.",
+	];
+	const promptGuidelines = draftingBlock ? [...baseGuidelines, draftingBlock] : baseGuidelines;
 	pi.registerTool(regTool(defineTool({
 		name: PROPOSE_DRAFT_TOOL_NAME,
 		label: "Propose Goal Draft",
 		description: "During /goals or /sisyphus intent discussion, propose the goal draft to the user. The user sees a full plain-text confirmation report and chooses Confirm (creates the goal) or Continue Chatting (returns control to you to refine). REPLACES create_goal during discussion-based creation.",
 		promptSnippet: "Propose the drafted goal to the user with a full plain-text Confirm / Continue Chatting dialog.",
-		promptGuidelines: [
-			"Call propose_goal_draft when a /goals or /sisyphus intent discussion has enough information to write a concrete goal. Ask a focused question only when the request is still ambiguous.",
-			"If an answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",
-			"The user will see a full plain-text draft report plus a [Confirm] / [Continue Chatting] choice. Confirm creates the goal; Continue Chatting returns control to you to ask follow-up questions.",
-			"If the tool returns 'continue chatting', ask the user what they want changed. Do NOT propose again immediately with the same content; iterate based on their feedback first.",
-			"The sisyphus field must match the user's confirmation focus: /sisyphus -> sisyphus=true, /goals -> sisyphus=false. The schema enforces this; mismatched proposals are REJECTED.",
-			"For sisyphus goals, preserve the user's requested ordered style and completion standard. Do not add reconnaissance/preflight steps, merge steps, reorder steps, or change the mode without explicit user confirmation.",
-			"create_goal is rejected; propose_goal_draft is the confirmation path. This is intentional — the user wants explicit say in goal creation.",
-			"You may include a Verification contract: section in the objective to specify what verification evidence is required before the goal can be completed. This is optional — if omitted, no per-goal contract enforcement applies.",
-		],
+		promptGuidelines,
 		parameters: Type.Object({
 			objective: Type.String({ description: "Full goal text. For Sisyphus goals this MUST include the user's numbered steps + per-step done criteria, taken faithfully from the user's input." }),
 			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Default true." })),
@@ -2426,6 +3107,16 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 
 			// All schema gates passed. Decide how to confirm.
 			const objective = validation.objective;
+			// Dedup guard: refuse to propose if an active/paused goal with the same objective exists.
+			const existingDisk = findDuplicateActiveGoal(ctx, objective);
+			const existingMemory = state.goal && state.goal.status !== "complete" && state.goal.objective.trim().replace(/\s+/g, " ") === objective.trim().replace(/\s+/g, " ") ? state.goal : null;
+			const existing = existingDisk ?? existingMemory;
+			if (existing) {
+				return {
+					content: [{ type: "text", text: `propose_goal_draft REJECTED: a ${existing.status} goal (${existing.id}) with the same objective already exists. Use /goal-focus ${existing.id} to switch to it, or /goal-archive ${existing.id} to clear it first.` }],
+					details: goalDetails(existing),
+				};
+			}
 			const autoContinueFlag = params.autoContinue ?? true;
 			const sisyphusFlag = validation.expectedSisyphus;
 			// Build confirmation text: goal + optional task list
@@ -2615,6 +3306,18 @@ ${objective}` : objective,
 			}
 			const newObjective = params.newObjective.trim();
 			if (!newObjective) throw new Error("propose_goal_tweak requires a non-empty newObjective.");
+			// G6 early cap (coderabbit review): reject an overlong objective BEFORE
+			// building the confirmation dialog / rendering UI. The later
+			// cleanedObjective check still covers contract-expansion edge cases.
+			if (newObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${newObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 			const changeSummary = params.changeSummary.trim();
 			if (!changeSummary) throw new Error("propose_goal_tweak requires a non-empty changeSummary.");
 
@@ -2694,18 +3397,32 @@ ${objective}` : objective,
 			}
 
 			if (decision.decision === "confirm") {
-				// Persist any auditor toggle change
-				if (state.goal) {
-					state.goal = { ...state.goal, skipAuditor: !decision.auditorEnabled };
-				}
 				// Extract verification contract from revised objective
 				const { objective: cleanedObjective, verificationContract, missingSnippets } = extractVerificationContract(newObjective, ctx.cwd, loadGoalSettings(ctx.cwd));
 			if (missingSnippets && missingSnippets.length > 0) {
 				ctx.ui.notify(`Unknown contract snippet(s) not expanded: ${missingSnippets.join(", ")}`, "warning");
 			}
+			// G6 (cubic review): enforce the 50KB objective cap on the tweak
+			// confirmation path, matching the guard in propose_goal_draft and
+			// complete_goal. Without this, an overlong revised objective reaches
+			// disk and later inflates the auditor prompt unbounded → OOM/hang.
+			if (cleanedObjective.length > MAX_OBJECTIVE_LENGTH) {
+				return {
+					content: [{
+						type: "text",
+						text: `propose_goal_tweak REJECTED: revised objective is ${cleanedObjective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective and retry.`,
+					}],
+					details: goalDetails(state.goal),
+				};
+			}
 				// Apply the tweak: write the new objective to disk authoritatively.
+				// cubic-dev P2: the skipAuditor toggle is folded into `next` (not
+				// assigned to state.goal earlier) so it only commits on a successful
+				// write. Previously it was set before G6/write guards, leaking the
+				// toggle into the error-return and the turn_end persist chain.
 				const next: GoalRecord = {
 					...state.goal,
+					skipAuditor: !decision.auditorEnabled,
 					objective: cleanedObjective,
 					verificationContract: verificationContract,
 					updatedAt: nowIso(),
@@ -2726,7 +3443,14 @@ ${objective}` : objective,
 				//   2) update in-memory `goal` to the canonical post-write record
 				//   3) append the state entry and re-sync tools
 				//   4) clear the tweak drafting gate so propose_goal_tweak can't be re-used
-				state.goal = writeActiveGoalFile(ctx, next);
+				const tweakWrite = tryWriteActiveGoalFile(ctx, next);
+				if (!tweakWrite.ok) {
+					return {
+						content: [{ type: "text", text: tweakWrite.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = tweakWrite.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				tweakDraftingFor = null;
 				// Reset autoContinue counter — plan changed, agent gets a fresh chain.
@@ -2799,9 +3523,9 @@ ${objective}` : objective,
 			"Before calling complete_goal, you MUST provide a verificationSummary that addresses every success criterion and any verification contract on the goal. Fold all verification evidence (test output, grep results, requirements coverage) into this single field.",
 			"The auditor is authoritative: completion is archived only if the auditor report ends with <approved/>. If it ends with <disapproved/> or no approval marker, complete_goal is rejected and the goal remains open.",
 			"Do NOT call complete_goal if any work remains, even if substantial progress was made. Do not use it merely because work is stopping, tests passed, or you are blocked.",
-			"Do not use complete_goal=complete as an escape hatch when you are blocked. If you are blocked, call pause_goal({reason, suggestedAction?}) instead so the user can intervene.",
+			"If you are blocked and cannot make one more reasonable next step, do NOT mark the goal complete. State the blocker in your final message and stop; the user will intervene.",
 			"For sisyphus goals, do not mark complete until every numbered step has been executed and individually verified against its done criterion.",
-			"The goal objective is immutable. The agent MUST NOT modify the goal objective on its own initiative. If the user gives requirements, feedback, or corrections that differ from the goal objective, ask the user to run /goal-tweak to revise the goal. Use goal_question to confirm when the change is ambiguous.",
+			"The goal objective is immutable. The agent MUST NOT modify the goal objective on its own initiative. If the user gives requirements, feedback, or corrections that differ from the goal objective, ask the user to run /goal-tweak to revise the goal. If the change is ambiguous, ask the user directly in your reply.",
 			"If the goal has a verificationContract, your verificationSummary must address every item in the contract. The auditor will cross-check your claims against real artifacts.",
 		],
 		parameters: Type.Object({
@@ -2818,6 +3542,23 @@ ${objective}` : objective,
 			// loadGoalSettings/loadGoalSettingsFileConfig were called 4 times per
 			// invocation, with potential drift if the settings file changed mid-call.
 			const settings = loadGoalSettings(ctx.cwd);
+
+			// G6: length caps — reject overlong summaries before they reach the
+			// auditor prompt or memory structures. Prevents OOM / unbounded prompt.
+			for (const [fieldName, value] of [
+				["completionSummary", params.completionSummary],
+				["verificationSummary", params.verificationSummary],
+			] as const) {
+				if (typeof value === "string" && value.length > MAX_OBJECTIVE_LENGTH) {
+					return {
+						content: [{
+							type: "text",
+							text: `complete_goal REJECTED: ${fieldName} is ${value.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Summarize the evidence more concisely and retry.`,
+						}],
+						details: goalDetails(state.goal),
+					};
+				}
+			}
 
 			// -- Phase 2: Status validation --
 			const effectiveStatus = params.status ?? COMPLETE_STATUS;
@@ -2878,12 +3619,14 @@ ${objective}` : objective,
 
 			// Check if auditor is disabled per-goal (user toggled it off during goal confirmation)
 			if (auditTarget.skipAuditor) {
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: `Goal completed — per-goal auditor disabled.`,
-					display: true,
-					details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: `Goal completed — per-goal auditor disabled.`,
+						display: true,
+						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+					}),
+				 "complete_goal_skipAuditor", ctx.cwd);
 				try {
 					appendGoalEvent(ctx, {
 						type: "audit_skipped",
@@ -2906,7 +3649,21 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult3 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult3.ok) {
+					// Rollback: restore the pre-completion in-memory state so the disk
+					// and memory stay consistent. Without this, state.goal remains
+					// status:"complete" while the disk still holds the active/paused
+					// record — a retry would be blocked by validateGoalCompletion
+					// seeing the stale in-memory "complete" status. (gemini/coderabbit)
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult3.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult3.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -2934,7 +3691,7 @@ ${objective}` : objective,
 						content: [{ type: "text", text: [
 							"The completion auditor is disabled in settings.",
 							"",
-							`Use \`goal_question\` to ask the user: "The independent completion auditor is disabled. Bypass independent verification and mark the goal complete?"`,  
+							"Ask the user directly in your reply: The independent completion auditor is disabled. Bypass independent verification and mark the goal complete?",
 							"If the user confirms, call complete_goal again with confirmBypassAuditor: true.",
 						].join("\n") }],
 						details: goalDetails(state.goal),
@@ -2944,12 +3701,14 @@ ${objective}` : objective,
 				// Defer archival: set goal complete in-memory + write active file WITHOUT
 				// archiving. Archival happens at turn_end so the agent has a chance to
 				// recognise the skipped audit before the goal is archived.
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: `Goal completed — auditor disabled in settings.`,
-					display: true,
-					details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: `Goal completed — auditor disabled in settings.`,
+						display: true,
+						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+					}),
+				 "complete_goal_disabled_settings", ctx.cwd);
 				try {
 					appendGoalEvent(ctx, {
 						type: "audit_skipped",
@@ -2973,7 +3732,17 @@ ${objective}` : objective,
 					stopReason: "agent",
 					updatedAt: nowIso(),
 				};
-				state.goal = writeActiveGoalFile(ctx, state.goal);
+				// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult4 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult4.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult4.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+				state.goal = writeResult4.goal;
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 				setTurnStopped(state.goal?.id ?? null);
 				resetGetGoalNudgeState(state.goal?.id);
@@ -2995,17 +3764,22 @@ ${objective}` : objective,
 			}
 
 			// Auditor is enabled — run the normal audit flow
-			await pi.sendMessage<GoalAuditEventDetails>({
-				customType: GOAL_AUDIT_ENTRY,
-				content: [
-					"Auditor: I am starting the independent completion audit.",
-					`Goal id: ${auditTarget.id}`,
-					`Auditor model: ${auditorLabel}`,
-					params.completionSummary?.trim() ? `Completion claim: ${params.completionSummary.trim()}` : undefined,
-				].filter((line): line is string => line !== undefined).join("\n"),
-				display: true,
-				details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
-			});
+			// IMPORTANT: do NOT await this sendMessage — it fires a UI notification
+			// while complete_goal is mid-execute. Awaiting it blocks the tool body
+			// and can crash/quit the host session. Fire-and-forget is correct here.
+			safeFireAndForget(() => 
+				pi.sendMessage<GoalAuditEventDetails>({
+					customType: GOAL_AUDIT_ENTRY,
+					content: [
+						"Auditor: I am starting the independent completion audit.",
+						`Goal id: ${auditTarget.id}`,
+						`Auditor model: ${auditorLabel}`,
+						params.completionSummary?.trim() ? `Completion claim: ${params.completionSummary.trim()}` : undefined,
+					].filter((line): line is string => line !== undefined).join("\n"),
+					display: true,
+					details: { phase: "started", goalId: auditTarget.id, auditor: auditorLabel },
+				}),
+			 "complete_goal_started", ctx.cwd);
 			// Append ledger: audit started
 			try {
 				appendGoalEvent(ctx, {
@@ -3035,7 +3809,12 @@ ${objective}` : objective,
 				phase: "running",
 				elapsedMs: 0,
 			};
-			// Start animation timer for the spinner in the auditor widget
+			// Refresh timer for the auditor widget's elapsed-time display.
+			// The auditing icon is static (no spinner), so the only value that
+			// changes on its own is the elapsed duration — which is shown in whole
+			// seconds. A 500ms cadence (not 1s) guarantees the display updates
+			// promptly when a second boundary is crossed despite event-loop timer
+			// drift, while keeping redraws minimal (2/s, vs the old ~12/s storm).
 			stopAuditAnimation();
 			auditAnimationTimer = setInterval(() => {
 				if (!auditProgress) {
@@ -3044,7 +3823,7 @@ ${objective}` : objective,
 				}
 				auditProgress.elapsedMs = Date.now() - auditStartedAt;
 				goalWidgetComponent?.invalidate();
-			}, 80);
+			}, 500);
 			auditAnimationTimer.unref?.();
 
 			// Create a dedicated AbortController for the audit so it can be interrupted via Escape
@@ -3101,12 +3880,14 @@ ${objective}` : objective,
 
 				if (userChoice === "complete_without_audit") {
 					// ── Mark complete without audit ────────────────────────────
-					pi.sendMessage<GoalAuditEventDetails>({
-						customType: GOAL_AUDIT_ENTRY,
-						content: `Goal completed — user bypassed audit via Escape.`,
-						display: true,
-						details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
-					});
+					safeFireAndForget(() => 
+						pi.sendMessage<GoalAuditEventDetails>({
+							customType: GOAL_AUDIT_ENTRY,
+							content: `Goal completed — user bypassed audit via Escape.`,
+							display: true,
+							details: { phase: "skipped", goalId: auditTarget.id, auditor: auditorLabel },
+						}),
+					 "complete_goal_user_bypass", ctx.cwd);
 					try {
 						appendGoalEvent(ctx, {
 							type: "audit_skipped",
@@ -3128,7 +3909,17 @@ ${objective}` : objective,
 						stopReason: "agent",
 						updatedAt: nowIso(),
 					};
-					state.goal = writeActiveGoalFile(ctx, state.goal);
+					// G4: surface disk-write failure instead of letting it crash complete_goal.
+					const writeResult5 = tryWriteActiveGoalFile(ctx, state.goal, true);
+					if (!writeResult5.ok) {
+						// Rollback: see writeResult3 — keep memory consistent with disk.
+						state.goal = auditTarget;
+						return {
+							content: [{ type: "text", text: writeResult5.error }],
+							details: goalDetails(state.goal),
+						};
+					}
+					state.goal = writeResult5.goal;
 					pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 					setTurnStopped(state.goal?.id ?? null);
 					resetGetGoalNudgeState(state.goal?.id);
@@ -3176,6 +3967,7 @@ ${objective}` : objective,
 					verdict,
 					report: auditor.output || "Auditor produced no output.",
 					at: nowIso(),
+					timedOut: auditor.timedOut === true ? true : undefined,
 				});
 			} catch {
 				// Ledger append failure should not block completion
@@ -3184,21 +3976,27 @@ ${objective}` : objective,
 				// Clear auditor progress to restore normal widget state
 				auditProgress = null;
 				goalWidgetComponent?.invalidate();
+				if (auditor.gateFailure) {
+					try { ctx.ui.notify(`Pre-audit gate failed: ${auditor.gateFailure}`, "error"); } catch {}
+				}
 				const rejectionText = [
 					"Goal audit rejected.",
 					"",
 					"Goal completion rejected by independent auditor.",
 					auditor.model ? `Auditor model: ${auditor.model}${auditor.thinkingLevel ? `:${auditor.thinkingLevel}` : ""}` : undefined,
+					auditor.gateFailure ? `Pre-audit gate failed: ${auditor.gateFailure}` : undefined,
 					auditor.error ? `Auditor error: ${auditor.error}` : undefined,
 					"",
 					auditor.output || "Auditor produced no approval marker.",
 				].filter((line): line is string => line !== undefined).join("\n");
-				pi.sendMessage<GoalAuditEventDetails>({
-					customType: GOAL_AUDIT_ENTRY,
-					content: rejectionText,
-					display: true,
-					details: { phase: "rejected", goalId: auditTarget.id, auditor: auditor.model },
-				});
+				safeFireAndForget(() => 
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: rejectionText,
+						display: true,
+						details: { phase: "rejected", goalId: auditTarget.id, auditor: auditor.model },
+					}),
+				 "complete_goal_rejected", ctx.cwd);
 				return {
 					content: [{ type: "text", text: rejectionText }],
 					details: goalDetails(state.goal),
@@ -3210,12 +4008,14 @@ ${objective}` : objective,
 				"",
 				auditor.output || "Auditor approved completion.",
 			].filter((line): line is string => line !== undefined).join("\n");
-			pi.sendMessage<GoalAuditEventDetails>({
-				customType: GOAL_AUDIT_ENTRY,
-				content: approvalText,
-				display: true,
-				details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
-			});
+			safeFireAndForget(() => 
+				pi.sendMessage<GoalAuditEventDetails>({
+					customType: GOAL_AUDIT_ENTRY,
+					content: approvalText,
+					display: true,
+					details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
+				}),
+			 "complete_goal_approved", ctx.cwd);
 			// Account for any remaining elapsed time.
 			// Defer archival: set goal complete in-memory + write active file WITHOUT
 			// archiving. Archival happens at turn_end so the agent can see the auditor
@@ -3229,7 +4029,17 @@ ${objective}` : objective,
 				stopReason: "agent",
 				updatedAt: nowIso(),
 			};
-			state.goal = writeActiveGoalFile(ctx, state.goal);
+			// G4: surface disk-write failure instead of letting it crash complete_goal.
+				const writeResult6 = tryWriteActiveGoalFile(ctx, state.goal, true);
+				if (!writeResult6.ok) {
+					// Rollback: see writeResult3 — keep memory consistent with disk.
+					state.goal = auditTarget;
+					return {
+						content: [{ type: "text", text: writeResult6.error }],
+						details: goalDetails(state.goal),
+					};
+				}
+			state.goal = writeResult6.goal;
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
 			setTurnStopped(state.goal?.id ?? null);
 			resetGetGoalNudgeState(state.goal?.id);
@@ -3252,168 +4062,6 @@ ${objective}` : objective,
 		renderCall(args, theme) {
 			const label = args?.status ?? "";
 			return new Text(theme.fg("toolTitle", "complete_goal ") + theme.fg("success", label), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			return renderGoalResult(result, theme);
-		},
-	})))
-
-	pi.registerTool(regTool(defineTool({
-		name: "pause_goal",
-		label: "Pause Goal",
-		description: "Pause the active pi goal and report a blocker to the user. The user must /goal-resume, /goal-tweak, or /goal-clear before work continues.",
-		promptSnippet: "Pause the active pi goal and report a concrete blocker so the user can intervene.",
-		promptGuidelines: [
-			"Use pause_goal when you have hit a real blocker that you cannot resolve with one more reasonable next step: missing credentials, ambiguous or contradictory spec, a file or permission you cannot access, a sisyphus step whose precondition is not in the plan, or any irreversible / dangerous operation that requires explicit user approval.",
-			"Do NOT use pause_goal to escape a merely hard problem; first try one concrete next step. Do not use pause_goal as a softer substitute for complete_goal \u2014 if the objective is achieved, complete it; if it is not, do not complete it.",
-			"Never silently invent a workaround, fake completion, or quietly redefine the objective. Pause and report instead.",
-			"Always pass a concrete one-sentence reason. When you know how the user can unblock you, pass suggestedAction (e.g. 'Set FOO_API_KEY env var and /goal-resume', or 'Use /goal-tweak to insert a precondition step before step 3').",
-			"After pause_goal returns, stop. Do not call other tools in the same turn.",
-			"For sisyphus goals: if any step is unclear, blocked, fails, or seems wrong, pause_goal is the correct action \u2014 do not skip the step or invent a workaround.",
-		],
-		parameters: Type.Object({
-			reason: Type.String({ description: "One-sentence concrete blocker description. Plain language, not an apology." }),
-			suggestedAction: Type.Optional(Type.String({ description: "Optional concrete suggestion for how the user can unblock (e.g. command to run, value to provide, /goal-tweak hint)." })),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			reconcileFocusedGoalFromDisk(ctx);
-			const reason = params.reason.trim();
-			if (!reason) throw new Error("pause_goal requires a non-empty reason.");
-			const pauseGate = validatePauseGoal({ goal: state.goal, runningGoalId, reason });
-			if (!pauseGate.ok) {
-				return {
-					content: [{ type: "text", text: pauseGate.message }],
-					details: goalDetails(state.goal),
-				};
-			}
-			if (!state.goal) throw new Error("Goal disappeared during pause validation.");
-			const suggested = params.suggestedAction?.trim() || undefined;
-
-			// Account for any remaining elapsed time before stopping the run.
-			accountProgress(ctx);
-			// Unit E task 4.7: pause does NOT explicitly release the focus lock.
-			// The heartbeat timer stops (no active continuation → no auto-refresh,
-			// and clearStoppedRuntimeState is not called here, so the timer keeps
-			// running until setGoal→status!=active clears it below). Lazy
-			// reap-on-acquire: when this or another session later calls
-			// acquireLock (e.g. /goal-resume), a lapsed/stale lock is reaped.
-			// This mirrors the pause-vs-abort split: pause = lazy reap,
-			// abort = explicit release via the state.goal setter (task 4.8b).
-			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
-			const next = buildPausedByAgentGoal(state.goal, { reason, suggestedAction: suggested, updatedAt: nowIso() });
-			setGoal(next, ctx);
-			resetGetGoalNudgeState(next.id);
-			// C9 fix: mark turn-stopped so subsequent in-turn tool calls are blocked.
-			// This is the schema-level closure of "agent kept writing files after pause_goal".
-			setTurnStopped(state.goal.id);
-
-			const suggestionLine = suggested ? `\nSuggested: ${truncateText(suggested, 160)}` : "";
-			ctx.ui.notify(
-				`Goal paused by agent.\nReason: ${truncateText(reason, 200)}${suggestionLine}\n\nUse /goal-resume to continue, /goal-tweak to revise, or /goal-clear to abandon.`,
-				"warning",
-			);
-			// Async auditor subscription: forward "pause" (blocked) event.
-			emitAuditorSubscription(
-				ctx,
-				loadGoalSettings(ctx.cwd),
-				"pause",
-				{ goalId: next.id, details: { reason, suggestedAction: suggested } },
-				nowIso,
-				ctx.ui?.notify,
-			);
-			return {
-				content: [{
-					type: "text",
-					text: `Goal paused. Reason: ${reason}${suggested ? `\nSuggested: ${suggested}` : ""}\nWaiting for user to /goal-resume, /goal-tweak, or /goal-clear. Stop now; do not start another tool call.`,
-				}],
-				details: goalDetails(state.goal),
-				terminate: true,
-			};
-		},
-		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", "pause_goal ") + theme.fg("warning", truncateText(args?.reason ?? "", 80)), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			return renderGoalResult(result, theme);
-		},
-	})))
-
-	pi.registerTool(regTool(defineTool({
-		name: ABORT_GOAL_TOOL_NAME,
-		label: "Abort Goal",
-		description: "Abort the current active or paused pi goal and archive it without marking it complete.",
-		promptSnippet: "Abort the current pi goal only when the user asks to abandon it or the objective is obsolete/impossible.",
-		promptGuidelines: [
-			"Use abort_goal only when the user explicitly asks to abandon/cancel the current goal, or when the goal is impossible, obsolete, or unsafe to continue and should not be marked complete.",
-			"Do not use abort_goal as a substitute for complete_goal. If the objective is achieved, complete it instead.",
-			"Do not use abort_goal for ordinary blockers that the user can resolve; use pause_goal({reason, suggestedAction?}) for that case.",
-			"Always pass a concrete one-sentence reason. After abort_goal returns, stop and do not call other tools in the same turn.",
-		],
-		parameters: Type.Object({
-			reason: Type.String({ description: "One-sentence reason for abandoning the current goal. Plain language, not an apology." }),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			reconcileFocusedGoalFromDisk(ctx);
-			const reason = params.reason.trim();
-			if (!reason) throw new Error("abort_goal requires a non-empty reason.");
-			const abortGate = validateGoalAbort({ goal: state.goal, runningGoalId, reason });
-			if (!abortGate.ok) {
-				return {
-					content: [{ type: "text", text: abortGate.message }],
-					details: goalDetails(state.goal),
-				};
-			}
-			if (!state.goal) throw new Error("Goal disappeared during abort validation.");
-			const abortedGoalId = state.goal.id;
-
-			// Account for any remaining elapsed time before abandoning the run.
-			accountProgress(ctx);
-			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
-			state.goal = buildAbortedByAgentGoal(state.goal, { reason, updatedAt: nowIso() });
-			const archived = archiveCurrentGoal(ctx, "agent");
-			resetGetGoalNudgeState(abortedGoalId);
-			setGoal(null, ctx, true, "aborted");
-			setTurnStopped(abortedGoalId);
-
-			const archiveLine = archived?.archivedPath ? `\nArchive: ${archived.archivedPath}` : "";
-			ctx.ui.notify(
-				`Goal aborted by agent.\nReason: ${truncateText(reason, 200)}${archiveLine}`,
-				"warning",
-			);
-			// Append ledger event for abort
-			try {
-				appendGoalEvent(ctx, {
-					type: "goal_aborted",
-					goalId: abortedGoalId,
-					reason,
-					archivePath: archived?.archivedPath,
-					at: nowIso(),
-				});
-			} catch {
-				// Ledger append failure should not crash abort
-			}
-			// Async auditor subscription: forward "abort" event.
-			emitAuditorSubscription(
-				ctx,
-				loadGoalSettings(ctx.cwd),
-				"abort",
-				{ goalId: abortedGoalId, details: { reason, archivePath: archived?.archivedPath } },
-				nowIso,
-				ctx.ui?.notify,
-			);
-			return {
-				content: [{
-					type: "text",
-					text: `Goal aborted. Reason: ${reason}${archiveLine}\nThe goal has been archived and cleared. Stop now; do not start another tool call.`,
-				}],
-				details: goalDetails(state.goal),
-				terminate: true,
-			};
-		},
-		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", "abort_goal ") + theme.fg("warning", truncateText(args?.reason ?? "", 80)), 0, 0);
 		},
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
@@ -3874,7 +4522,7 @@ promptGuidelines: [
 
 	pi.on("turn_start", async (_event, ctx) => {
 		// Cache cwd for syncGoalTools settings access.
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		// Per-turn flag resets (#4 + C9 fix).
 		advanceTurnSeq();
 		goalWorkToolCalledThisTurn = false;
@@ -3886,11 +4534,12 @@ promptGuidelines: [
 	// #4 + C9 fix + Phase 5 C3: gate in-turn tool calls based on lifecycle state.
 	pi.on("tool_call", async (event, ctx) => {
 		const stoppedGoalId = currentTurnStoppedGoalId();
-		// Post-stop in-turn block (C9 0ad8 fix): after pause_goal / abort_goal /
-		// complete_goal / propose_goal_tweak fires in this turn, block all subsequent tool calls except
+		// Post-stop in-turn block (C9 0ad8 fix): after a lifecycle stop
+		// (complete_goal / propose_goal_tweak) fires in this turn, block all subsequent tool calls except
 		// read-only inspection. Forces the agent to yield the turn instead of "fixing"
 		// the situation by creating extra files etc.
 		if (stoppedGoalId !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "tool_call.blocked", goalId: stoppedGoalId, message: `blocked ${event.toolName}: goal already stopped this turn`, tool: event.toolName, reason: "post_stop" });
 			return {
 				block: true,
 				reason: `The goal was already stopped earlier in this turn (goalId=${stoppedGoalId}). ` +
@@ -3900,6 +4549,7 @@ promptGuidelines: [
 		// Stale checkpoint guard: if the turn was triggered by a queued continuation
 		// for a goal that is no longer active/autoContinue, block work tools.
 		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isStaleCheckpointBlockedToolCall(event.toolName)) {
+			logGoalTrace(ctx.cwd, { level: "warn", step: "tool_call.blocked", goalId: checkpointGoalId, message: `blocked ${event.toolName}: stale checkpoint`, tool: event.toolName, reason: "stale_checkpoint" });
 			// Block the tool call with a stale-checkpoint message.
 			return {
 				block: true,
@@ -3947,15 +4597,36 @@ promptGuidelines: [
 		// This runs after the agent's turn ends — the agent has now seen the result.
 		if (state.goal?.status === "complete" && !state.goal?.archivedPath) {
 			const completedGoal = state.goal;
-			const archived = archiveGoalFile(ctx, completedGoal);
+			// G4 (review follow-up): wrap the deferred archiveGoalFile in try/catch.
+			// This runs in a background turn_end hook; an uncaught throw here
+			// crashes the hook handler and can take down the background agent.
+			let archived: GoalRecord;
+			try {
+				archived = archiveGoalFile(ctx, completedGoal);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				try { ctx.ui.notify(`Goal archival failed: ${msg}. The goal is marked complete in memory but was not archived to disk; please retry.`, "error"); } catch {}
+				try {
+					logAuditorTrace(ctx.cwd, {
+						ts: nowIso(),
+						phase: "write_failure",
+						context: "turn_end archiveGoalFile",
+						error: msg,
+					});
+				} catch {}
+				return;
+			}
 			// Unit E task 4.6: release the focus lock (co-located with turn_end archival).
 			try {
 				releaseLock(ctx.cwd, completedGoal.id, selfLockOwner());
-			} catch {}
+			} catch (err) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "lock.release_failed", goalId: completedGoal.id, message: "failed to release lock at turn_end completion", error: err instanceof Error ? err.message : String(err) });
+			}
 			stopHeartbeatTimer();
 			resetGetGoalNudgeState(completedGoal.id);
 			goalsById.delete(completedGoal.id);
 			focusedGoalId = null;
+			syncActiveGoalEnv(ctx);
 			appendFocusEntry(null, "completed");
 			syncGoalTools();
 			updateUI(ctx);
@@ -3993,17 +4664,47 @@ promptGuidelines: [
 	});
 
 	pi.on("session_start", async (event, ctx) => {
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, event.reason);
+		// Feature (b): PI_GOAL_FILE / settings.goalFile autoload. Resolve focus
+		// + status, then fall through to the existing lock-acquire +
+		// queueContinuation tail (single auto-run chokepoint, D6). The helper
+		// does NOT acquire locks or queue continuations itself. Ignored in
+		// worker sessions (PI_TEAMS_WORKER=1) — workers never inherit focus.
+		let envLoadPerformed = false;
+		const goalFilePath = loadGoalSettings(ctx.cwd).goalFile;
+		if (goalFilePath && !isWorkerSession()) {
+			const result = loadAndFocusGoalFile(ctx, goalFilePath);
+			envLoadPerformed = result.handled;
+		}
 		syncGoalTools();
 		syncTerminalInputPause(ctx);
-		if (event.reason === "resume" && !state.goal && openGoals().length > 1 && ctx.hasUI) {
-			await focusGoalCommand(ctx);
+		// Bug fix: with 2+ goals, session_start resume must NOT auto-focus.
+		// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+		// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+		// can we selecting the GOAL?"
+		if (!envLoadPerformed && !state.goal && openGoals().length > 1) {
+			// Notify user that multiple goals exist, but do not auto-focus.
+			const openCount = openGoals().length;
+			ctx.ui.notify(`${openCount} open goals exist. Use /goal-focus <short-id> to select which one to work on.`, "info");
 		}
-		// Codex behavior: prompt before reactivating a paused goal on resume.
-		if (event.reason === "resume" && state.goal?.status === "paused" && ctx.hasUI) {
+		// Feature (c): paused-goal resume at session_start. In non-TUI the goal
+		// would otherwise stay paused forever (silent no-op). PI_GOAL_AUTO_RESUME
+		// overrides: "1" forces auto-resume (even TUI), "0" blocks it. Default
+		// = prompt in TUI, auto-resume in non-TUI. Suppressed when the env load
+		// (PI_GOAL_FILE) already resolved focus+status.
+		if (!envLoadPerformed && state.goal?.status === "paused") {
 			const current = state.goal;
-			const shouldResume = await ctx.ui.confirm("Resume paused goal?", `Goal: ${current.objective}`);
+			const autoResumeEnv = process.env.PI_GOAL_AUTO_RESUME;
+			let shouldResume: boolean;
+			if (autoResumeEnv === "0") {
+				shouldResume = false;
+			} else if (isInteractiveTui(ctx) && autoResumeEnv !== "1") {
+				shouldResume = await ctx.ui.confirm("Resume paused goal?", `Goal: ${current.objective}`);
+			} else {
+				try { ctx.ui.notify(`Auto-resuming paused goal: ${truncateText(current.objective, 60)}`, "info"); } catch {}
+				shouldResume = true;
+			}
 			if (shouldResume) {
 				setGoal({ ...current, status: "active", autoContinue: true, stopReason: undefined, pauseReason: undefined, pauseSuggestedAction: undefined }, ctx);
 			}
@@ -4034,6 +4735,11 @@ promptGuidelines: [
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
+		// Clear the status-refresh timer FIRST: its callback captures the turn's
+		// ctx, which goes stale once compact replaces the session. Without this,
+		// the next interval tick hits the stale ctx's .ui getter (assertActive)
+		// and throws an uncaughtException that kills the host process.
+		stopStatusRefresh();
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (state.goal) persist(ctx);
 		beginAccounting();
@@ -4046,7 +4752,7 @@ promptGuidelines: [
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		cachedCwd = ctx.cwd;
+		setCwdAndRefreshSink(ctx.cwd);
 		loadState(ctx, null);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
@@ -4125,8 +4831,8 @@ promptGuidelines: [
 			const pauseExtras: string[] = [];
 			if (current.stopReason === "agent") {
 				pauseExtras.push("");
-				pauseExtras.push(`Pause reason (you set this in a prior turn via pause_goal): ${current.pauseReason ?? "(unknown)"}`);
-				if (current.pauseSuggestedAction) pauseExtras.push(`You suggested: ${current.pauseSuggestedAction}`);
+				pauseExtras.push(`Pause reason (set in a prior turn): ${current.pauseReason ?? "(unknown)"}`);
+				if (current.pauseSuggestedAction) pauseExtras.push(`Suggested action: ${current.pauseSuggestedAction}`);
 			}
 			// Inject durable auditor feedback if available
 			let auditorExtra = "";
@@ -4140,7 +4846,7 @@ promptGuidelines: [
 				// Ledger read failure should not break the prompt
 			}
 			return {
-				systemPrompt: `${currentSystemPrompt()}\n\n[PI GOAL PAUSED goalId=${current.id}]\n${untrustedObjectiveBlock(current)}${pauseExtras.join("\n")}${auditorExtra}\n\nThe goal is paused. Do not autonomously continue substantive work unless the user resumes it with /goal-resume. If the user explicitly asks to finish or abandon the paused goal, or the objective is already satisfied based on available evidence, you may call complete_goal or abort_goal without resuming. Do not call pause_goal again.`,
+				systemPrompt: `${currentSystemPrompt()}\n\n[PI GOAL PAUSED goalId=${current.id}]\n${untrustedObjectiveBlock(current)}${pauseExtras.join("\n")}${auditorExtra}\n\nThe goal is paused. Do not autonomously continue substantive work unless the user resumes it with /goal-resume. If the user explicitly asks to finish the paused goal, or the objective is already satisfied based on available evidence, you may call complete_goal without resuming.`,
 			};
 		}
 		const activeGoal = state.goal;
@@ -4203,7 +4909,9 @@ promptGuidelines: [
 		if (focusedGoalId) {
 			try {
 				releaseLock(ctx.cwd, focusedGoalId, selfLockOwner());
-			} catch {}
+			} catch (err) {
+				logGoalTrace(ctx.cwd, { level: "warn", step: "lock.release_failed", goalId: focusedGoalId, message: "failed to release lock at session_shutdown", error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 		stopHeartbeatTimer();
 		clearContinuationTimer();

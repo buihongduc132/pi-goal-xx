@@ -2,18 +2,25 @@
  * Lease-based advisory focus lock for goals (add-goal-focus-locking, Unit A).
  *
  * One JSON sidecar per locked goal at `<cwd>/.pi/goals/.locks/<goalId>.lock`.
- * Lock is HELD iff owning PID is alive AND lease is fresh (two-signal liveness, D2).
+ * Lock is HELD iff owning PID is alive (identity-checked via start time, D1) AND
+ * lease is fresh (three-signal liveness: PID-existence + process-identity + lease).
  * All fs operations are FAIL-OPEN: locking is an optimization, not a security boundary.
  *
- * LOCKED design: D1 (format/location), D2 (two-signal liveness + EPERM correctness),
- * D3 (lease window — caller-supplied via leaseMs), D5 (advisory — caller prompts on override).
+ * LOCKED design: D1 (format/location + start-time identity), D2 (liveness + EPERM
+ * correctness), D3 (lease window — caller-supplied via leaseMs), D5 (advisory —
+ * caller prompts on override). PID-recycle hardening (D1–D4): owner.startTimeMs is
+ * recorded at acquisition and cross-checked by isPidAlive to defeat PID recycling
+ * within the lease window. Reap-on-read (D5/D6): computeHeldByOther and
+ * confirmFocusOverride reap STALE locks on sight, never HELD ones.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
+import { logGoalTrace, previewError } from "./goal-trace.ts";
 
 export interface GoalFocusLock {
 	goalId: string;
-	owner: { sessionId: string; pid: number };
+	owner: { sessionId: string; pid: number; startTimeMs?: number | null };
 	acquiredAt: string;
 	expiresAt: string;
 	heartbeatAt: string;
@@ -22,6 +29,7 @@ export interface GoalFocusLock {
 export interface LockOwner {
 	sessionId: string;
 	pid: number;
+	startTimeMs?: number | null;
 }
 
 export function lockDir(cwd: string): string {
@@ -36,7 +44,7 @@ function ensureLockDir(cwd: string): void {
 	try {
 		fs.mkdirSync(lockDir(cwd), { recursive: true });
 	} catch (err) {
-		console.warn(`[goal-lock] failed to ensure lock dir ${lockDir(cwd)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.ensureDir", message: `failed to ensure lock dir ${lockDir(cwd)}`, error: previewError(err) });
 	}
 }
 
@@ -54,19 +62,146 @@ function isValidLockShape(parsed: unknown): parsed is GoalFocusLock {
 	);
 }
 
-export function readLock(cwd: string, goalId: string): GoalFocusLock | null {
+/**
+ * Discriminated lock-read result (D2). Distinguishes:
+ * - "found" — valid lock file parsed and shape-verified.
+ * - "missing" — ENOENT (file does not exist). Used by liveness to signal stale.
+ * - "error" — EACCES, corrupt JSON, invalid shape, or other fs error.
+ *   Treated as "unknown" by liveness (legacy fallback, do NOT false-positive stale).
+ */
+export type ReadLockResult =
+	| { status: "found"; lock: GoalFocusLock }
+	| { status: "missing" }
+	| { status: "error" };
+
+export function readLockDetailed(cwd: string, goalId: string): ReadLockResult {
 	try {
 		const data = fs.readFileSync(lockPath(cwd, goalId), "utf8");
-		const parsed: unknown = JSON.parse(data);
-		if (!isValidLockShape(parsed)) return null;
-		return parsed;
+		try {
+			const parsed: unknown = JSON.parse(data);
+			if (!isValidLockShape(parsed)) return { status: "error" };
+			// D4: normalize legacy locks — a missing startTimeMs becomes null (not
+			// undefined) so isPidAlive deterministically falls back to PID-existence-only.
+			if ((parsed as GoalFocusLock).owner.startTimeMs === undefined) {
+				(parsed as GoalFocusLock).owner.startTimeMs = null;
+			}
+			return { status: "found", lock: parsed as GoalFocusLock };
+		} catch {
+			// Corrupt JSON (valid file, broken content) → error, NOT missing.
+			return { status: "error" };
+		}
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "ENOENT") return { status: "missing" };
+		// EACCES, EMFILE, or any other fs error → error.
+		return { status: "error" };
+	}
+}
+
+export function readLock(cwd: string, goalId: string): GoalFocusLock | null {
+	const result = readLockDetailed(cwd, goalId);
+	if (result.status === "found") return result.lock;
+	return null;
+}
+
+/**
+ * Read the host boot time (epoch ms) from /proc/stat `btime` (Linux).
+ * Cached per-process-lifetime (constant within a boot — R2).
+ * Returns null on error / non-Linux (fail-open).
+ */
+let cachedBootTimeMs: number | null | undefined;
+export function readBootTimeMs(): number | null {
+	if (cachedBootTimeMs !== undefined) return cachedBootTimeMs;
+	if (process.platform !== "linux") {
+		cachedBootTimeMs = null;
+		return null;
+	}
+	try {
+		const stat = fs.readFileSync("/proc/stat", "utf8");
+		const line = stat.split("\n").find((l) => l.startsWith("btime"));
+		if (!line) {
+			cachedBootTimeMs = null;
+			return null;
+		}
+		const seconds = Number(line.trim().split(/\s+/)[1]);
+		if (!Number.isFinite(seconds)) {
+			cachedBootTimeMs = null;
+			return null;
+		}
+		cachedBootTimeMs = seconds * 1000;
+		return cachedBootTimeMs;
 	} catch {
+		cachedBootTimeMs = null;
 		return null;
 	}
 }
 
 /**
- * PID liveness check (D2 EPERM correctness).
+ * Resolve a process's real start time (epoch ms) for identity checking (D1/D2/D3).
+ *
+ * - Linux: /proc/<pid>/stat field 22 (clock ticks since boot) → bootMs + (ticks/100)*1000.
+ *   CLK_TCK is virtually always 100 on Linux (hardcoded; field is stable).
+ * - macOS: `ps -p <pid> -o lstart=` → parse the timestamp to epoch ms.
+ * - Other platforms / unreadable /proc: null (fail-open, no throw).
+ *
+ * Returns null on any error (ENOENT, EACCES, parse failure) — the caller
+ * (isPidAlive) then falls back to PID-existence-only.
+ */
+export function getProcessStartTime(pid: number): number | null {
+	try {
+		if (process.platform === "linux") {
+			const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+			// Field 2 "(comm)" may contain spaces/parens; split AFTER the last ')'.
+			// Fields after comm are 1-indexed from field 3; starttime is field 22 → index 19.
+			const afterComm = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+			const ticks = Number(afterComm[19]);
+			if (!Number.isFinite(ticks)) return null;
+			const bootMs = readBootTimeMs();
+			if (bootMs === null) return null;
+			const CLK_TCK = 100;
+			return bootMs + (ticks / CLK_TCK) * 1000;
+		}
+		if (process.platform === "darwin") {
+			const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+				encoding: "utf8",
+				stdio: ["pipe", "pipe", "ignore"],
+			}).trim();
+			const ms = Date.parse(out);
+			return Number.isFinite(ms) ? ms : null;
+		}
+		return null;
+	} catch {
+		// ENOENT (dead pid), EACCES (hidepid), exec failure, etc. → fail-open.
+		return null;
+	}
+}
+
+/**
+ * Lazy module-level cache for the CURRENT process's start time (epoch ms).
+ *
+ * process.pid's start time is CONSTANT for the entire process lifetime, so
+ * calling getProcessStartTime(process.pid) on every acquireLock and every
+ * refreshLease (heartbeat every 60s) is wasted work — it re-reads
+ * /proc/self/stat (Linux) or spawns `ps` (macOS) each time. This cache
+ * computes it once on first use and reuses the value thereafter.
+ *
+ * undefined = not yet computed; null = computed-but-unavailable (fail-open);
+ * number = the cached start time.
+ */
+let cachedSelfStartTimeMs: number | null | undefined;
+function getSelfStartTimeMs(): number | null {
+	if (cachedSelfStartTimeMs === undefined) {
+		try {
+			cachedSelfStartTimeMs = getProcessStartTime(process.pid);
+		} catch {
+			cachedSelfStartTimeMs = null;
+		}
+	}
+	return cachedSelfStartTimeMs;
+}
+
+/**
+ * PID liveness check (D2 EPERM correctness + D1 process-identity).
  *
  * `process.kill(pid, 0)` throws:
  * - `ESRCH` when the PID does not exist → dead → false.
@@ -74,19 +209,32 @@ export function readLock(cwd: string, goalId: string): GoalFocusLock | null {
  *   A naive `return false on throw` would mark a live cross-user process dead,
  *   causing false-positive stale locks and lock stealing.
  * - Any other error → treat as dead (fail-safe toward staleness, not false-held).
+ *
+ * Identity check (D1): when `startTimeMs` is provided (a number), cross-check
+ * the live process's REAL start time. A mismatch means the PID was recycled to
+ * a different process → return false (defeats PID-recycle false-held). When
+ * `startTimeMs` is null/undefined (legacy lock), fall back to PID-existence-only.
  */
-export function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number, startTimeMs?: number | null): boolean {
 	try {
 		process.kill(pid, 0);
-		return true;
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		return code === "EPERM";
 	}
+	// PID exists. If we have an identity signal, cross-check it.
+	if (startTimeMs != null) {
+		const real = getProcessStartTime(pid);
+		// If we can't read the real start time (hidepid/permission), be
+		// conservative: treat as alive (don't steal a possibly-live lock — D6).
+		if (real === null) return true;
+		return Math.abs(real - startTimeMs) <= 10;
+	}
+	return true;
 }
 
 export function isLockHeld(lock: GoalFocusLock): boolean {
-	if (!isPidAlive(lock.owner.pid)) return false;
+	if (!isPidAlive(lock.owner.pid, lock.owner.startTimeMs)) return false;
 	const expiresAt = new Date(lock.expiresAt).getTime();
 	if (Number.isNaN(expiresAt)) return false;
 	return Date.now() < expiresAt;
@@ -99,6 +247,11 @@ export function isLockStale(lock: GoalFocusLock): boolean {
 /**
  * Atomic write: tmp file then rename (POSIX-atomic).
  * FAIL-OPEN: fs errors are logged, never thrown.
+ *
+ * NOTE: NOT safe for lock acquisition — the rename overwrites any existing
+ * file, creating a TOCTOU race between this write and the verify-read in
+ * acquireLock. Use writeLockExclusive() for acquireLock. This function is
+ * retained for refreshLease which needs overwrite semantics.
  */
 export function writeLockAtomic(cwd: string, goalId: string, lock: GoalFocusLock): void {
 	ensureLockDir(cwd);
@@ -109,7 +262,7 @@ export function writeLockAtomic(cwd: string, goalId: string, lock: GoalFocusLock
 		fs.writeFileSync(tmp, JSON.stringify(lock));
 		fs.renameSync(tmp, final);
 	} catch (err) {
-		console.warn(`[goal-lock] failed to write lock ${final}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.write", goalId, message: `failed to write lock ${final}`, error: previewError(err) });
 		try {
 			fs.unlinkSync(tmp);
 		} catch {
@@ -119,9 +272,55 @@ export function writeLockAtomic(cwd: string, goalId: string, lock: GoalFocusLock
 }
 
 /**
- * Acquire flow (D5): read → if held by OTHER (different sessionId AND held),
- * fail with heldByOther → reap stale → write atomic → RE-READ to verify
- * ownership (boot-race loser backs off if verify mismatches).
+ * Exclusive lock write: O_CREAT | O_EXCL on the final path.
+ * Returns true if the lock was written (this caller won the race).
+ * Returns false on EEXIST (another writer got there first) — the caller
+ * should re-read and check if the existing lock is stale or held.
+ *
+ * This closes the TOCTOU race in acquireLock: the old writeLockAtomic +
+ * verify-read pattern had a gap where another process could overwrite
+ * between write and verify, causing both to believe they own the lock.
+ * O_EXCL is truly atomic at the kernel level — only one open("wx") succeeds.
+ *
+ * FAIL-OPEN: non-EEXIST fs errors are logged, returns false.
+ * On write failure after O_EXCL open, the partial file is cleaned up.
+ */
+export function writeLockExclusive(cwd: string, goalId: string, lock: GoalFocusLock): boolean {
+	ensureLockDir(cwd);
+	const final = lockPath(cwd, goalId);
+	let fd: number;
+	try {
+		fd = fs.openSync(final, "wx"); // O_CREAT | O_EXCL | O_WRONLY
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "EEXIST") return false; // another writer won the race
+		logGoalTrace(cwd, { level: "warn", step: "lock.writeExclusive", goalId, message: `failed to open lock ${final}`, error: previewError(err) });
+		return false; // fail-open
+	}
+	try {
+		fs.writeSync(fd, JSON.stringify(lock));
+		return true;
+	} catch (err) {
+		logGoalTrace(cwd, { level: "warn", step: "lock.writeExclusive", goalId, message: `failed to write lock ${final}`, error: previewError(err) });
+		// Clean up partial/corrupt file
+		try { fs.unlinkSync(final); } catch { /* ignore */ }
+		return false;
+	} finally {
+		try { fs.closeSync(fd); } catch { /* ignore */ }
+	}
+}
+
+/**
+ * Acquire flow (D5 + race-safe): read → if held by OTHER, fail → reap stale →
+ * writeLockExclusive (O_EXCL) → if EEXIST, re-read and retry (stale) or fail (held).
+ *
+ * O_EXCL closes the TOCTOU race: the old writeLockAtomic + verify-read pattern
+ * had a gap where another process could overwrite between write and verify,
+ * causing both sessions to believe they own the lock. O_EXCL is truly atomic.
+ *
+ * Retry loop (max 3 attempts): handles the case where another session reaped
+ * the same stale lock and wrote first. On each retry, re-reads the lock to
+ * check if it's now held (fail) or stale again (reap + retry).
  *
  * FAIL-OPEN: fs errors during write/verify result in { ok: false }, not throws.
  */
@@ -132,31 +331,59 @@ export function acquireLock(
 	leaseMs: number,
 ): { ok: boolean; heldByOther?: GoalFocusLock } {
 	ensureLockDir(cwd);
-	const existing = readLock(cwd, goalId);
-	if (existing) {
-		if (existing.owner.sessionId !== self.sessionId && isLockHeld(existing)) {
-			return { ok: false, heldByOther: existing };
+
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const existing = readLock(cwd, goalId);
+		if (existing) {
+			if (existing.owner.sessionId !== self.sessionId && isLockHeld(existing)) {
+				return { ok: false, heldByOther: existing };
+			}
+			if (isLockStale(existing)) {
+				reapStaleLock(cwd, goalId);
+			}
+		} else {
+			// readLock returns null on both ENOENT and error (corrupt JSON).
+			// Reap corrupt/unreadable lock files so O_EXCL can succeed.
+			const detailed = readLockDetailed(cwd, goalId);
+			if (detailed.status === "error") {
+				try { fs.unlinkSync(lockPath(cwd, goalId)); } catch { /* ignore */ }
+			}
 		}
-		if (isLockStale(existing)) {
-			reapStaleLock(cwd, goalId);
+
+		const now = Date.now();
+		const lock: GoalFocusLock = {
+			goalId,
+			owner: { ...self, startTimeMs: getSelfStartTimeMs() },
+			acquiredAt: new Date(now).toISOString(),
+			expiresAt: new Date(now + leaseMs).toISOString(),
+			heartbeatAt: new Date(now).toISOString(),
+		};
+
+		if (writeLockExclusive(cwd, goalId, lock)) {
+			return { ok: true };
+		}
+
+		// EEXIST: another session wrote between our read and our write.
+		// Re-read: if held → fail; if stale → loop reaps and retries.
+		const after = readLock(cwd, goalId);
+		if (after) {
+			if (after.owner.sessionId === self.sessionId) {
+				return { ok: true }; // defensive: we own it
+			}
+			if (isLockHeld(after)) {
+				return { ok: false, heldByOther: after };
+			}
+			// Stale → loop will reap and retry
+		} else {
+			// Disappeared or corrupt → loop will handle
+			const detailed = readLockDetailed(cwd, goalId);
+			if (detailed.status === "error") {
+				try { fs.unlinkSync(lockPath(cwd, goalId)); } catch { /* ignore */ }
+			}
 		}
 	}
-	const now = Date.now();
-	const lock: GoalFocusLock = {
-		goalId,
-		owner: self,
-		acquiredAt: new Date(now).toISOString(),
-		expiresAt: new Date(now + leaseMs).toISOString(),
-		heartbeatAt: new Date(now).toISOString(),
-	};
-	writeLockAtomic(cwd, goalId, lock);
-	// Verify ownership — boot-race loser backs off if another session wrote
-	// between our reap and our write (or if our write silently failed).
-	const verified = readLock(cwd, goalId);
-	if (!verified || verified.owner.sessionId !== self.sessionId) {
-		return { ok: false };
-	}
-	return { ok: true };
+
+	return { ok: false };
 }
 
 /**
@@ -179,13 +406,44 @@ export function releaseLock(cwd: string, goalId: string, self?: LockOwner): void
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return;
-		console.warn(`[goal-lock] failed to release lock ${lockPath(cwd, goalId)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.release", goalId, message: `failed to release lock ${lockPath(cwd, goalId)}`, error: previewError(err) });
 	}
 }
 
 /**
  * Reap a stale lock if one exists. No-op if the lock is held or missing.
  */
+/**
+ * Best-effort cleanup of lock files whose goalId is NOT in the active set.
+ * Reads `.locks/` dir, and for each `*.lock` file (skipping `.tmp`), parses
+ * the goalId from the filename, and if NOT in `activeGoalIds` → unlinks.
+ * Fail-open: fs errors are logged, never thrown.
+ */
+export function reapOrphanedLocks(cwd: string, activeGoalIds: Set<string>): void {
+	const dir = lockDir(cwd);
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(dir);
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "ENOENT") return; // no .locks dir → no-op
+		logGoalTrace(cwd, { level: "warn", step: "lock.reapOrphaned", message: `failed to read lock dir ${dir}`, error: previewError(err) });
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.endsWith(".lock")) continue; // skip .tmp and other files
+		const goalId = entry.slice(0, -".lock".length);
+		if (activeGoalIds.has(goalId)) continue;
+		try {
+			fs.unlinkSync(path.join(dir, entry));
+		} catch (err: unknown) {
+			const code = (err as NodeJS.ErrnoException | undefined)?.code;
+			if (code === "ENOENT") continue;
+			logGoalTrace(cwd, { level: "warn", step: "lock.reapOrphaned", goalId, message: `failed to reap orphaned lock ${entry}`, error: previewError(err) });
+		}
+	}
+}
+
 export function reapStaleLock(cwd: string, goalId: string): void {
 	try {
 		const existing = readLock(cwd, goalId);
@@ -209,12 +467,17 @@ export function reapStaleLock(cwd: string, goalId: string): void {
 	} catch (err: unknown) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return;
-		console.warn(`[goal-lock] failed to reap stale lock ${lockPath(cwd, goalId)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.reapStale", goalId, message: `failed to reap stale lock ${lockPath(cwd, goalId)}`, error: previewError(err) });
 	}
 }
 
 /**
  * Refresh the lease on a lock owned by self: re-write expiresAt and heartbeatAt.
+ * Returns `{ refreshed: true }` on success.
+ * Returns `{ refreshed: false, lostLock: true }` when the lock is missing or
+ * owned by another session (caller should stop the heartbeat + notify).
+ * Returns `{ refreshed: false }` (no lostLock) on fs read error — fail-open;
+ * the timer continues because we cannot determine ownership.
  * FAIL-OPEN: fs errors are logged, never thrown (heartbeat must not crash the host).
  */
 export function refreshLease(
@@ -222,20 +485,31 @@ export function refreshLease(
 	goalId: string,
 	self: LockOwner,
 	leaseMs: number,
-): void {
+): { refreshed: boolean; lostLock?: boolean } {
+	const detailed = readLockDetailed(cwd, goalId);
+	if (detailed.status === "missing") {
+		return { refreshed: false, lostLock: true };
+	}
+	if (detailed.status === "error") {
+		// Cannot determine ownership — fail-open, no lostLock.
+		return { refreshed: false };
+	}
+	const existing = detailed.lock;
+	if (existing.owner.sessionId !== self.sessionId) {
+		return { refreshed: false, lostLock: true };
+	}
 	try {
-		const existing = readLock(cwd, goalId);
-		if (!existing || existing.owner.sessionId !== self.sessionId) {
-			return;
-		}
 		const now = Date.now();
 		const updated: GoalFocusLock = {
 			...existing,
+			owner: { ...existing.owner, startTimeMs: getSelfStartTimeMs() },
 			expiresAt: new Date(now + leaseMs).toISOString(),
 			heartbeatAt: new Date(now).toISOString(),
 		};
 		writeLockAtomic(cwd, goalId, updated);
+		return { refreshed: true };
 	} catch (err) {
-		console.warn(`[goal-lock] failed to refresh lease ${lockPath(cwd, goalId)}:`, err);
+		logGoalTrace(cwd, { level: "warn", step: "lock.refreshLease", goalId, message: `failed to refresh lease ${lockPath(cwd, goalId)}`, error: previewError(err) });
+		return { refreshed: false };
 	}
 }

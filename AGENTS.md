@@ -9,9 +9,32 @@ Source of truth: `extensions/`. Tests: `tests/`. Config: `.pi/pi-goal-xx-setting
 - `flow/requirements/2026-07-06_goal-ceremony-and-hook-routing.md` — derived requirements R1-R7 (settings schema, verifier-loop gate, interruption policy, webhook, auditor gate, teams safety, non-functional). Verifier-loop approved hash `070526-84f5ae38`.
 - `flow/plans/2026-07-06_goal-ceremony-and-hook-routing.md` — implementation plan phases P1-P7 + P1b. Verifier-loop approved (same hash).
 
+## flow/ bugs
+
+- `flow/bugs/2026-07-11_complete-goal-crash-and-reject-exit.md` — `complete_goal` bug 1: auditor `inheritFromCwd` loads host resources into in-process child → hang/exit. Bug 2: bare `pi.sendMessage` (no `.catch()`) in all 6 sends → exit-on-reject. Both open. Fix: keep inheritance, harden with timeout + unhandledRejection guard.
+- `flow/bugs/2026-07-14_pi-process-exits-after-completion.md` — pi exits `process.exit(0)` ~1.5s after auditor approves. Root cause: inherited `pi-print-clean-exit` extension arms 1.5s timer in headless-mode in-process auditor child → kills host. Proven via `--trace-exit` (3 repros, code 0, ~1s Δ).
+
+## flow/ findings
+
+- `flow/findings/2026-07-14_pi-process-exit-after-completion-timeline.md` — WHEN the bug became visible: collision of pi-plugins `9fa16754` (pi-print-clean-exit, 2026-06-19) + pi-goal-xx `043c16e` (inheritFromCwd, 2026-07-03) + pi-plugins `e0cfab97` (pi-goal-xx swap, 2026-07-04). Bug active since 2026-07-04 (~10 days "plague").
+
+## flow/ requirements
+
+- `flow/requirements/2026-07-11_crash-safe-auditor-inheritance.md` — R1-R6 for crash-safe auditor inheritance: inherit all tools, opt-out via config, add timeout (R2), unhandledRejection guard (R3), crash-safe sends (R4), tests (R6). Verified by jewilo v1 (APPROVE), v2 null (backend issue with 121KB runtime git diff).
+
 ## Lesson Learned
 
 1: Never gate `ctx.ui.custom()` calls on `ctx.hasUI` — it lies true in RPC mode where `custom()` is a no-op returning undefined.
 Context: propose_goal_draft and all custom-dialog tools crashed in Web UI/RPC mode with TypeError on `undefined.cancelled`.
 Solutions: Gate on `isInteractiveTui(ctx)` (checks `ctx.mode === "interactive"`), not `ctx.hasUI`. Add safety net for undefined return from `ctx.ui.custom()`.
 Ref: `flow/bugs/2026-07-07_propose-goal-draft-rpc-crash.md`
+
+2: Arrow function `() => { expr }` (braces, no `return`) discards inner Promise → `.then(fn).catch()` never catches rejections → unhandledRejection → process exit.
+Context: PR #21 safeFireAndForget wrapper. 6 `pi.sendMessage` calls written with braces-without-return, rejections floated.
+Solutions: Use implicit return `() => expr` or `() => { return expr; }`. Type `fn` as `() => unknown` not `() => void` so TS flags missing return.
+Ref: `flow/lesson_learn/2_arrow-implicit-return-promise-chain.md`
+
+3: start_goal has no deduplication — creates duplicate goal files on every call.
+Context: replaceGoal() → createGoal() → newGoalId() always mints fresh ID, never checks disk. 4 goals with same objective accumulated in goal-dashboard/.pi/goals/.
+Solutions: Added findDuplicateActiveGoal() in goal-files.ts (whitespace-normalized objective scan). Wired REJECT into start_goal/create_goal/propose_goal_draft, WARN into /goals-set. Dedup in caller not replaceGoal (re-creation paths need excludeGoalId bypass).
+Ref: `flow/lesson_learn/3_start-goal-no-dedup.md`

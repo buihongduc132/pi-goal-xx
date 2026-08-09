@@ -129,6 +129,29 @@ describe("validateGoalDraftProposal", () => {
 	});
 });
 
+describe("G6: objective length cap", () => {
+	it("rejects objective exceeding the max length", () => {
+		const longObjective = "x".repeat(50_001);
+		const r = validateGoalDraftProposal({
+			intent: { focus: "goal" },
+			objective: longObjective,
+			sisyphus: false,
+		} as unknown as Parameters<typeof validateGoalDraftProposal>[0]);
+		assert.ok(!r.ok);
+		assert.match((r as { message: string }).message, /50.*KB|max.*length|too long/i);
+	});
+
+	it("accepts objective at the exact max length", () => {
+		const maxObjective = "x".repeat(50_000);
+		const r = validateGoalDraftProposal({
+			intent: { focus: "goal" },
+			objective: maxObjective,
+			sisyphus: false,
+		} as unknown as Parameters<typeof validateGoalDraftProposal>[0]);
+		assert.equal(r.ok, true);
+	});
+});
+
 describe("goalDraftingPrompt", () => {
 	it("returns non-empty prompt mentioning topic", () => {
 		const p = goalDraftingPrompt("build feature X", "goal");

@@ -11,6 +11,8 @@ export interface GoalConfirmationIntentLike {
 	startedAt?: number;
 }
 
+export const MAX_OBJECTIVE_LENGTH = 50_000;
+
 export interface DraftProposalInput {
 	intent: GoalConfirmationIntentLike | null;
 	hasUnfinishedGoal: boolean;
@@ -216,6 +218,12 @@ export function validateGoalDraftProposal(input: DraftProposalInput): DraftPropo
 	if (!objective) {
 		return { ok: false, message: "propose_goal_draft REJECTED: objective is empty." };
 	}
+	if (objective.length > MAX_OBJECTIVE_LENGTH) {
+		return {
+			ok: false,
+			message: `propose_goal_draft REJECTED: objective is ${objective.length.toLocaleString()} chars, exceeding the ${MAX_OBJECTIVE_LENGTH.toLocaleString()}-char (50KB) limit. Shorten the objective before confirming.`,
+		};
+	}
 
 	return { ok: true, objective, expectedSisyphus };
 }
@@ -223,18 +231,17 @@ export function validateGoalDraftProposal(input: DraftProposalInput): DraftPropo
 export function goalDraftingPrompt(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
 	const overrideBody = resolveGoalDraftingOverride(settings, cwd);
 	if (overrideBody) return overrideBody;
-	return goalDraftingPromptBase(topic, focus) + resolveGoalDraftingBlock(settings, cwd);
+	return goalDraftingPromptBase(topic, focus, settings, cwd) + resolveGoalDraftingBlock(settings, cwd);
 }
 
 function resolveGoalDraftingOverride(settings: GoalSettings | undefined, cwd: string | undefined): string | undefined {
-	if (!settings?.prompts) return undefined;
-	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
+	const cfg = (settings?.prompts as Record<string, PromptConfig> | undefined)?.["goal-drafting"];
 	if (!cfg || cfg.mode !== "override") return undefined;
-	const resolved = resolvePrompt("goal-drafting", cfg, cwd ?? ".", "", { promptsDir: settings.promptsDir });
+	const resolved = resolvePrompt("goal-drafting", cfg, cwd ?? ".", "", { promptsDir: settings?.promptsDir });
 	return resolved.source === "none" ? undefined : resolved.final;
 }
 
-function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
+export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: string | undefined): string {
 	if (!settings?.prompts) return "";
 	const cfg = (settings.prompts as Record<string, PromptConfig>)["goal-drafting"];
 	if (!cfg) return "";
@@ -243,7 +250,16 @@ function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd: strin
 	return `\n[PI GOAL CUSTOM PROMPT key=goal-drafting source=${resolved.source}]\n<goal_custom_prompt>\n${resolved.injected}\n</goal_custom_prompt>`;
 }
 
-function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus): string {
+/**
+ * Synthesize the goalDraftingPrompt ask-tool clause (G4). The plain-conversation
+ * clause is ALWAYS emitted; the tool clause is suppressed when both ask-tools
+ * are disabled, or references the available tool when only one is disabled.
+ */
+function draftingAskLine(settings?: GoalSettings, cwd?: string): string {
+	return "- If the topic is vague, ask one focused question with a recommended default via plain conversation.";
+}
+
+function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
 	const safeTopic = promptSafeObjective(topic.trim() || "(no topic provided — ask the user what they want to accomplish)");
 	const header = focus === "sisyphus"
 		? "[GOAL CONFIRMATION focus=sisyphus]\nThe user invoked Sisyphus intent discussion (/sisyphus). Help turn their request into a confirmed goal contract. Do NOT start substantive work yet."
@@ -252,7 +268,6 @@ function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus): string
 	const commonProtocol = [
 		"Confirmation protocol:",
 		"- Treat this as a lightweight conversation with the user, not a separate long-running runtime phase.",
-		"- If the topic is vague, ask one focused question with a recommended default. Use goal_question or goal_questionnaire when a structured answer would help, but plain conversation is acceptable.",
 		"- Targeted read-only research is allowed when it helps define a better goal contract; do not start implementation before confirmation.",
 		"- If the topic is already concrete, you may proceed directly to propose_goal_draft.",
 		"- The goal contract should make the objective, success criteria, boundaries, constraints, and blocker rule explicit.",

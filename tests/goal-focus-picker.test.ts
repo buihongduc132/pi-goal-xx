@@ -223,7 +223,11 @@ describe("goal-focus picker UX — focusGoalCommand end-to-end", () => {
 		);
 	});
 
-	it("headless (!ctx.hasUI): notify carries the legend + activePath sub-line", async () => {
+	it("headless (!ctx.hasUI): shows list, does NOT auto-pick (bug fix)", async () => {
+		// Bug fix: headless multi-open with 2+ goals must NOT auto-pick.
+		// User requirement: "2 goals, and it is AUTO focus; I am in TUI, and even
+		// in NON-TUI, it MUST NOT auto focus like that, if so then how the HELL
+		// can we selecting the GOAL?"
 		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "active", autoContinue: true });
 		writeGoalFile(cwd, { id: "zz99yy11-betaid", status: "paused", autoContinue: false });
 		const { pi, ctx } = setup(false /* headless */);
@@ -232,16 +236,12 @@ describe("goal-focus picker UX — focusGoalCommand end-to-end", () => {
 		await invokeCommand(pi, ctx, "goal-focus", "");
 		await flushContinuation();
 
-		// ui.select must NOT have been called in headless mode.
-		// The headless branch calls ctx.ui.notify with buildGoalListText output.
-		const listNotify = pi.ui.notifyCalls.find((n) => /Columns:/.test(String(n.msg)));
-		assert.ok(listNotify, "headless notify must include the 'Columns:' legend");
-		const msg = String(listNotify!.msg);
-		assert.match(msg, /Open goals: 2/);
-		// activePath sub-line still present in the list view.
-		assert.ok(msg.includes(".pi/goals/"), `list view keeps activePath sub-line: ${msg}`);
-		assert.match(msg, /running/);
-		assert.match(msg, /paused/);
+		// MUST NOT auto-focus
+		const autoNotify = pi.ui.notifyCalls.find((n) => /Auto-focused/i.test(String(n.msg)));
+		assert.ok(!autoNotify, "headless with 2+ goals MUST NOT auto-focus");
+		// MUST show list
+		const listNotify = pi.ui.notifyCalls.find((n) => /qi4x4i|betaid/i.test(String(n.msg)));
+		assert.ok(listNotify, "headless with 2+ goals MUST show goal list");
 	});
 
 	it("computeHeldByOther: goal locked by another live session shows 🔒 pill in its label", async () => {

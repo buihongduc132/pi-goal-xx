@@ -54,6 +54,7 @@ export type PromptMode =
 export interface PromptConfig {
 	mode?: PromptMode;
 	inline?: string;
+	file?: string;
 }
 
 /** Where a resolved persona/policy block originated. */
@@ -154,6 +155,18 @@ function localPromptPath(cwd: string, promptsDir: string, key: string): string {
 	return path.join(cwd, promptsDir, `${key}.md`);
 }
 
+/**
+ * Expand a leading `~` to the home directory. Other paths returned as-is.
+ * (path.join does NOT handle ~ — Node treats it as a literal dir name.)
+ */
+function expandTilde(p: string, home: string): string {
+	if (p === "~") return home;
+	if (p.startsWith("~/") || p.startsWith("~\\")) {
+		return path.join(home, p.slice(2));
+	}
+	return p;
+}
+
 // ---------------------------------------------------------------------------
 // Core resolver
 // ---------------------------------------------------------------------------
@@ -185,6 +198,19 @@ function resolveBlock(
 
 	// 2. "off" suppresses file injection entirely (inline already handled above).
 	if (mode === "off") return undefined;
+
+	// 2b. cfg.file — arbitrary file path (priority: inline > cfg.file >
+	// mode-based lookup). Tilde-expanded (~ → home); relative paths resolve
+	// against cwd. Falls through to mode-based lookup when the file is
+	// missing/empty so users can mix cfg.file with mode-based fallback.
+	const cfgFilePath = cfg?.file?.trim();
+	if (cfgFilePath) {
+		const expanded = expandTilde(cfgFilePath, home);
+		const resolved = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+		const body = readFileCached(resolved);
+		if (body) return { body, source: "local" };
+		// fall through to mode-based lookup when cfg.file missing/empty
+	}
 
 	const globalPath = globalPromptPath(home, promptsDir, key);
 	const localPath = cwd ? localPromptPath(cwd, promptsDir, key) : "";

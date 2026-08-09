@@ -4,14 +4,10 @@ import {
 	validateGoalCreationSlot,
 	validateGoalCompletion,
 	validateGoalUpdate,
-	validateGoalAbort,
-	validatePauseGoal,
 	validateResumeGoal,
 	validateVerificationSummary,
 	validateTaskCompletion,
 	validateTaskSkip,
-	buildPausedByAgentGoal,
-	buildAbortedByAgentGoal,
 	clearGoalCommandMessage,
 	abortGoalCommandMessage,
 	buildTaskSummary,
@@ -107,42 +103,10 @@ describe("validateGoalUpdate", () => {
 	});
 });
 
-describe("validateGoalAbort", () => {
-	it("rejects null", () => {
-		assert.equal(validateGoalAbort({ goal: null, reason: "x" }).ok, false);
-	});
-	it("rejects empty reason", () => {
-		assert.equal(validateGoalAbort({ goal: makeActiveGoal(), reason: "  " }).ok, false);
-	});
-	it("rejects complete goal", () => {
-		const g = makeActiveGoal();
-		g.status = "complete";
-		assert.equal(validateGoalAbort({ goal: g, reason: "x" }).ok, false);
-	});
-	it("rejects runningGoalId mismatch", () => {
-		assert.equal(validateGoalAbort({ goal: makeActiveGoal(), reason: "x", runningGoalId: "other" }).ok, false);
-	});
-	it("accepts active + reason", () => {
-		assert.equal(validateGoalAbort({ goal: makeActiveGoal(), reason: "obsolete" }).ok, true);
-	});
-});
-
-describe("validatePauseGoal", () => {
-	it("rejects null", () => {
-		assert.equal(validatePauseGoal({ goal: null, reason: "x" }).ok, false);
-	});
-	it("rejects empty reason", () => {
-		assert.equal(validatePauseGoal({ goal: makeActiveGoal(), reason: "" }).ok, false);
-	});
-	it("rejects non-runnable status", () => {
-		const g = makeActiveGoal();
-		g.status = "complete";
-		assert.equal(validatePauseGoal({ goal: g, reason: "x" }).ok, false);
-	});
-	it("accepts active + reason", () => {
-		assert.equal(validatePauseGoal({ goal: makeActiveGoal(), reason: "blocked" }).ok, true);
-	});
-});
+// validateGoalAbort / validatePauseGoal / buildPausedByAgentGoal /
+// buildAbortedByAgentGoal were removed: the agent-side pause/abort tools no
+// longer exist in this fork. User-initiated pause/abort remain via slash
+// commands (/goal-pause, /goal-abort, /goal-clear).
 
 describe("validateResumeGoal", () => {
 	it("rejects null", () => {
@@ -182,30 +146,6 @@ describe("validateVerificationSummary", () => {
 	});
 	it("ok when contract empty + summary empty", () => {
 		assert.equal(validateVerificationSummary({ verificationContract: "  ", verificationSummary: "" }).ok, true);
-	});
-});
-
-describe("buildPausedByAgentGoal / buildAbortedByAgentGoal", () => {
-	it("paused sets status + clears autoContinue", () => {
-		const g = makeActiveGoal();
-		const p = buildPausedByAgentGoal(g, { reason: "r", updatedAt: "t" });
-		assert.equal(p.status, "paused");
-		assert.equal(p.autoContinue, false);
-		assert.equal(p.stopReason, "agent");
-		assert.equal(p.pauseReason, "r");
-	});
-	it("paused trims suggestedAction and drops empty", () => {
-		const g = makeActiveGoal();
-		const p = buildPausedByAgentGoal(g, { reason: "r", suggestedAction: "  ", updatedAt: "t" });
-		assert.equal(p.pauseSuggestedAction, undefined);
-		const p2 = buildPausedByAgentGoal(g, { reason: "r", suggestedAction: "do X", updatedAt: "t" });
-		assert.equal(p2.pauseSuggestedAction, "do X");
-	});
-	it("aborted sets paused + prefixed reason", () => {
-		const g = makeActiveGoal();
-		const a = buildAbortedByAgentGoal(g, { reason: "obsolete", updatedAt: "t" });
-		assert.equal(a.status, "paused");
-		assert.equal(a.pauseReason, "Aborted: obsolete");
 	});
 });
 

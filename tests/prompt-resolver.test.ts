@@ -755,6 +755,191 @@ describe("resolvePrompt — key isolation", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// 13. cfg.file — arbitrary file path source
+// ---------------------------------------------------------------------------
+//
+// RED PHASE: `cfg.file` is NOT yet implemented in prompt-resolver.ts.
+// Resolution priority once GREEN lands:
+//   inline > cfg.file > mode-based file lookup (${promptsDir}/${key}.md)
+//   > legacy > default
+//
+// Feature tests below (basic load, override, append, tilde, relative) MUST
+// fail until GREEN adds cfg.file support. A subset are INVARIANT guards
+// (inline beats file, off ignores file, missing/empty file falls through)
+// that pass in BOTH phases because they assert the file is correctly ignored.
+describe("cfg.file — arbitrary file path source", () => {
+	it("basic load: cfg.file points at a real file → appended to default", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-src-"));
+		try {
+			const fileAbs = path.join(dir, "prompt-from-file.md");
+			fs.writeFileSync(fileAbs, "FROM-FILE", "utf8");
+			const r = resolvePrompt(KEY, { file: fileAbs }, sb.cwd, DEFAULT_PROMPT, { home: sb.home });
+			assert.equal(r.final, `${DEFAULT_PROMPT}\n\nFROM-FILE`);
+			assert.equal(r.injected, "FROM-FILE");
+			assert.equal(r.source, "local");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("override mode + cfg.file → file REPLACES default entirely", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-ovr-"));
+		try {
+			const fileAbs = path.join(dir, "override.md");
+			fs.writeFileSync(fileAbs, "FROM-FILE", "utf8");
+			const r = resolvePrompt(
+				KEY,
+				{ file: fileAbs, mode: "override" },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				{ home: sb.home },
+			);
+			assert.equal(r.final, "FROM-FILE");
+			assert.equal(r.injected, "FROM-FILE");
+			assert.equal(r.source, "local");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("append mode + cfg.file → file merged with default", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-app-"));
+		try {
+			const fileAbs = path.join(dir, "append.md");
+			fs.writeFileSync(fileAbs, "FROM-FILE", "utf8");
+			const r = resolvePrompt(
+				KEY,
+				{ file: fileAbs, mode: "append" },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				{ home: sb.home },
+			);
+			assert.equal(r.final, `${DEFAULT_PROMPT}\n\nFROM-FILE`);
+			assert.equal(r.source, "local");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("inline beats cfg.file when both set (inline > file)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-inl-"));
+		try {
+			const fileAbs = path.join(dir, "ignored.md");
+			fs.writeFileSync(fileAbs, "FROM-FILE", "utf8");
+			const r = resolvePrompt(
+				KEY,
+				{ inline: "INLINE", file: fileAbs },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				{ home: sb.home },
+			);
+			assert.equal(r.source, "inline");
+			assert.equal(r.final, "INLINE");
+			assert.ok(!r.final.includes("FROM-FILE"), "cfg.file body must be ignored under inline");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("nonexistent cfg.file falls through to mode-based local lookup", () => {
+		sb.writeLocal("LOCAL-FILE-BODY");
+		const r = resolvePrompt(
+			KEY,
+			{ file: "/does/not/exist.md" },
+			sb.cwd,
+			DEFAULT_PROMPT,
+			{ home: sb.home },
+		);
+		assert.equal(r.source, "local");
+		assert.equal(r.final, `${DEFAULT_PROMPT}\n\nLOCAL-FILE-BODY`);
+		assert.ok(!r.final.includes("FROM-FILE"), "missing cfg.file must NOT leak into output");
+	});
+
+	it("empty (whitespace-only) cfg.file falls through to mode-based lookup", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-empty-"));
+		try {
+			const fileAbs = path.join(dir, "blank.md");
+			fs.writeFileSync(fileAbs, "   \n\n  ", "utf8");
+			sb.writeLocal("LOCAL-FALLBACK");
+			const r = resolvePrompt(KEY, { file: fileAbs }, sb.cwd, DEFAULT_PROMPT, { home: sb.home });
+			assert.equal(r.final, `${DEFAULT_PROMPT}\n\nLOCAL-FALLBACK`);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("cfg.file tilde-expands to home directory", () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-tilde-home-"));
+		try {
+			fs.writeFileSync(path.join(home, "my-prompt.md"), "TILDE-BODY", "utf8");
+			const r = resolvePrompt(
+				KEY,
+				{ file: "~/my-prompt.md" },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				{ home },
+			);
+			assert.equal(r.final, `${DEFAULT_PROMPT}\n\nTILDE-BODY`);
+			assert.equal(r.source, "local");
+		} finally {
+			fs.rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("cfg.file relative path resolves against cwd", () => {
+		fs.writeFileSync(path.join(sb.cwd, "relative.md"), "RELATIVE-BODY", "utf8");
+		const r = resolvePrompt(
+			KEY,
+			{ file: "./relative.md" },
+			sb.cwd,
+			DEFAULT_PROMPT,
+			{ home: sb.home },
+		);
+		assert.equal(r.final, `${DEFAULT_PROMPT}\n\nRELATIVE-BODY`);
+		assert.equal(r.source, "local");
+	});
+
+	it("off mode + cfg.file → cfg.file ignored (file injection suppressed)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-off-"));
+		try {
+			const fileAbs = path.join(dir, "off.md");
+			fs.writeFileSync(fileAbs, "FROM-FILE", "utf8");
+			const r = resolvePrompt(
+				KEY,
+				{ file: fileAbs, mode: "off" },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				{ home: sb.home },
+			);
+			assert.equal(r.final, DEFAULT_PROMPT);
+			assert.equal(r.source, "none");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("cfg.file + inline both set with mode override → inline still wins", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-file-inl2-"));
+		try {
+			const fileAbs = path.join(dir, "both.md");
+			fs.writeFileSync(fileAbs, "FROM-FILE", "utf8");
+			const r = resolvePrompt(
+				KEY,
+				{ inline: "INLINE", file: fileAbs, mode: "override" },
+				sb.cwd,
+				DEFAULT_PROMPT,
+				{ home: sb.home },
+			);
+			assert.equal(r.source, "inline");
+			assert.equal(r.final, "INLINE");
+			assert.ok(!r.final.includes("FROM-FILE"), "cfg.file must yield to inline even under override");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 // Keep the type imports used so tsc doesn't drop them.
 ((): PromptConfig => ({ mode: "override", inline: "x" }))();
 ((): PromptMode => "off")();

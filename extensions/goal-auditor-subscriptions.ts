@@ -9,7 +9,7 @@
  *
  * Invariants:
  *  - Non-blocking. Failures are swallowed and logged; they never break the
- *    calling tool (e.g. pause_goal, skip_task).
+ *    calling tool (e.g. complete_goal, skip_task).
  *  - Unmatched event names in config are silently skipped.
  *  - `mode` is restricted to "async" — sync invocation is not supported yet.
  */
