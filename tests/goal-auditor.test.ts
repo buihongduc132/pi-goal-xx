@@ -115,7 +115,7 @@ describe("buildGoalAuditorPrompt", () => {
 			goal: makeGoal({ objective: "My Obj" }),
 			detailedSummary: "details here",
 		});
-		assert.match(out, /independent completion auditor/);
+		assert.match(out, /SACRED contract/);
 		assert.match(out, /<objective>/);
 		assert.match(out, /My Obj/);
 		assert.match(out, /<completion_summary>/);
@@ -410,7 +410,7 @@ describe("runGoalCompletionAuditor — session orchestration", () => {
 			createSession: makeMockCreateSession({ finalOutput: "<approved/>", promptHook: (t) => { captured = t; } }),
 		});
 		assert.match(captured, /OBJ-X/);
-		assert.match(captured, /independent completion auditor/);
+		assert.match(captured, /SACRED contract/);
 	});
 
 	it("returns auditor-aborted error when signal already aborted before prompt", async () => {
