@@ -3985,6 +3985,7 @@ ${objective}` : objective,
 					auditor.model ? `Auditor model: ${auditor.model}${auditor.thinkingLevel ? `:${auditor.thinkingLevel}` : ""}` : undefined,
 					auditor.gateFailure ? `Pre-audit gate failed: ${auditor.gateFailure}` : undefined,
 					auditor.error ? `Auditor error: ${auditor.error}` : undefined,
+					auditor.earlyDisapprovalReason ? `Early disapproval reason: ${auditor.earlyDisapprovalReason}` : undefined,
 					"",
 					auditor.output || "Auditor produced no approval marker.",
 				].filter((line): line is string => line !== undefined).join("\n");
