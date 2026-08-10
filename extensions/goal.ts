@@ -1608,6 +1608,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				return { consume: true };
 			}
 			if (matchesKey(data, "escape") && state.goal?.status === "active" && state.goal.autoContinue) {
+				const pauseConfig = cachedCwd
+					? (loadGoalSettings(cachedCwd).pauseConfig ?? { escape: true, command: true, abort: false })
+					: { escape: true, command: true, abort: false };
+				if (pauseConfig.escape === false) {
+					// Esc pause disabled — let pi handle Esc natively (stops session/turn)
+					return undefined;
+				}
 				pauseActiveGoal(ctx, "escape");
 				return { consume: true };
 			}
