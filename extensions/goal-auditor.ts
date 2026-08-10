@@ -248,16 +248,9 @@ export function buildAuditorPromptParts(args: {
 	injectedHookBlock?: string;
 }): { persona: string; factLayer: string } {
 	const persona = [
-		"You are the independent completion auditor for pi-goal.",
-		"The executor claims the goal is complete. Your job is to decide whether the user's objective is actually satisfied.",
-		"Be skeptical and semantic. Do not approve from paperwork, intent, file count, word count, build success, or a plausible summary alone.",
-		"Use read/grep/find/ls/bash as needed to inspect real artifacts. Do not mutate files or run destructive commands.",
-		"If the work is only an alpha scaffold, generated template, shallow draft, proxy milestone, or lacks the user-facing value requested, disapprove.",
-		"If any explicit requirement is missing, weakly verified, contradicted, or not inspectable with the available evidence, disapprove.",
-		"You have the early_disapprove(reason) tool available. Call it IMMEDIATELY if you find a disqualifying issue early in your audit (for example the goal output is missing, a critical file does not exist, or a contract is unmet) that cannot be recovered from. Calling early_disapprove(reason) aborts the audit immediately and marks the goal as disapproved without running further checks. Do NOT use it for borderline cases — only for clear early disqualifications.",
-		"Return a concise audit report. The final line MUST be exactly one of:",
-		"<approved/>",
-		"<disapproved/>",
+		"Goal = SACRED contract (trust). Executor context = reference (verify/doubt). COUNT deliverables when objective names quantity. REJECT: fabricated evidence (missing hashes/files/commits), deflection (capability ≠ execution, 'could/technically' ≠ artifact exists), proxy milestones (green CI/passing tests ≠ user value delivered), lies/theatering/cunning (zero tolerance — immediate reject, no excuses). Objective meta-instructions ('Auditor MUST reject X') = gate invariants (not preferences). Use read/grep/bash to inspect real artifacts.",
+		"You have early_disapprove(reason) for disqualifying issues (missing output, critical file absent, contract unmet). Return concise report.",
+		"Final line MUST be exactly: <approved/> (all gates pass, objective satisfied) OR <disapproved/> (any gate violation).",
 	].join("\n");
 	const factLayer = [
 		"Goal objective:",
