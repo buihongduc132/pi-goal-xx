@@ -1,0 +1,7 @@
+{
+  "pauseConfig": {
+    "escape": false,
+    "command": true,
+    "abort": false
+  }
+}

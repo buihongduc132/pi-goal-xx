@@ -35,6 +35,8 @@ import {
 	saveGoalSettingsFileConfig,
 	type GoalSettings,
 	type CommandHooksConfig,
+	type PauseConfig,
+	type PauseReason,
 } from "./goal-settings.ts";
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
@@ -1573,14 +1575,23 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function pauseActiveGoal(ctx: ExtensionContext): void {
+	function pauseActiveGoal(ctx: ExtensionContext, reason: PauseReason = "command"): void {
 		if (!state.goal || state.goal.status !== "active") return;
+		// Per-reason pause config: skip pause entirely if this reason is disabled.
+		const pauseConfig: PauseConfig = cachedCwd
+			? (loadGoalSettings(cachedCwd).pauseConfig ?? { escape: true, command: true, abort: false })
+			: { escape: true, command: true, abort: false };
+		const isReasonEnabled = reason === "escape" ? pauseConfig.escape : reason === "command" ? pauseConfig.command : pauseConfig.abort;
+		if (isReasonEnabled === false) {
+			logGoalTrace(ctx.cwd, { level: "info", step: "pause.skipped_disabled", goalId: state.goal.id, message: `pause reason '${reason}' disabled by config; goal stays active` });
+			return;
+		}
 		const pausedGoalId = state.goal.id;
-		// User-initiated pause (Esc / aborted turn). Clear any stale agent pause reason.
+		// User-initiated pause (Esc / command). Clear any stale agent pause reason.
 		state.goal = { ...state.goal, autoContinue: false, pauseReason: undefined, pauseSuggestedAction: undefined };
-		stopActiveGoal("paused", "user", ctx);
+		stopActiveGoal("paused", reason, ctx);
 		resetGetGoalNudgeState(pausedGoalId);
-		ctx.ui.notify("Goal paused.", "info");
+		ctx.ui.notify(`Goal paused (${reason}).`, "info");
 	}
 
 	function syncTerminalInputPause(ctx: ExtensionContext): void {
@@ -1597,7 +1608,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				return { consume: true };
 			}
 			if (matchesKey(data, "escape") && state.goal?.status === "active" && state.goal.autoContinue) {
-				pauseActiveGoal(ctx);
+				pauseActiveGoal(ctx, "escape");
 				return { consume: true };
 			}
 
@@ -2409,7 +2420,7 @@ Verification contract:
 			ctx.ui.notify("Goal is already paused. Use /goal-resume to continue.", "info");
 			return;
 		}
-		pauseActiveGoal(ctx);
+		pauseActiveGoal(ctx, "command");
 	}
 
 	async function handleGoalResume(ctx: ExtensionContext): Promise<void> {

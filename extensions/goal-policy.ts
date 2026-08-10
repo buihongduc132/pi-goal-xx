@@ -1,8 +1,8 @@
 import { statusLabel, type GoalDisplayRecordLike } from "./goal-core.ts";
-import type { GoalTask, GoalTaskList, TaskStatus } from "./goal-record.ts";
+import { type GoalTask, type GoalTaskList, type TaskStatus, type StopReason } from "./goal-record.ts";
 
 export type GoalStatusLike = "active" | "paused" | "complete";
-export type StopReasonLike = "user" | "agent";
+export type StopReasonLike = StopReason;
 
 export interface GoalPolicyRecordLike extends GoalDisplayRecordLike {
 	id: string;

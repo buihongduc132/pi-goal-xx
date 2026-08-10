@@ -1,5 +1,5 @@
 export type GoalStatus = "active" | "paused" | "complete";
-export type StopReason = "user" | "agent";
+export type StopReason = "user" | "agent" | "escape" | "command" | "abort";
 export type GoalEventKind = "checkpoint" | "stale" | "drafting";
 export type DraftingFocus = "goal" | "sisyphus";
 export type GoalFocusReason = "created" | "selected" | "resumed" | "completed" | "cleared" | "aborted" | "migrated";

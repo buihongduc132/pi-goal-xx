@@ -53,6 +53,26 @@ export type AuditorPromptMode = "global-local" | "local" | "global-local-merge";
 /** Goal prompt resolution mode (supports all unified modes including override). */
 export type GoalPromptMode = PromptMode;
 
+/**
+ * Pause reason — distinguishes which source triggered the pause.
+ * Used for logging and per-reason configuration.
+ */
+export type PauseReason = "escape" | "command" | "abort";
+
+/**
+ * Per-reason pause configuration. Each pause source can be independently
+ * enabled or disabled. When disabled, the pause attempt is silently ignored.
+ * Default: all enabled (backward compatible).
+ */
+export interface PauseConfig {
+	/** Enable/disable Escape key pause. Default true. Env: PI_GOAL_PAUSE_ESCAPE. */
+	escape?: boolean;
+	/** Enable/disable /goal-pause command. Default true. Env: PI_GOAL_PAUSE_COMMAND. */
+	command?: boolean;
+	/** Enable/disable runtime abort pause (legacy, currently removed). Default false. Env: PI_GOAL_PAUSE_ABORT. */
+	abort?: boolean;
+}
+
 /** Resource filter applied to tools / mcp / skills / extensions arrays. */
 export interface AuditorResourceFilter {
 	tools?: string[];
@@ -198,6 +218,13 @@ export interface GoalSettings {
 	 * event-sourced goal_events.jsonl ledger or auditor-trace.jsonl.
 	 */
 	logging?: GoalLoggingConfig;
+	/**
+	 * Per-reason pause configuration. Each pause source (escape, command, abort)
+	 * can be independently enabled or disabled. When disabled, the pause attempt
+	 * is silently ignored and logged. Default: all enabled except abort.
+	 * Env overrides: PI_GOAL_PAUSE_ESCAPE, PI_GOAL_PAUSE_COMMAND, PI_GOAL_PAUSE_ABORT.
+	 */
+	pauseConfig?: PauseConfig;
 	disableBlockingTools?: boolean;
 	preAuditHooks?: PreAuditHooksConfig;
 }
@@ -254,6 +281,12 @@ export const PI_GOAL_FILE_ENV = "PI_GOAL_FILE";
  */
 export const PI_GOAL_AUTO_RESUME_ENV = "PI_GOAL_AUTO_RESUME";
 export const PI_GOAL_DISABLE_BLOCKING_TOOLS_ENV = "PI_GOAL_DISABLE_BLOCKING_TOOLS";
+/** Env override for escape key pause: "true"/"1" enable, "false"/"0" disable. Default enabled. */
+export const PI_GOAL_PAUSE_ESCAPE_ENV = "PI_GOAL_PAUSE_ESCAPE";
+/** Env override for /goal-pause command: "true"/"1" enable, "false"/"0" disable. Default enabled. */
+export const PI_GOAL_PAUSE_COMMAND_ENV = "PI_GOAL_PAUSE_COMMAND";
+/** Env override for runtime abort pause: "true"/"1" enable, "false"/"0" disable. Default disabled. */
+export const PI_GOAL_PAUSE_ABORT_ENV = "PI_GOAL_PAUSE_ABORT";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -295,6 +328,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"logging",
 	"disableBlockingTools",
 	"preAuditHooks",
+	"pauseConfig",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -678,6 +712,28 @@ function asGoalPromptMode(value: unknown): GoalPromptMode | undefined {
 }
 
 /**
+ * Coerce unknown value into PauseConfig. Validates keys; throws on unknown keys.
+ * Default when absent: escape=true, command=true, abort=false.
+ */
+function asPauseConfig(value: unknown): PauseConfig | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const rec = value as Record<string, unknown>;
+	const known = new Set<keyof PauseConfig>(["escape", "command", "abort"]);
+	const unknown = Object.keys(rec).filter((k) => !known.has(k as keyof PauseConfig));
+	if (unknown.length > 0) {
+		throw new Error(`Unknown pauseConfig key(s): ${unknown.join(", ")}`);
+	}
+	const cfg: PauseConfig = {};
+	const escape = asBool(rec.escape);
+	if (escape !== undefined) cfg.escape = escape;
+	const command = asBool(rec.command);
+	if (command !== undefined) cfg.command = command;
+	const abort = asBool(rec.abort);
+	if (abort !== undefined) cfg.abort = abort;
+	return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+/**
  * Coerce unknown value into an AuditorResourceFilter. Each of the four arrays
  * (tools/mcp/skills/extensions) is independently parsed via asStringArray.
  * Returns undefined if no array yielded any entries.
@@ -785,6 +841,8 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (disableBlockingTools !== undefined) settings.disableBlockingTools = disableBlockingTools;
 	const preAuditHooks = asPreAuditHooksBlock(record.preAuditHooks);
 	if (preAuditHooks) settings.preAuditHooks = preAuditHooks;
+	const pauseConfig = asPauseConfig(record.pauseConfig);
+	if (pauseConfig) settings.pauseConfig = pauseConfig;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
 	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
 	// Read the raw mode value (not the legacy-validated one) so unified modes
@@ -891,6 +949,19 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		// disableBlockingTools: default TRUE (hide blockers). Env overrides.
 		disableBlockingTools: asBool(env[PI_GOAL_DISABLE_BLOCKING_TOOLS_ENV]) ?? fileConfig.disableBlockingTools ?? true,
 		preAuditHooks: fileConfig.preAuditHooks,
+		pauseConfig: resolvePauseConfigFromEnv(env, fileConfig.pauseConfig),
+	};
+}
+
+/**
+ * Resolve effective PauseConfig. Env overrides per-reason. Defaults:
+ *   escape=true, command=true, abort=false (abort path removed; kept for config compat).
+ */
+export function resolvePauseConfigFromEnv(env: NodeJS.ProcessEnv, filePause?: PauseConfig): PauseConfig {
+	return {
+		escape: asBool(env[PI_GOAL_PAUSE_ESCAPE_ENV]) ?? filePause?.escape ?? true,
+		command: asBool(env[PI_GOAL_PAUSE_COMMAND_ENV]) ?? filePause?.command ?? true,
+		abort: asBool(env[PI_GOAL_PAUSE_ABORT_ENV]) ?? filePause?.abort ?? false,
 	};
 }
 
@@ -994,6 +1065,10 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	}
 	if (auditorTimeoutMs !== undefined) clean.auditorTimeoutMs = auditorTimeoutMs;
 	if (auditorTimeoutFloorMs !== undefined) clean.auditorTimeoutFloorMs = auditorTimeoutFloorMs;
+	if (settings.pauseConfig) {
+		const pcClean = asPauseConfig(settings.pauseConfig);
+		if (pcClean) clean.pauseConfig = pcClean;
+	}
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -1033,6 +1108,7 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.preAuditHooks) persisted.preAuditHooks = clean.preAuditHooks;
 	if (clean.auditorTimeoutMs !== undefined) persisted.auditorTimeoutMs = clean.auditorTimeoutMs;
 	if (clean.auditorTimeoutFloorMs !== undefined) persisted.auditorTimeoutFloorMs = clean.auditorTimeoutFloorMs;
+	if (clean.pauseConfig) persisted.pauseConfig = clean.pauseConfig;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }

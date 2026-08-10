@@ -1,3 +1,5 @@
+import { type StopReason } from "./goal-record.ts";
+
 export interface GoalUsageLike {
 	tokensUsed: number;
 	activeSeconds: number;
@@ -9,7 +11,7 @@ export interface GoalDisplayRecordLike {
 	autoContinue: boolean;
 	usage: GoalUsageLike;
 	sisyphus: boolean;
-	stopReason?: "user" | "agent";
+	stopReason?: StopReason;
 }
 
 
