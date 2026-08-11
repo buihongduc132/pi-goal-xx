@@ -2430,9 +2430,22 @@ Verification contract:
 		pauseActiveGoal(ctx, "command");
 	}
 
-	async function handleGoalResume(ctx: ExtensionContext): Promise<void> {
+	async function handleGoalResume(ctx: ExtensionContext, rawArgs?: string): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
 		const open = openGoals();
+		// If rawArgs provided, parse as goal id and focus+resume that specific goal.
+		// Mirrors /goal-focus <short-id> pattern — bypasses the picker.
+		if (rawArgs && rawArgs.trim()) {
+			const targetId = rawArgs.trim();
+			const matched = open.find(g => g.id === targetId || g.id.endsWith(`-${targetId}`));
+			if (!matched) {
+				ctx.ui.notify(`Goal not found: ${targetId}. Use /goal-list to see available goals.`, "warning");
+				return;
+			}
+			if (!(await confirmFocusOverride(ctx, matched.id))) return;
+			setFocusedGoalId(matched.id, ctx, "selected");
+			// Fall through to resume logic with state.goal = matched
+		} else
 		// Always show picker when 2+ open goals (bug fix: let user select)
 		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Resume or focus open goal");
@@ -2850,11 +2863,11 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		},
 	}));
 
-	// /goal-resume: resume a paused goal.
+	// /goal-resume: resume a paused goal. /goal-resume <short-id> resumes a specific open goal.
 	pi.registerCommand("goal-resume", wrapCmdDef("goal-resume", {
-		description: "Resume a paused goal.",
-		handler: async (_rawArgs, ctx) => {
-			await handleGoalResume(ctx);
+		description: "Resume a paused goal. Use /goal-resume <short-id> to resume a specific open goal.",
+		handler: async (rawArgs, ctx) => {
+			await handleGoalResume(ctx, rawArgs);
 		},
 	}));
 
