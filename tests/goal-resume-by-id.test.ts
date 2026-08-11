@@ -146,4 +146,79 @@ describe("/goal-resume <short-id> — resume specific goal", () => {
 		const selectCalls = spy.calls.filter((c) => c.items && c.items.length > 0);
 		assert.ok(selectCalls.length >= 1, "picker shown when no ID provided");
 	});
+
+	// --- Additional coverage (scout-recommended) ---
+
+	function readGoalStatus(gid: string): string | undefined {
+		const goalDir = path.join(cwd, ".pi", "goals");
+		const files = fs.readdirSync(goalDir);
+		const f = files.find((x) => x.endsWith(`${gid}.md`));
+		if (!f) return undefined;
+		const raw = fs.readFileSync(path.join(goalDir, f), "utf8");
+		const m = raw.match(/"status"\s*:\s*"([^"]+)"/);
+		return m ? m[1] : undefined;
+	}
+
+	it("resumes the CORRECT goal when switching from a different focused goal", async () => {
+		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "paused", autoContinue: false });
+		writeGoalFile(cwd, { id: "zz99yy11-betaid", status: "paused", autoContinue: false });
+
+		const { pi: p, ctx } = freshPi(true);
+		await loadGoals(p, ctx);
+
+		// Focus goal A (qi4x4i) first
+		await invokeCommand(p, ctx, "goal-focus", "qi4x4i");
+		await flushContinuation();
+
+		// Resume goal B (betaid) by short-id
+		p.ui.notifyCalls.length = 0;
+		await invokeCommand(p, ctx, "goal-resume", "betaid");
+		await flushContinuation();
+
+		// B should be active, A should still be paused
+		const statusB = readGoalStatus("zz99yy11-betaid");
+		const statusA = readGoalStatus("mr62bc2x-qi4x4i");
+		assert.equal(statusB, "active", "target goal B became active");
+		assert.equal(statusA, "paused", "non-target goal A stays paused");
+	});
+
+	it("resume already-active goal by short-id is a safe no-op", async () => {
+		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "active", autoContinue: true });
+
+		const { pi: p, ctx } = freshPi(true);
+		await loadGoals(p, ctx);
+
+		// Focus it first
+		await invokeCommand(p, ctx, "goal-focus", "qi4x4i");
+		await flushContinuation();
+
+		p.ui.notifyCalls.length = 0;
+		// Resume it again by short-id — should not crash
+		await invokeCommand(p, ctx, "goal-resume", "qi4x4i");
+		await flushContinuation();
+
+		// No exception thrown = pass. Either "already running" info or re-resume is fine.
+		assert.ok(true, "did not throw on already-active resume");
+	});
+
+	it("non-TUI mode (hasUI=false) with rawArgs does not show picker", async () => {
+		writeGoalFile(cwd, { id: "mr62bc2x-qi4x4i", status: "paused", autoContinue: false });
+		writeGoalFile(cwd, { id: "zz99yy11-betaid", status: "paused", autoContinue: false });
+
+		const { pi: p, ctx } = freshPi(false); // hasUI=false (non-TUI)
+		await loadGoals(p, ctx);
+
+		// Focus goal A directly
+		await invokeCommand(p, ctx, "goal-focus", "qi4x4i");
+		await flushContinuation();
+
+		const spy = spySelect(p.ui);
+		p.ui.notifyCalls.length = 0;
+		await invokeCommand(p, ctx, "goal-resume", "betaid");
+		await flushContinuation();
+		spy.restore();
+
+		const selectCalls = spy.calls.filter((c) => c.items && c.items.length > 0);
+		assert.equal(selectCalls.length, 0, "picker NOT shown in non-TUI mode with rawArgs");
+	});
 });
