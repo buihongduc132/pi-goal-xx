@@ -1,9 +1,9 @@
 /**
- * RED PHASE — goalHash: pure hash function + surfaces.
+ * goalHash: pure hash function + surfaces.
  *
  * Spec: flow/plans/goal-continuation-throttle-hash.md
  *
- * Contract under test (GREEN implements):
+ * Contract under test:
  *  - goalHash(goal) → 8-char lowercase hex string (sha256 prefix).
  *  - STABLE: identical goals except usage.tokensUsed / usage.activeSeconds /
  *    updatedAt → same hash.
@@ -14,18 +14,14 @@
  *  - continuationPrompt still contains "[GOAL CHECKPOINT goalId=" marker.
  *  - serializeGoalFile JSON meta block contains "goalHash": "<8hex>" equal
  *    to goalHash(goal).
- *
- * Today ALL of these FAIL (goalHash not exported, prompt/file surfaces don't
- * include the hash line).
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
 import { continuationPrompt } from "../extensions/prompts/goal-prompts.ts";
 import { serializeGoalFile } from "../extensions/storage/goal-files.ts";
 import { createGoal, type GoalRecord } from "../extensions/goal-record.ts";
 
-// goalHash does not exist yet — dynamic import so the file loads and each
-// test fails individually with "goalHash is not a function" (or similar).
 let goalHash: (goal: GoalRecord) => string;
 
 async function loadGoalHash(): Promise<(goal: GoalRecord) => string> {
@@ -60,14 +56,14 @@ describe("goalHash — shape", () => {
 		goalHash = await loadGoalHash();
 		const goal = mkGoal();
 		const h = goalHash(goal);
-		expect(typeof h).toBe("string");
-		expect(h).toMatch(HEX8);
+		assert.strictEqual(typeof h, "string");
+		assert.ok(HEX8.test(h));
 	});
 
 	it("is stable across calls for the same goal", async () => {
 		goalHash = await loadGoalHash();
 		const goal = mkGoal();
-		expect(goalHash(goal)).toBe(goalHash(goal));
+		assert.strictEqual(goalHash(goal), goalHash(goal));
 	});
 });
 
@@ -76,21 +72,21 @@ describe("goalHash — stability (usage/updatedAt changes do NOT affect hash)", 
 		goalHash = await loadGoalHash();
 		const a = mkGoal();
 		const b = mkGoal({ usage: { tokensUsed: 999999, activeSeconds: a.usage.activeSeconds } });
-		expect(goalHash(a)).toBe(goalHash(b));
+		assert.strictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("ignores usage.activeSeconds changes", async () => {
 		goalHash = await loadGoalHash();
 		const a = mkGoal();
 		const b = mkGoal({ usage: { tokensUsed: a.usage.tokensUsed, activeSeconds: 999999 } });
-		expect(goalHash(a)).toBe(goalHash(b));
+		assert.strictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("ignores updatedAt changes", async () => {
 		goalHash = await loadGoalHash();
 		const a = mkGoal();
 		const b = mkGoal({ updatedAt: new Date(1_800_000_000_000).toISOString() });
-		expect(goalHash(a)).toBe(goalHash(b));
+		assert.strictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("ignores combined usage + updatedAt drift", async () => {
@@ -100,7 +96,7 @@ describe("goalHash — stability (usage/updatedAt changes do NOT affect hash)", 
 			usage: { tokensUsed: 12345, activeSeconds: 6789 },
 			updatedAt: new Date(1_900_000_000_000).toISOString(),
 		});
-		expect(goalHash(a)).toBe(goalHash(b));
+		assert.strictEqual(goalHash(a), goalHash(b));
 	});
 });
 
@@ -109,7 +105,7 @@ describe("goalHash — sensitivity (semantic changes DO affect hash)", () => {
 		goalHash = await loadGoalHash();
 		const a = mkGoal();
 		const b = mkGoal({ objective: "build a DIFFERENT thing" });
-		expect(goalHash(a)).not.toBe(goalHash(b));
+		assert.notStrictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("changes when taskList.tasks[0].status changes", async () => {
@@ -117,28 +113,28 @@ describe("goalHash — sensitivity (semantic changes DO affect hash)", () => {
 		const a = mkGoal();
 		const b = mkGoal();
 		b.taskList!.tasks[0] = { ...b.taskList!.tasks[0], status: "complete" };
-		expect(goalHash(a)).not.toBe(goalHash(b));
+		assert.notStrictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("changes when status changes", async () => {
 		goalHash = await loadGoalHash();
 		const a = mkGoal({ status: "active" });
 		const b = mkGoal({ status: "paused" });
-		expect(goalHash(a)).not.toBe(goalHash(b));
+		assert.notStrictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("changes when verificationContract changes", async () => {
 		goalHash = await loadGoalHash();
 		const a = mkGoal({ verificationContract: "tests must pass" });
 		const b = mkGoal({ verificationContract: "tests must pass AND lint clean" });
-		expect(goalHash(a)).not.toBe(goalHash(b));
+		assert.notStrictEqual(goalHash(a), goalHash(b));
 	});
 
 	it("changes when sisyphus changes", async () => {
 		goalHash = await loadGoalHash();
 		const a = mkGoal({ sisyphus: false });
 		const b = mkGoal({ sisyphus: true });
-		expect(goalHash(a)).not.toBe(goalHash(b));
+		assert.notStrictEqual(goalHash(a), goalHash(b));
 	});
 });
 
@@ -148,8 +144,8 @@ describe("goalHash — continuationPrompt surface", () => {
 		const goal = mkGoal();
 		const out = continuationPrompt(goal);
 		const matches = out.match(/^goalHash: [0-9a-f]{8}$/gm);
-		expect(matches).not.toBeNull();
-		expect(matches!.length).toBe(1);
+		assert.notStrictEqual(matches, null);
+		assert.strictEqual(matches!.length, 1);
 	});
 
 	it("the hash value in the prompt equals goalHash(goal)", async () => {
@@ -157,15 +153,15 @@ describe("goalHash — continuationPrompt surface", () => {
 		const goal = mkGoal();
 		const out = continuationPrompt(goal);
 		const line = out.match(/^goalHash: ([0-9a-f]{8})$/m);
-		expect(line).not.toBeNull();
-		expect(line![1]).toBe(goalHash(goal));
+		assert.notStrictEqual(line, null);
+		assert.strictEqual(line![1], goalHash(goal));
 	});
 
 	it("still contains the [GOAL CHECKPOINT goalId= marker", async () => {
 		goalHash = await loadGoalHash();
 		const goal = mkGoal();
 		const out = continuationPrompt(goal);
-		expect(out).toContain(`[GOAL CHECKPOINT goalId=${goal.id}]`);
+		assert.ok(out.includes(`[GOAL CHECKPOINT goalId=${goal.id}]`));
 	});
 });
 
@@ -177,8 +173,8 @@ describe("goalHash — serializeGoalFile surface", () => {
 		// The file starts with a JSON meta block (before the first blank line).
 		const jsonBlock = serialized.split("\n\n")[0];
 		const parsed = JSON.parse(jsonBlock);
-		expect(typeof parsed.goalHash).toBe("string");
-		expect(parsed.goalHash).toMatch(HEX8);
-		expect(parsed.goalHash).toBe(goalHash(goal));
+		assert.strictEqual(typeof parsed.goalHash, "string");
+		assert.ok(HEX8.test(parsed.goalHash));
+		assert.strictEqual(parsed.goalHash, goalHash(goal));
 	});
 });
