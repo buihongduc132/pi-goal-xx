@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type GoalStatus = "active" | "paused" | "complete";
 export type StopReason = "user" | "agent" | "escape" | "command" | "abort";
 export type GoalEventKind = "checkpoint" | "stale" | "drafting";
@@ -49,6 +51,26 @@ export interface GoalRecord {
 	taskList?: GoalTaskList;
 	/** Plain-text description of what verification evidence is required before completing this goal. */
 	verificationContract?: string;
+}
+
+/**
+ * Stable semantic hash of a goal: sha256 over the canonical JSON subset
+ * { objective, status, taskList, verificationContract, sisyphus }.
+ * EXCLUDES id (test contract: two goals minted with fresh random ids but
+ * identical content must hash equal), usage, updatedAt, createdAt and all
+ * other timestamps — volatile fields must not change the hash. Returns an
+ * 8-char lowercase hex prefix. The goal id travels in the adjacent
+ * `[GOAL CHECKPOINT goalId=...]` / `goalId:` surfaces, not in the hash input.
+ */
+export function goalHash(goal: GoalRecord): string {
+	const canonical = JSON.stringify({
+		objective: goal.objective,
+		status: goal.status,
+		taskList: goal.taskList ?? null,
+		verificationContract: goal.verificationContract ?? null,
+		sisyphus: goal.sisyphus,
+	});
+	return createHash("sha256").update(canonical).digest("hex").slice(0, 8);
 }
 
 export interface GoalStateEntry {

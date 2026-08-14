@@ -8,6 +8,7 @@ import {
 	footerStatus,
 	formatDuration,
 	formatTokenValue,
+	shouldSendContinuation,
 	statusLabel,
 	truncateText,
 } from "./goal-core.ts";
@@ -32,6 +33,7 @@ import {
 	isAuditorEnabledByDefault,
 	loadGoalSettings,
 	loadGoalSettingsFileConfig,
+	resolveContinuationGate,
 	saveGoalSettingsFileConfig,
 	type GoalSettings,
 	type CommandHooksConfig,
@@ -74,6 +76,7 @@ import {
 	cloneGoal,
 	createGoal,
 	goalFocusDetails,
+	goalHash,
 	normalizeGoalRecord,
 	normalizeGoalFocusEntry,
 	normalizeTaskItem,
@@ -540,6 +543,16 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let continuationQueuedFor: string | null = null;
 	let continuationScheduledFor: string | null = null;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	// Continuation throttle: timestamp of the last auto-continuation send for
+	// lastContinuationSentGoalId. null = no send recorded (fresh goal / force
+	// bypass) → gate always fires. Reset on goal create/resume, inbound user
+	// message, and session_compact.
+	let lastContinuationSentAt: number | null = null;
+	let lastContinuationSentGoalId: string | null = null;
+	function resetContinuationThrottle(): void {
+		lastContinuationSentAt = null;
+		lastContinuationSentGoalId = null;
+	}
 	// Message send mutex: serializes all pi.sendMessage / pi.sendUserMessage
 	// calls so a second send cannot race past isStreaming=true before the
 	// first's prompt() resolves the streamingBehavior option. Without this,
@@ -1944,6 +1957,15 @@ Verification contract:
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
+		// Throttle gate: drop the continuation when the cooldown since the last
+		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
+		const { minIntervalMs } = resolveContinuationGate(settings);
+		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
+		if (!shouldSendContinuation(effectiveLastSentAt, Date.now(), minIntervalMs)) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.cooldown_drop", goalId, message: `continuation dropped: cooldown ${minIntervalMs}ms since last send` });
+			return;
+		}
 		void serializedSend(() => {
 			pi.sendMessage<GoalEventDetails>(
 				{
@@ -1960,6 +1982,8 @@ Verification contract:
 				},
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
+			lastContinuationSentAt = Date.now();
+			lastContinuationSentGoalId = goalId;
 		});
 	}
 
@@ -2000,6 +2024,8 @@ Verification contract:
 		if (verificationContract) goal.verificationContract = verificationContract;
 		setGoal(goal, ctx, true, "created");
 		beginAccounting();
+		// Fresh goal: force-bypass the continuation cooldown on the first send.
+		resetContinuationThrottle();
 		// Reset continuation nudge state — this is a fresh goal.
 		resetGetGoalNudgeState(state.goal?.id);
 		// A goal was committed — clear pending confirmation intent if any.
@@ -2492,6 +2518,8 @@ Verification contract:
 		);
 		beginAccounting();
 		resetGetGoalNudgeState(state.goal.id);
+		// Explicit resume: force-bypass the continuation cooldown on the first send.
+		resetContinuationThrottle();
 		// Unit E task 4.3: acquire the lock before queueContinuation. Reaps
 		// own-stale lock (pause+lapse self-heal). Fails if another live session
 		// holds it → auto-run blocked by the chokepoint.
@@ -2899,8 +2927,9 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 			const lifecycleHint = view && (view.status === "active" || view.status === "paused")
 				? "\nLifecycle tools: if evidence proves the objective is satisfied, call complete_goal({verificationSummary: \"evidence\"}). If you are blocked, state the blocker in your final message and stop — the user will intervene. For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
 				: "";
+			const hashLine = view ? `\ngoalHash: ${goalHash(view)}` : "";
 			const text = view
-				? `${detailedSummary(view)}${lifecycleHint}${nudge}${otherCount > 0 ? `\nOther open goals: ${otherCount} (human can run /goal-list or /goal-focus)` : ""}`
+				? `${detailedSummary(view)}${lifecycleHint}${hashLine}${nudge}${otherCount > 0 ? `\nOther open goals: ${otherCount} (human can run /goal-list or /goal-focus)` : ""}`
 				: openGoals().length > 0
 					? buildUnfocusedOpenGoalsSummary(openGoals().length)
 					: detailedSummary(null);
@@ -4692,6 +4721,9 @@ promptGuidelines: [
 		if (raw?.role === "custom" && raw.customType === GOAL_EVENT_ENTRY && raw.display !== false) {
 			return { message: { ...event.message, display: false } as typeof event.message };
 		}
+		// Inbound user message: force-bypass the continuation cooldown so the
+		// next auto-continuation after explicit user interaction always fires.
+		if (raw?.role === "user") resetContinuationThrottle();
 	});
 
 	pi.on("session_start", async (event, ctx) => {
@@ -4774,6 +4806,8 @@ promptGuidelines: [
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (state.goal) persist(ctx);
 		beginAccounting();
+		// Session compact: force-bypass the continuation cooldown for the next send.
+		resetContinuationThrottle();
 		// Arm a deterministic compaction summary for the next agent turn.
 		// This replaces the generic reminder with artifact-backed state.
 		if (shouldArmPostCompactReminder(state.goal)) {

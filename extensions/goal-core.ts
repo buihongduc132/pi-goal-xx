@@ -173,6 +173,22 @@ export function statusLabel(goal: Pick<GoalDisplayRecordLike, "sisyphus" | "stat
 	return `${prefix}${goal.status}`;
 }
 
+/**
+ * Pure continuation throttle gate.
+ *   minIntervalMs 0 → gate disabled → always fire.
+ *   lastSentAtMs null → never sent (or force-bypass) → fire.
+ *   nowMs - lastSentAtMs >= minIntervalMs → fire, else drop.
+ */
+export function shouldSendContinuation(
+	lastSentAtMs: number | null,
+	nowMs: number,
+	minIntervalMs: number,
+): boolean {
+	if (minIntervalMs <= 0) return true;
+	if (lastSentAtMs === null) return true;
+	return nowMs - lastSentAtMs >= minIntervalMs;
+}
+
 export function footerStatus(goal: GoalDisplayRecordLike, liveLockHolder?: boolean): string {
 	const usageBits: string[] = [];
 	if (goal.usage.activeSeconds > 0) usageBits.push(formatDuration(goal.usage.activeSeconds));
