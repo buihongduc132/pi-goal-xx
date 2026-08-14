@@ -4049,7 +4049,11 @@ ${objective}` : objective,
 					"",
 					auditor.output || "Auditor produced no approval marker.",
 				].filter((line): line is string => line !== undefined).join("\n");
-				safeFireAndForget(() => 
+				// Force-bypass cooldown: rejection is a hard pivot — agent must
+				// address the auditor's objections on the next turn, not wait
+				// for the 10-min throttle window to elapse.
+				resetContinuationThrottle();
+				safeFireAndForget(() =>
 					pi.sendMessage<GoalAuditEventDetails>({
 						customType: GOAL_AUDIT_ENTRY,
 						content: rejectionText,
