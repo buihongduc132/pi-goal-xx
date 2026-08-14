@@ -33,7 +33,7 @@ Plan done when ALL below true:
 
 ### goalHash
 
-- [x] (hash-fn) `goalHash(goal)` = sha256 over canonical subset `{id, objective, status, tasks, verificationContract, sisyphus}` → 8-hex-char prefix, exported from goal-record.ts (or equivalent module). Status: implemented (probe passed 2026-08-13). Probe: `grep -rn "goalHash\|createHash" extensions/goal-record.ts extensions/goal-core.ts`.
+- [x] (hash-fn) `goalHash(goal)` = sha256 over canonical subset `{objective, status, taskList, verificationContract, sisyphus}` (id EXCLUDED — see goal-record.ts doc comment: test contract requires identical-content goals with fresh ids to hash equal; the id travels in the adjacent goalId lines, not the hash) → 8-hex-char prefix, exported from goal-record.ts (or equivalent module). Status: implemented (probe passed 2026-08-13). Probe: `grep -rn "goalHash\|createHash" extensions/goal-record.ts extensions/goal-core.ts`.
 - [x] (hash-stable) Mutating `usage.tokensUsed` / `usage.activeSeconds` / `updatedAt` does NOT change goalHash. Status: implemented (probe passed 2026-08-13). Probe: unit test — hash before/after usage bump equal.
 - [x] (hash-sensitive) Changing objective OR any task status/title OR status OR verificationContract OR sisyphus DOES change goalHash. Status: implemented (probe passed 2026-08-13). Probe: unit test per mutation.
 
