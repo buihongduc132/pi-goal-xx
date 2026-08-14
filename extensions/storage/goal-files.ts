@@ -8,6 +8,7 @@ import {
 } from "../goal-core.ts";
 import {
 	cloneGoal,
+	goalHash,
 	normalizeGoalRecord,
 	normalizeRelPath,
 	nowIso,
@@ -131,7 +132,7 @@ function taskLineSuffix(task: { status: TaskStatus; evidence?: string; skipReaso
 }
 
 export function serializeGoalFile(goal: GoalRecord): string {
-	const meta = JSON.stringify({ version: 3, ...goal }, null, 2);
+	const meta = JSON.stringify({ version: 3, ...goal, goalHash: goalHash(goal) }, null, 2);
 	const pauseLines: string[] = [];
 	if (goal.pauseReason) pauseLines.push(`- Agent pause reason: ${goal.pauseReason}`);
 	if (goal.pauseSuggestedAction) pauseLines.push(`- Agent suggests: ${goal.pauseSuggestedAction}`);
