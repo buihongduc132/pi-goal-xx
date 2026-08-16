@@ -208,3 +208,311 @@ describe("P1: goal ledger is not rotated (event-sourced reconstruction)", () => 
 		}
 	});
 });
+
+// ── isValidLedgerEvent + sanitizeEvent coverage (all event types) ──────────
+
+describe("readGoalLedger validates all event types", () => {
+	let ctx: ReturnType<typeof tmpCtx>;
+	beforeEach(() => { ctx = tmpCtx(); });
+	afterEach(() => { fs.rmSync(ctx._dir, { recursive: true, force: true }); });
+
+	it("round-trips goal_unfocused", () => {
+		appendGoalEvent(ctx, { type: "goal_unfocused", reason: "done", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "goal_unfocused");
+	});
+
+	it("round-trips goal_paused with optional fields", () => {
+		appendGoalEvent(ctx, { type: "goal_paused", goalId: "g1", reason: "blocked", suggestedAction: "wait", status: "paused", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "goal_paused");
+	});
+
+	it("round-trips goal_resumed", () => {
+		appendGoalEvent(ctx, { type: "goal_resumed", goalId: "g1", reason: "unblocked", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "goal_resumed");
+	});
+
+	it("round-trips goal_tweaked", () => {
+		appendGoalEvent(ctx, { type: "goal_tweaked", goalId: "g1", changeSummary: "updated objective", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "goal_tweaked");
+	});
+
+	it("round-trips completion_requested", () => {
+		appendGoalEvent(ctx, { type: "completion_requested", goalId: "g1", summary: "done", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "completion_requested");
+	});
+
+	it("round-trips audit_started with optional fields", () => {
+		appendGoalEvent(ctx, { type: "audit_started", goalId: "g1", provider: "openai", model: "gpt-4", thinkingLevel: "high", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "audit_started");
+	});
+
+	it("round-trips audit_result", () => {
+		appendGoalEvent(ctx, { type: "audit_result", goalId: "g1", verdict: "approved", report: "looks good", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "audit_result");
+	});
+
+	it("round-trips audit_skipped with optional fields", () => {
+		appendGoalEvent(ctx, { type: "audit_skipped", goalId: "g1", reason: "disabled", provider: "p", model: "m", thinkingLevel: "low", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "audit_skipped");
+	});
+
+	it("round-trips goal_aborted", () => {
+		appendGoalEvent(ctx, { type: "goal_aborted", goalId: "g1", reason: "cancelled", archivePath: "/arch", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "goal_aborted");
+	});
+
+	it("round-trips task_list_set", () => {
+		appendGoalEvent(ctx, { type: "task_list_set", goalId: "g1", taskCount: 5, blockCompletion: true, at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "task_list_set");
+	});
+
+	it("round-trips task_complete", () => {
+		appendGoalEvent(ctx, { type: "task_complete", goalId: "g1", taskId: "t1", evidence: "done", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "task_complete");
+	});
+
+	it("round-trips task_skipped", () => {
+		appendGoalEvent(ctx, { type: "task_skipped", goalId: "g1", taskId: "t1", reason: "n/a", at: "t" });
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 1);
+		assert.equal(r.events[0].type, "task_skipped");
+	});
+
+	it("rejects unknown event types (malformed)", () => {
+		const p = goalLedgerPath(ctx);
+		fs.mkdirSync(path.dirname(p), { recursive: true });
+		fs.writeFileSync(p, JSON.stringify({ type: "unknown_event", at: "t" }) + "\n");
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 0);
+		assert.equal(r.malformed, 1);
+	});
+
+	it("rejects events with missing at field", () => {
+		const p = goalLedgerPath(ctx);
+		fs.mkdirSync(path.dirname(p), { recursive: true });
+		fs.writeFileSync(p, JSON.stringify({ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true }) + "\n");
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 0);
+		assert.equal(r.malformed, 1);
+	});
+
+	it("rejects non-object JSON values", () => {
+		const p = goalLedgerPath(ctx);
+		fs.mkdirSync(path.dirname(p), { recursive: true });
+		fs.writeFileSync(p, "null\n42\n\"string\"\n[]\n");
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 0);
+		assert.equal(r.malformed, 4);
+	});
+
+	it("rejects events with missing type field", () => {
+		const p = goalLedgerPath(ctx);
+		fs.mkdirSync(path.dirname(p), { recursive: true });
+		fs.writeFileSync(p, JSON.stringify({ at: "t", goalId: "g1" }) + "\n");
+		const r = readGoalLedger(ctx);
+		assert.equal(r.events.length, 0);
+		assert.equal(r.malformed, 1);
+	});
+});
+
+// ── reconstructGoalLedger — full event-type coverage ───────────────────────
+
+describe("reconstructGoalLedger — comprehensive", () => {
+	it("handles goal_tweaked (sets tweakedAt)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "goal_tweaked", goalId: "g1", changeSummary: "updated", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		const state = recon.goals.get("g1");
+		assert.ok(state);
+		assert.equal(state!.tweakedAt, "t2");
+	});
+
+	it("handles completion_requested (no state change)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "completion_requested", goalId: "g1", summary: "done", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		const state = recon.goals.get("g1");
+		assert.ok(state);
+		assert.equal(state!.latestStatus, "active");
+	});
+
+	it("handles audit_started (no state change)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "audit_started", goalId: "g1", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.equal(recon.goals.get("g1")!.latestStatus, "active");
+	});
+
+	it("handles audit_skipped (no state change)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "audit_skipped", goalId: "g1", reason: "disabled", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.equal(recon.goals.get("g1")!.latestStatus, "active");
+	});
+
+	it("handles audit_result (sets latestAuditorResult)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "audit_result", goalId: "g1", verdict: "approved", report: "good", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		const state = recon.goals.get("g1");
+		assert.ok(state!.latestAuditorResult);
+		assert.equal(state!.latestAuditorResult!.verdict, "approved");
+	});
+
+	it("handles audit_result for terminal goal", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_completed", goalId: "g1", at: "t1" },
+			{ type: "audit_result", goalId: "g1", verdict: "disapproved", report: "bad", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		const term = recon.terminalGoals.get("g1");
+		assert.ok(term);
+		assert.equal(term!.latestAuditorResult!.verdict, "disapproved");
+	});
+
+	it("handles goal_completed without prior goal_created (creates terminal state)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_completed", goalId: "g1", at: "t1" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.ok(recon.terminalGoals.has("g1"));
+		assert.equal(recon.terminalGoals.get("g1")!.latestStatus, "complete");
+	});
+
+	it("handles goal_aborted without prior goal_created (creates terminal state)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_aborted", goalId: "g1", reason: "cancelled", at: "t1" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.ok(recon.terminalGoals.has("g1"));
+		assert.equal(recon.terminalGoals.get("g1")!.latestStatus, "aborted");
+	});
+
+	it("handles goal_aborted with prior goal_created", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "goal_aborted", goalId: "g1", reason: "cancelled", at: "t2" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.ok(recon.terminalGoals.has("g1"));
+		assert.equal(recon.goals.has("g1"), false);
+	});
+
+	it("goal_focused clears terminalGoals focus flags", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_completed", goalId: "g1", at: "t1" },
+			{ type: "goal_created", goalId: "g2", objective: "y", sisyphus: false, autoContinue: true, at: "t2" },
+			{ type: "goal_focused", goalId: "g2", reason: "selected", at: "t3" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.equal(recon.focusedGoalId, "g2");
+		// terminal goal g1 should have latestFocus=false after goal_focused for g2
+		assert.equal(recon.terminalGoals.get("g1")!.latestFocus, false);
+	});
+
+	it("goal_unfocused clears focus on goals and terminalGoals", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_completed", goalId: "g1", at: "t1" },
+			{ type: "goal_created", goalId: "g2", objective: "y", sisyphus: false, autoContinue: true, at: "t2" },
+			{ type: "goal_focused", goalId: "g2", reason: "sel", at: "t3" },
+			{ type: "goal_unfocused", reason: "cleared", at: "t4" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.equal(recon.focusedGoalId, null);
+		assert.equal(recon.goals.get("g2")!.latestFocus, false);
+		assert.equal(recon.terminalGoals.get("g1")!.latestFocus, false);
+	});
+
+	it("clears focusedGoalId when focused goal moved to terminal", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" },
+			{ type: "goal_focused", goalId: "g1", reason: "sel", at: "t2" },
+			{ type: "goal_completed", goalId: "g1", at: "t3" },
+		];
+		const recon = reconstructGoalLedger(events);
+		assert.equal(recon.focusedGoalId, null);
+	});
+});
+
+// ── latestGoalLifecycleEvent — no match returns undefined ──────────────────
+
+describe("latestGoalLifecycleEvent — no match", () => {
+	it("returns undefined when no events match goalId", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t" },
+		];
+		assert.equal(latestGoalLifecycleEvent(events, "nonexistent"), undefined);
+	});
+});
+
+// ── latestEventsForGoal — events without goalId are skipped ────────────────
+
+describe("latestEventsForGoal — mixed events", () => {
+	it("skips events without goalId (goal_unfocused)", () => {
+		const events: GoalLedgerEvent[] = [
+			{ type: "goal_unfocused", reason: "x", at: "t1" },
+			{ type: "goal_created", goalId: "g1", objective: "y", sisyphus: false, autoContinue: true, at: "t2" },
+		];
+		const result = latestEventsForGoal(events, "g1");
+		assert.equal(result.length, 1);
+	});
+});
+
+// ── appendGoalEvent — fallback path (temp write fails) ─────────────────────
+
+describe("appendGoalEvent — fallback on temp write failure", () => {
+	it("falls back to direct append when temp write fails (read-only dir)", () => {
+		const ctx = tmpCtx();
+		try {
+			// Create the ledger file first so direct append has a target
+			appendGoalEvent(ctx, { type: "goal_created", goalId: "g1", objective: "x", sisyphus: false, autoContinue: true, at: "t1" });
+			// Make the dir read-only so temp file creation fails
+			const dir = path.dirname(goalLedgerPath(ctx));
+			if (process.getuid && process.getuid() === 0) return; // skip if root
+			fs.chmodSync(dir, 0o555);
+			try {
+				// This should not throw — fallback to direct append (which also fails silently)
+				appendGoalEvent(ctx, { type: "goal_focused", goalId: "g1", reason: "r", at: "t2" });
+			} finally {
+				fs.chmodSync(dir, 0o755);
+			}
+			// The first event should still be readable
+			const r = readGoalLedger(ctx);
+			assert.ok(r.events.length >= 1);
+		} finally {
+			fs.rmSync(ctx._dir, { recursive: true, force: true });
+		}
+	});
+});

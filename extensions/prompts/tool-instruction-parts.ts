@@ -1,10 +1,10 @@
 /**
  * Granular per-tool-instruction prompt building.
  *
- * When a lifecycle tool (`complete_goal`) is in `settings.disabledTools`, the
- * default prompt instruction for that tool is suppressed. The user can supply
- * a replacement via `settings.toolInstructions[name]`, which is resolved through
- * the existing `resolvePrompt` resolver (key: `tool-instruction-<name>`).
+ * When a lifecycle tool is in `settings.disabledTools`, the default prompt
+ * instruction for that tool is suppressed. The user can supply a replacement
+ * via `settings.toolInstructions[name]`, resolved through the existing
+ * `resolvePrompt` resolver (key: `tool-instruction-<name>`).
  *
  * See: openspec/changes/add-prompt-tool-instruction-config/
  */
@@ -16,9 +16,29 @@ import type { GoalSettings } from "../goal-settings.ts";
 // Default instruction texts
 // ---------------------------------------------------------------------------
 
+/** Default `pause_goal` body instruction (verbose paragraph). */
+export const DEFAULT_PAUSE_GOAL_BODY_INSTRUCTION =
+	"If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), state the blocker concisely in your final message and call pause_goal — the user will intervene. Do not invent workarounds, do not fake completion, do not silently redefine the objective, and do not use complete_goal to escape a blocker.";
+
+/** Default `pause_goal` Sisyphus bullet (one-liner). */
+export const DEFAULT_PAUSE_GOAL_SISYPHUS_BULLET =
+	"If a step is unclear, blocked, fails, or seems wrong: call pause_goal and state the blocker — do not invent a workaround.";
+
+/** Default `goal_question` / `goal_questionnaire` ask-user instruction. */
+export const DEFAULT_ASK_USER_INSTRUCTION =
+	"To clarify something with the user mid-work, use goal_question (single question) or goal_questionnaire (structured multi-question form). They both return user intent into the conversation; treat them the same. Do NOT use workhorse/reconnaissance tools for clarification.";
+
+/** Default `abort_goal` instruction. */
+export const DEFAULT_ABORT_GOAL_INSTRUCTION =
+	"If the user explicitly asks to abandon/cancel this goal, or the objective is obsolete, impossible, or unsafe to continue and should not be marked complete, call abort_goal and state the reason.";
+
 /** Default `complete_goal` instruction (verbose paragraph). */
 export const DEFAULT_COMPLETE_GOAL_INSTRUCTION =
 	"Keep this goal in force until it is actually achieved. Do not pause for confirmation just because a phase, chapter, file, or checklist item is finished. At each natural stopping point, compare every explicit requirement with concrete evidence from the workspace/session. If the objective is complete, call complete_goal and provide a verificationSummary; complete_goal will launch an independent pi auditor agent and only archive if that auditor returns <approved/>. If it is not complete, choose the next concrete action and do it.";
+
+/** Default `pause_goal` tweak-drafting instruction (NG1). */
+const DEFAULT_PAUSE_GOAL_TWEAK_INSTRUCTION =
+	"Do NOT call pause_goal during this drafting interview. You are revising the goal, not executing it — blockers encountered while drafting should be raised as plain chat questions.";
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -33,8 +53,7 @@ function isToolDisabled(settings: GoalSettings | undefined, toolName: string): b
  * Returns the resolved text (source !== "none") or "" when no replacement
  * resolves (empty file, no inline, mode "off" with no inline).
  *
- * Resolution key pattern: `tool-instruction-<toolName>` (file lookup under
- * the standard promptsDir: `tool-instruction-<toolName>.md`).
+ * Resolution key: `tool-instruction-<toolName>` (file: `tool-instruction-<toolName>.md`).
  */
 function resolveToolReplacement(
 	toolName: string,
@@ -51,17 +70,14 @@ function resolveToolReplacement(
 		{ promptsDir: settings?.promptsDir },
 	);
 	// Use `.injected` (raw block body), NOT `.final` (default + "\n\n" + body).
-	// Tool instructions have no hardcoded default to append to, so `final`
+	// Tool instructions have no hardcoded default to prepend, so `final`
 	// would carry a leading "\n\n" separator from the empty default.
 	return resolved.source === "none" ? "" : (resolved.injected ?? resolved.final);
 }
 
 /**
- * Generic helper skeleton: returns the default text when the tool is enabled,
- * the replacement (or "") when disabled.
- *
- * @param toolName    Lifecycle tool name.
- * @param defaultText Default instruction text (caller picks the context-correct one).
+ * Generic helper: returns `defaultText` when the tool is enabled;
+ * when disabled returns the replacement (or "" when no replacement resolves).
  */
 function instructionFor(
 	toolName: string,
@@ -76,6 +92,76 @@ function instructionFor(
 // ---------------------------------------------------------------------------
 // Public helpers
 // ---------------------------------------------------------------------------
+
+/** `pause_goal` body instruction (verbose paragraph). */
+export function pauseGoalBodyInstruction(
+	settings: GoalSettings | undefined,
+	cwd: string | undefined,
+): string {
+	return instructionFor("pause_goal", DEFAULT_PAUSE_GOAL_BODY_INSTRUCTION, settings, cwd);
+}
+
+/** `pause_goal` Sisyphus bullet instruction (one-liner). */
+export function pauseGoalSisyphusBullet(
+	settings: GoalSettings | undefined,
+	cwd: string | undefined,
+): string {
+	return instructionFor("pause_goal", DEFAULT_PAUSE_GOAL_SISYPHUS_BULLET, settings, cwd);
+}
+
+/**
+ * `pause_goal` tweak-drafting instruction (NG1).
+ * Separate helper so callers in the tweak prompt can independently suppress
+ * or replace this specific line without affecting the body/sisyphus variants.
+ */
+export function pauseGoalTweakInstruction(
+	settings: GoalSettings | undefined,
+	cwd: string | undefined,
+): string {
+	return instructionFor("pause_goal", DEFAULT_PAUSE_GOAL_TWEAK_INSTRUCTION, settings, cwd);
+}
+
+/**
+ * Ask-user instruction with pair gating.
+ *
+ * Gating rules:
+ *   - Neither disabled → DEFAULT_ASK_USER_INSTRUCTION.
+ *   - Both disabled + no config → "".
+ *   - Both disabled + config (on goal_question) → resolved replacement.
+ *   - Only goal_question disabled → single-tool text mentioning goal_questionnaire.
+ *   - Only goal_questionnaire disabled → single-tool text mentioning goal_question.
+ */
+export function askUserInstruction(
+	settings: GoalSettings | undefined,
+	cwd: string | undefined,
+): string {
+	const qDisabled = isToolDisabled(settings, "goal_question");
+	const qqDisabled = isToolDisabled(settings, "goal_questionnaire");
+
+	// Neither disabled → full default.
+	if (!qDisabled && !qqDisabled) return DEFAULT_ASK_USER_INSTRUCTION;
+
+	// Both disabled → suppress or use replacement (keyed on goal_question).
+	if (qDisabled && qqDisabled) {
+		return resolveToolReplacement("goal_question", settings, cwd);
+	}
+
+	// Only goal_questionnaire disabled → mention goal_question only.
+	if (!qDisabled && qqDisabled) {
+		return "To clarify something with the user mid-work, use goal_question to ask a single question. It returns user intent into the conversation. Do NOT use workhorse/reconnaissance tools for clarification.";
+	}
+
+	// Only goal_question disabled → mention goal_questionnaire only.
+	return "To clarify something with the user mid-work, use goal_questionnaire to ask structured questions. It returns user intent into the conversation. Do NOT use workhorse/reconnaissance tools for clarification.";
+}
+
+/** `abort_goal` instruction. */
+export function abortGoalInstruction(
+	settings: GoalSettings | undefined,
+	cwd: string | undefined,
+): string {
+	return instructionFor("abort_goal", DEFAULT_ABORT_GOAL_INSTRUCTION, settings, cwd);
+}
 
 /** `complete_goal` instruction (verbose paragraph). */
 export function completeGoalInstruction(settings?: GoalSettings, cwd?: string): string {

@@ -256,7 +256,30 @@ export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd
  * are disabled, or references the available tool when only one is disabled.
  */
 function draftingAskLine(settings?: GoalSettings, cwd?: string): string {
-	return "- If the topic is vague, ask one focused question with a recommended default via plain conversation.";
+	const qDisabled = Boolean(settings?.disabledTools?.includes("goal_question"));
+	const qqDisabled = Boolean(settings?.disabledTools?.includes("goal_questionnaire"));
+	const plainLine = "- If the topic is vague, ask one focused question with a recommended default via plain conversation.";
+
+	if (!qDisabled && !qqDisabled) {
+		return [
+			"- Use goal_question or goal_questionnaire to clarify the user's intent when the topic is ambiguous. Both tools return user intent into the conversation.",
+			plainLine,
+		].join("\n");
+	}
+	if (qDisabled && qqDisabled) {
+		return plainLine;
+	}
+	if (!qqDisabled) {
+		return [
+			`- Use goal_questionnaire to clarify the user's intent when the topic is ambiguous.`,
+			plainLine,
+		].join("\n");
+	}
+	// only goal_questionnaire disabled
+	return [
+		`- Use goal_question to clarify the user's intent when the topic is ambiguous.`,
+		plainLine,
+	].join("\n");
 }
 
 function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
@@ -315,6 +338,7 @@ function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, setting
 		"</goal_topic>",
 		"",
 		...commonProtocol,
+		draftingAskLine(settings, cwd),
 		"",
 		...(focus === "sisyphus" ? sisyphusFocusItems : goalFocusItems),
 	].join("\n");

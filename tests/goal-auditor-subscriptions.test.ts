@@ -173,6 +173,7 @@ describe("emitAuditorSubscription — non-blocking + filtering", () => {
 		await new Promise((r) => setTimeout(r, 10));
 		const read = readGoalLedger(ctx);
 		assert.equal(read.events.length, 1);
+		assert.equal(read.events[0].event, "abort");
 	});
 
 	it("swallows ledger write failures (no throw to caller)", async () => {

@@ -88,6 +88,13 @@ describe("resolveAuditorTools — minimal mode", () => {
 		});
 		assert.equal(out.includes("nonexistent"), false);
 	});
+	it("minimal with explicit empty include lists preserves baseline-only behavior", () => {
+		const out = resolveAuditorTools(mainTools, {
+			auditorMode: "minimal",
+			auditorInclude: { tools: [] },
+		});
+		assert.deepEqual(out.sort(), Array.from(AUDITOR_BASELINE_TOOLS).sort());
+	});
 });
 
 describe("resolveAuditorMcp", () => {
@@ -115,12 +122,21 @@ describe("resolveAuditorMcp", () => {
 	it("minimal with no includes returns empty", () => {
 		assert.deepEqual(resolveAuditorMcp(mainMcp, { auditorMode: "minimal" }), []);
 	});
+	it("minimal with an explicit empty include list returns empty", () => {
+		assert.deepEqual(
+			resolveAuditorMcp(mainMcp, { auditorMode: "minimal", auditorInclude: { mcp: [] } }),
+			[],
+		);
+	});
 });
 
 describe("resolveAuditorSkills", () => {
 	const mainSkills = ["project-testing", "deploy-skill", "audit-helper"];
 	it("inherit returns all by default", () => {
 		assert.deepEqual(resolveAuditorSkills(mainSkills, {}), mainSkills);
+	});
+	it("minimal with no includes returns empty", () => {
+		assert.deepEqual(resolveAuditorSkills(mainSkills, { auditorMode: "minimal" }), []);
 	});
 	it("minimal includes from main", () => {
 		assert.deepEqual(
@@ -130,6 +146,15 @@ describe("resolveAuditorSkills", () => {
 			}),
 			["project-testing"],
 		);
+	});
+	it("minimal with an explicit empty include list returns empty", () => {
+		assert.deepEqual(
+			resolveAuditorSkills(mainSkills, { auditorMode: "minimal", auditorInclude: { skills: [] } }),
+			[],
+		);
+	});
+	it("inherit with an explicit empty exclude list preserves all skills", () => {
+		assert.deepEqual(resolveAuditorSkills(mainSkills, { auditorExclude: { skills: [] } }), mainSkills);
 	});
 });
 
@@ -143,6 +168,18 @@ describe("resolveAuditorExtensions", () => {
 			resolveAuditorExtensions(mainExt, { auditorExclude: { extensions: ["cc-safety-net*"] } }),
 			["goal", "gitnexus"],
 		);
+	});
+	it("minimal with no includes returns empty", () => {
+		assert.deepEqual(resolveAuditorExtensions(mainExt, { auditorMode: "minimal" }), []);
+	});
+	it("minimal with an explicit empty include list returns empty", () => {
+		assert.deepEqual(
+			resolveAuditorExtensions(mainExt, { auditorMode: "minimal", auditorInclude: { extensions: [] } }),
+			[],
+		);
+	});
+	it("inherit with an explicit empty exclude list preserves all extensions", () => {
+		assert.deepEqual(resolveAuditorExtensions(mainExt, { auditorExclude: { extensions: [] } }), mainExt);
 	});
 });
 
