@@ -1974,22 +1974,6 @@ Verification contract:
 		continuationTimer = null;
 		continuationScheduledFor = null;
 		syncGoalTools();
-		const settings = loadGoalSettings(ctx.cwd);
-		// Throttle gate: drop the continuation when the cooldown since the last
-		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
-		const { minIntervalMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
-		logGoalTrace(ctx.cwd, {
-			level: "info",
-			step: "auto_run.send.start",
-			goalId,
-			message: "continuation send attempt",
-			lastSentAt: lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null,
-			// goalIdMatch: true when the throttle is fresh for this goal (no prior
-			// send, or the prior send was for this same goal) — false only when the
-			// last send was for a DIFFERENT goal (cross-goal throttle mismatch).
-			goalIdMatch: lastContinuationSentGoalId === null || lastContinuationSentGoalId === goalId,
-			minIntervalMs,
-		});
 		if (!isActionableContinuationGoal(goalId)) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			const skipReason = state.goal ? "not_actionable" : "no_goal";
@@ -2012,6 +1996,25 @@ Verification contract:
 			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.retry", goalId, delayMs: CONTINUATION_IDLE_RETRY_MS, message: "session busy; retrying continuation send" });
 			return;
 		}
+		// Settings + throttle gate are resolved ONLY once the send decision is
+		// actually reached (session idle). The 50ms retry loop above stays free
+		// of disk reads and trace appends while the session is busy.
+		const settings = loadGoalSettings(ctx.cwd);
+		// Throttle gate: drop the continuation when the cooldown since the last
+		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
+		const { minIntervalMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
+		logGoalTrace(ctx.cwd, {
+			level: "info",
+			step: "auto_run.send.start",
+			goalId,
+			message: "continuation send attempt",
+			lastSentAt: lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null,
+			// goalIdMatch: true when the throttle is fresh for this goal (no prior
+			// send, or the prior send was for this same goal) — false only when the
+			// last send was for a DIFFERENT goal (cross-goal throttle mismatch).
+			goalIdMatch: lastContinuationSentGoalId === null || lastContinuationSentGoalId === goalId,
+			minIntervalMs,
+		});
 		continuationQueuedFor = goalId;
 		const goal = state.goal;
 		if (!goal) {
