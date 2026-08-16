@@ -17,6 +17,11 @@ describe("globToRegex", () => {
 	it("anchors fully (no partial match)", () => {
 		assert.equal(globToRegex("foo").test("foobar"), false);
 	});
+	it("reuses the compiled regex object for repeated patterns", () => {
+		const first = globToRegex("cache-test-*");
+		const second = globToRegex("cache-test-*");
+		assert.strictEqual(second, first);
+	});
 });
 
 describe("matchPattern — exact", () => {
@@ -28,6 +33,9 @@ describe("matchPattern — exact", () => {
 	});
 	it("case-sensitive", () => {
 		assert.equal(matchPattern("Write", "write"), false);
+	});
+	it("does not apply regex wildcard behavior to literal patterns", () => {
+		assert.equal(matchPattern("foo.bar", "fooXbar"), false);
 	});
 });
 
@@ -99,6 +107,13 @@ describe("AuditorPatternCache", () => {
 		resolvePattern("a*", ["a", "b", "c"], c);
 		assert.equal(c.size, 2);
 	});
+	it("returns the cached resolution object on repeated lookup", () => {
+		const c = new AuditorPatternCache();
+		const candidates = ["read", "write"];
+		const first = resolvePattern("*", candidates, c);
+		const second = resolvePattern("*", candidates, c);
+		assert.strictEqual(second, first);
+	});
 	it("does not collide when candidate strings contain commas", () => {
 		// ["a,b", "c"] and ["a", "b", "c"] must NOT share a cache entry.
 		const c = new AuditorPatternCache();
@@ -107,6 +122,11 @@ describe("AuditorPatternCache", () => {
 		const r2 = resolvePattern("*", ["a", "b", "c"], c);
 		assert.deepEqual(r2, ["a", "b", "c"]);
 		assert.equal(c.size, 2);
+	});
+	it("exposes stored entries for inspection", () => {
+		const c = new AuditorPatternCache();
+		const result = resolvePattern("a*", ["a", "ab"], c);
+		assert.deepEqual([...c.entries()], [["a*::[\"a\",\"ab\"]", result]]);
 	});
 	it("clear empties the cache", () => {
 		const c = new AuditorPatternCache();

@@ -891,7 +891,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function isActionableContinuationGoal(goalId: string | null | undefined): goalId is string {
-		return !!goalId && state.goal?.id === goalId && state.goal.status === "active" && state.goal.autoContinue;
+		// B3: staleness is an IDENTITY question only. A queued checkpoint for the
+		// focused goal is actionable regardless of transient status/autoContinue
+		// drift (pause races, queue-drain timing, forked sessions). Run-gating
+		// stays with the auto-run chokepoint (queueContinuation), which is the
+		// correct place for status checks — not stale-neutralization, which
+		// injects "[GOAL STALE]" instructions that halt live goals.
+		return !!goalId && state.goal?.id === goalId;
 	}
 
 	function isStaleCheckpointBlockedToolCall(toolName: string): boolean {
@@ -4658,12 +4664,14 @@ promptGuidelines: [
 			const candidate = message as { customType?: string; details?: unknown; content?: unknown };
 			const queuedGoalId = goalEventMessageId(candidate);
 			if (!queuedGoalId) return message;
-			if (
-				state.goal?.id === queuedGoalId
-				&& (state.goal.status === "active")
-				&& state.goal.autoContinue
-				&& latestGoalEventIndex.get(queuedGoalId) === index
-			) return message;
+			if (state.goal?.id === queuedGoalId) {
+				// B3: same-goal entries are NEVER rewritten to "[GOAL STALE]".
+				// Status/autoContinue drift on the focused goal must not neutralize
+				// its own queued checkpoints. Older duplicates for the same goal are
+				// display-suppressed (dedup) without stale text.
+				if (latestGoalEventIndex.get(queuedGoalId) === index) return message;
+				return { ...message, display: false } as typeof message;
+			}
 			changed = true;
 			const details = asRecord(candidate.details) ?? {};
 			return {
@@ -4955,6 +4963,18 @@ promptGuidelines: [
 			// Reconcile from disk to pick up any external state changes before
 			// evaluating whether the checkpoint is actionable.
 			reconcileFocusedGoalFromDisk(ctx);
+			// B3: forked sessions / focus switches hold no in-memory goal while a
+			// queued checkpoint belongs to an OPEN ACTIVE goal on disk. Adopt
+			// focus from the disk pool instead of misclassifying the checkpoint
+			// as stale. (Archived/paused/foreign goals are NOT adopted — those
+			// remain genuinely stale.)
+			if (state.goal?.id !== incomingGoalId) {
+				const adoptable = goalsById.get(incomingGoalId);
+				if (adoptable && adoptable.status === "active") {
+					setFocusedGoalId(incomingGoalId, ctx, "selected");
+					setGoal(adoptable, ctx, false);
+				}
+			}
 			checkpointGoalId = incomingGoalId;
 			clearContinuationState();
 			if (!isActionableContinuationGoal(incomingGoalId)) {

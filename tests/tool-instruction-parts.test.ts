@@ -240,6 +240,35 @@ describe("askUserInstruction", () => {
 		assert.ok(out.length > 0, "should NOT be suppressed when only one tool disabled");
 		assert.ok(out.includes("goal_question"), "must reference the available tool");
 	});
+
+	it("TIP3: both disabled + only goal_questionnaire config → questionnaire replacement returned (RED)", () => {
+		const cwd = tmpCwdWithToolInstruction("goal_questionnaire", "QQ: ask via intercom");
+		try {
+			const settings: GoalSettings = {
+				disabledTools: ["goal_question", "goal_questionnaire"],
+				toolInstructions: { goal_questionnaire: { mode: "local" } },
+			};
+			const out = askUserInstruction(settings, cwd);
+			assert.equal(out, "QQ: ask via intercom");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("GP1/TIP1: tool-less defaults — no instructions to call tools removed from this fork (RED)", () => {
+		assert.ok(
+			!DEFAULT_PAUSE_GOAL_BODY_INSTRUCTION.includes("call pause_goal"),
+			"pause_goal body default must not instruct calling pause_goal (tool not registered in this fork)",
+		);
+		assert.ok(
+			!DEFAULT_ABORT_GOAL_INSTRUCTION.includes("call abort_goal"),
+			"abort_goal default must not instruct calling abort_goal (tool not registered in this fork)",
+		);
+		assert.ok(
+			!/goal_question/.test(DEFAULT_ASK_USER_INSTRUCTION),
+			"ask-user default must not reference goal_question/goal_questionnaire (tools not registered in this fork)",
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------

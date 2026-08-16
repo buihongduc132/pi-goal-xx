@@ -391,7 +391,7 @@ describe("trace: sendQueuedContinuation early returns (auto_run.send.retry / aut
 		assert.equal(e.delayMs, 50, "send.retry carries delayMs (CONTINUATION_IDLE_RETRY_MS)");
 	});
 
-	it("goal paused while continuation armed → send fires and logs skip reason=not_actionable", async () => {
+	it("goal paused while continuation armed → B3: paused goal is still actionable (no not_actionable skip, retry continues)", async () => {
 		writeGoalFile(cwd, { id: "pause-g", autoContinue: true });
 		const { pi: p, ctx } = freshPi(false); // keep the send in retry state
 		await emit(p, ctx, "session_start", { reason: "resume" });
@@ -400,12 +400,17 @@ describe("trace: sendQueuedContinuation early returns (auto_run.send.retry / aut
 		await invokeCommand(p, ctx, "goal-pause", "");
 		await flushContinuation(150);
 
-		const entries = entriesFor("auto_run.send.skip");
-		assert.ok(entries.length >= 1, `expected auto_run.send.skip entry; steps seen: ${stepsSeen()}`);
+		// B3 (main, f3517e1): staleness is an IDENTITY question only. A queued
+		// checkpoint for the focused goal is actionable regardless of transient
+		// status drift (pause races). The send must NOT be skipped with
+		// not_actionable; the retry loop continues until the session is idle.
+		const skips = entriesFor("auto_run.send.skip");
 		assert.ok(
-			entries.some((e) => e.reason === "not_actionable"),
-			`expected skip reason=not_actionable; got: ${JSON.stringify(entries.map((e) => e.reason))}`,
+			!skips.some((e) => e.reason === "not_actionable"),
+			`B3: paused goal must not produce not_actionable skip; got: ${JSON.stringify(skips.map((e) => e.reason))}`,
 		);
+		const retries = entriesFor("auto_run.send.retry");
+		assert.ok(retries.length >= 2, `B3: retry loop must continue after pause; retries seen: ${retries.length}`);
 	});
 
 	it("goal cleared while continuation armed → send fires and logs skip reason=no_goal", async () => {
