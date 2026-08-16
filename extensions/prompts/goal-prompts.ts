@@ -8,6 +8,7 @@ import { resolvePrompt, type PromptConfig } from "../prompt-resolver.ts";
 import {
 	completeGoalInstruction,
 	pauseGoalBodyInstruction,
+	pauseGoalSisyphusBullet,
 	pauseGoalTweakInstruction,
 	askUserInstruction,
 	abortGoalInstruction,
@@ -160,16 +161,12 @@ ${promptSafeObjective(goal.objective)}
 }
 
 /**
- * Synthesize the continuationPrompt blocker line.
- * The agent should state the blocker in its final message and stop.
+ * Sisyphus discipline block. The blocker bullet is tool-aware via
+ * `pauseGoalSisyphusBullet` (suppressed/replaced when pause_goal is disabled).
  */
-function continuationBlockerLine(settings?: GoalSettings, cwd?: string): string {
-	return "If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), state the blocker concisely in your final message and stop — the user will intervene. Do not invent workarounds, do not fake completion, do not silently redefine the objective, and do not use complete_goal=complete to escape a blocker.";
-}
-
-
 export function sisyphusDisciplineBlock(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
 	if (!goal.sisyphus) return "";
+	const sisyphusBullet = pauseGoalSisyphusBullet(settings, cwd);
 	return [
 		"",
 		`[SISYPHUS STYLE goalId=${goal.id}]`,
@@ -179,7 +176,7 @@ export function sisyphusDisciplineBlock(goal: GoalRecord, settings?: GoalSetting
 		"- Follow the user's ordered plan faithfully. Do not add reconnaissance, preflight, or verification steps that the user did not ask for.",
 		"- Work patiently and sequentially. Do not rush to a shortcut just because it looks more efficient.",
 		"- Verify each meaningful action against the objective's own success criteria before moving on.",
-		"- If a step is unclear, blocked, fails, or seems wrong: state the blocker in your final message and stop — do not invent a workaround.",
+		...(sisyphusBullet ? [`- ${sisyphusBullet}`] : []),
 		"- Call complete_goal only after the full objective is actually satisfied. There is no separate step counter or step_complete requirement.",
 	].filter((s) => typeof s === "string" && s.length > 0).join("\n");
 }
@@ -252,6 +249,7 @@ export function goalPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: stri
 export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
 	const taskBlock = taskListBlock(goal, settings);
 	const contractBlock = verificationContractBlock(goal, settings);
+	const askInstruction = askUserInstruction(settings, cwd);
 	const overrideBody = unifiedOverrideBody("goal-continuation", settings, cwd);
 	if (overrideBody) {
 		return [
@@ -287,8 +285,7 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 		"",
 		"Available work tools for pursuing the active goal include write, read, bash, and edit. Use those tools directly for file and shell work; do not call get_goal repeatedly to discover tools.",
 		"",
-"To clarify something with the user mid-work, use plain conversation. The agent does not own a structured question tool; if you need a decision, ask plainly in your message.",
-		"",
+		...(askInstruction ? [askInstruction, ""] : []),
 		"Task skipping restrictions: Only skip a task when the user explicitly asks you to, or when the task directly contradicts a hard constraint (e.g. an impossible requirement). Do NOT autonomously skip tasks to avoid work, or because they look optional, inconvenient, or out of scope. When in doubt, ask the user first. Calling skip_task on an already-skipped task toggles it back to pending (unskip).",
 		"",
 		"[TASK WORKFLOW]",
@@ -316,7 +313,7 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 		"Goal evolution: if the user gives requirements, feedback, or corrections that differ from the goal objective, the goal is stale. The goal objective is immutable — the agent must NOT modify it autonomously. Propose the updated objective concisely and ask the user to run /goal-tweak to revise it. Do NOT mark the goal complete with a stale objective.",
 		"",
 		"If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), state the blocker in your final message and stop — the user will intervene. If the user explicitly asks to abandon/cancel, or the objective is obsolete, impossible, or unsafe to continue, say so in your final message and stop (the user can run /goal-abort or /goal-clear). Do not silently invent workarounds. Do not fake completion. complete_goal=complete is not an escape hatch for blockers.",
-		...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal)] : []),
+		...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal, settings, cwd)] : []),
 		...[customGoalPromptBlock(settings, cwd)].filter((s) => s.length > 0),
 		...[unifiedCustomBlock("goal-continuation", settings, cwd)].filter((s) => s.length > 0),
 	].filter((s) => typeof s === "string" && s.length > 0).join("\n");
@@ -343,6 +340,7 @@ function tweakClarifyLine(settings?: GoalSettings, cwd?: string): string {
 function goalTweakDraftingBase(current: GoalRecord, hint: string, settings?: GoalSettings, cwd?: string): string {
 	const safeHint = promptSafeObjective(hint.trim() || "(no specific hint — ask the user what they want to change)");
 	const sisyphusOn = current.sisyphus;
+	const tweakPauseInstruction = pauseGoalTweakInstruction(settings, cwd);
 	const focusItems = sisyphusOn
 		? [
 			"Tweak focus (this is a Sisyphus goal style) — depending on the hint, clarify changes to:",
@@ -386,6 +384,7 @@ function goalTweakDraftingBase(current: GoalRecord, hint: string, settings?: Goa
 		"- Otherwise ask focused questions (1-3 rounds) to clarify exactly what to change. Prefer numbered options or yes/no.",
 		"- Do NOT call create_goal (a goal already exists).",
 		"- Do NOT call complete_goal.",
+		...(tweakPauseInstruction ? [`- ${tweakPauseInstruction}`] : []),
 		"- Do NOT call complete_goal, step_complete, or any workhorse tool during this drafting interview (you are revising, not executing).",
 		"- Do NOT call step_complete during this drafting interview. It is a legacy compatibility tool, not part of the current Sisyphus design.",
 		"- Do NOT use bash, write, edit, or read to modify the goal file directly. The goal file is managed by the extension.",

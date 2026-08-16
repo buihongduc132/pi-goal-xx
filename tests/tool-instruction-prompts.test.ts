@@ -25,6 +25,7 @@ import {
 import { goalDraftingPrompt } from "../extensions/goal-draft.ts";
 import {
 	DEFAULT_PAUSE_GOAL_BODY_INSTRUCTION,
+	DEFAULT_PAUSE_GOAL_SISYPHUS_BULLET,
 	DEFAULT_ASK_USER_INSTRUCTION,
 	DEFAULT_ABORT_GOAL_INSTRUCTION,
 	DEFAULT_COMPLETE_GOAL_INSTRUCTION,
@@ -163,6 +164,18 @@ describe("continuationPrompt — instruction suppression", () => {
 			"default abort_goal instruction must be omitted in continuationPrompt",
 		);
 	});
+
+	it("no disabledTools → contains default ask-user instruction, NOT stale hardcoded sentence (GREEN: wired)", () => {
+		const out = continuationPrompt(makeGoal({ id: "gK" }));
+		assert.ok(
+			out.includes(DEFAULT_ASK_USER_INSTRUCTION),
+			"default ask-user instruction must be present in continuationPrompt when tools enabled",
+		);
+		assert.ok(
+			!out.includes("does not own a structured question tool"),
+			"stale hardcoded 'no structured question tool' sentence must be gone",
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -170,6 +183,14 @@ describe("continuationPrompt — instruction suppression", () => {
 // ---------------------------------------------------------------------------
 
 describe("sisyphusDisciplineBlock — pause_goal bullet", () => {
+	it("no disabledTools → contains default sisyphus pause_goal bullet (GREEN: wired)", () => {
+		const out = sisyphusDisciplineBlock(makeGoal({ id: "s1", sisyphus: true }));
+		assert.ok(
+			out.includes(DEFAULT_PAUSE_GOAL_SISYPHUS_BULLET),
+			"default sisyphus pause_goal bullet must be present when tool enabled",
+		);
+	});
+
 	it("disabledTools: [pause_goal] → does NOT contain 'call pause_goal' sentence", () => {
 		const settings: GoalSettings = { disabledTools: ["pause_goal"] };
 		const out = sisyphusDisciplineBlock(makeGoal({ id: "s1", sisyphus: true }), settings);
@@ -226,6 +247,14 @@ describe("goalDraftingPrompt — ask-tool clause (G4, S3)", () => {
 // ---------------------------------------------------------------------------
 
 describe("goalTweakDraftingPrompt — pause_goal line (NG1)", () => {
+	it("no disabledTools → contains NG1 'Do NOT call pause_goal' line (GREEN: wired)", () => {
+		const out = goalTweakDraftingPrompt(makeGoal({ id: "gT" }), "make it faster");
+		assert.ok(
+			out.includes("Do NOT call pause_goal during this drafting interview"),
+			"NG1 tweak pause_goal instruction must be present when tool enabled",
+		);
+	});
+
 	it("disabledTools: [pause_goal] → does NOT contain 'Do NOT call pause_goal' line", () => {
 		const settings: GoalSettings = { disabledTools: ["pause_goal"] };
 		const out = goalTweakDraftingPrompt(makeGoal({ id: "gT" }), "make it faster", settings);
