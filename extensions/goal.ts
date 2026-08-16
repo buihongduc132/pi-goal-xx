@@ -549,9 +549,19 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// message, and session_compact.
 	let lastContinuationSentAt: number | null = null;
 	let lastContinuationSentGoalId: string | null = null;
-	function resetContinuationThrottle(): void {
+	function resetContinuationThrottle(reason: "goal_created" | "goal_resumed" | "user_message" | "session_compact" | "auditor_rejection", ctx?: ExtensionContext): void {
+		const previousLastSentAt = lastContinuationSentAt;
+		const previousGoalId = lastContinuationSentGoalId;
 		lastContinuationSentAt = null;
 		lastContinuationSentGoalId = null;
+		if (ctx) logGoalTrace(ctx.cwd, {
+			level: "info",
+			step: "auto_run.throttle.reset",
+			message: `throttle reset: ${reason}`,
+			reason,
+			previousLastSentAt,
+			previousGoalId,
+		});
 	}
 	// Message send mutex: serializes all pi.sendMessage / pi.sendUserMessage
 	// calls so a second send cannot race past isStreaming=true before the
@@ -1959,7 +1969,7 @@ Verification contract:
 		}
 		// Throttle gate: drop the continuation when the cooldown since the last
 		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
-		const { minIntervalMs } = resolveContinuationGate(settings);
+		const { minIntervalMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
 		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
 		if (!shouldSendContinuation(effectiveLastSentAt, Date.now(), minIntervalMs)) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
@@ -1982,8 +1992,21 @@ Verification contract:
 				},
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
-			lastContinuationSentAt = Date.now();
+			const sentAt = Date.now();
+			const previousLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
+			lastContinuationSentAt = sentAt;
 			lastContinuationSentGoalId = goalId;
+			logGoalTrace(ctx.cwd, {
+				level: "info",
+				step: "auto_run.send.success",
+				goalId,
+				message: "continuation sent",
+				lastSentAt: previousLastSentAt,
+				sentAt,
+				nextAllowedAt: sentAt + minIntervalMs,
+				minIntervalMs,
+				source: gateSource,
+			});
 		});
 	}
 
@@ -1992,6 +2015,7 @@ Verification contract:
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		const goalId = state.goal.id;
+		logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue", goalId, message: "continuation queued" });
 		// Unit E task 4.1 — auto-run chokepoint (D6, single uniform guard): ALL
 		// auto-continuation requires THIS session to hold a live focus lock for
 		// the focused goal. No `force`/per-call-site bypass — D6 explicitly
@@ -2025,7 +2049,7 @@ Verification contract:
 		setGoal(goal, ctx, true, "created");
 		beginAccounting();
 		// Fresh goal: force-bypass the continuation cooldown on the first send.
-		resetContinuationThrottle();
+		resetContinuationThrottle("goal_created", ctx);
 		// Reset continuation nudge state — this is a fresh goal.
 		resetGetGoalNudgeState(state.goal?.id);
 		// A goal was committed — clear pending confirmation intent if any.
@@ -2519,7 +2543,7 @@ Verification contract:
 		beginAccounting();
 		resetGetGoalNudgeState(state.goal.id);
 		// Explicit resume: force-bypass the continuation cooldown on the first send.
-		resetContinuationThrottle();
+		resetContinuationThrottle("goal_resumed", ctx);
 		// Unit E task 4.3: acquire the lock before queueContinuation. Reaps
 		// own-stale lock (pause+lapse self-heal). Fails if another live session
 		// holds it → auto-run blocked by the chokepoint.
@@ -4052,7 +4076,7 @@ ${objective}` : objective,
 				// Force-bypass cooldown: rejection is a hard pivot — agent must
 				// address the auditor's objections on the next turn, not wait
 				// for the 10-min throttle window to elapse.
-				resetContinuationThrottle();
+				resetContinuationThrottle("auditor_rejection", ctx);
 				safeFireAndForget(() =>
 					pi.sendMessage<GoalAuditEventDetails>({
 						customType: GOAL_AUDIT_ENTRY,
@@ -4727,7 +4751,7 @@ promptGuidelines: [
 		}
 		// Inbound user message: force-bypass the continuation cooldown so the
 		// next auto-continuation after explicit user interaction always fires.
-		if (raw?.role === "user") resetContinuationThrottle();
+		if (raw?.role === "user") resetContinuationThrottle("user_message", ctx);
 	});
 
 	pi.on("session_start", async (event, ctx) => {
@@ -4811,7 +4835,7 @@ promptGuidelines: [
 		if (state.goal) persist(ctx);
 		beginAccounting();
 		// Session compact: force-bypass the continuation cooldown for the next send.
-		resetContinuationThrottle();
+		resetContinuationThrottle("session_compact", ctx);
 		// Arm a deterministic compaction summary for the next agent turn.
 		// This replaces the generic reminder with artifact-backed state.
 		if (shouldArmPostCompactReminder(state.goal)) {
