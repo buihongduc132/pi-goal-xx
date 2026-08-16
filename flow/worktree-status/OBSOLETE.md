@@ -25,3 +25,22 @@ These branches are redundant copies. Worktrees NOT removed yet (manual prune pen
 |---|---|---|
 | wt-mutation | mutation/pi-goal-xx | WIP — +1009/-108 uncommitted UNIQUE lines (pause-goal instructions, goal-draft tool-awareness, 833 test lines, 2 untracked test files, mutation-verification findings doc). HIGH data-loss risk. Commit/stash before any prune. 8 repo-global stashes survive independently. |
 | wt-continuation-logs | feat/continuation-full-logs | ACTIVE WIP (08-16, today) — 1 commit + 1 untracked test. NOT audited. |
+
+## Pruned batch 2 (2026-08-16, using oracle/scout findings — archive-then-clean-remove, no --force)
+
+| Worktree | Branch | Action |
+|---|---|---|
+| wt-custom-prompt | feat/goal-custom-prompt | removed (untracked cached cleaned via mv-to-/tmp) |
+| wt-persona | feat/brutal-auditor-persona | removed (archival commit on branch first) |
+| wt-resume-by-id | feat/goal-resume-by-id | removed (archival + node_modules quarantined) |
+| wt-tasks-file-path | fix/cli-tasks-file-path | removed |
+
+Remaining: wt-mutation (UNIQUE WIP — keep), wt-continuation-logs (active — keep).
+
+Branch notes:
+- fix/auditor-vc5-vc7: content-merged via `merge -s ours` @2571449, tagged archive/fix-auditor-vc5-vc7; `-D` needs human one-liner (upstream origin branch still exists)
+- feat/goal-custom-prompt, feat/brutal-auditor-persona, feat/goal-resume-by-id, fix/cli-tasks-file-path: origin counterparts exist; local deletion needs human one-liner per branch
+
+## Guard bug record (oracle finding, needs fix in opa-net source)
+branch-target-allowlist (pi-opa-net GROUP G): Config.parseAllowedBranches() returns array; rego `not allowed_branches[target]` string-indexes array → undefined → denies ALL allowlisted branches (incl main). Fix: `branch_allowed(t) if { allowed_branches[_] == t }` in opa-net source → pi-opa-net wrapper → redeploy (never patch node_modules).
+Second: checkout-discard hint says "use git stash" but stash mutations are blocked by user-rules — deadlock. Correct advice: ask human / mv-quarantine.
