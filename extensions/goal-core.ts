@@ -1,3 +1,5 @@
+import { type StopReason } from "./goal-record.ts";
+
 export interface GoalUsageLike {
 	tokensUsed: number;
 	activeSeconds: number;
@@ -9,7 +11,7 @@ export interface GoalDisplayRecordLike {
 	autoContinue: boolean;
 	usage: GoalUsageLike;
 	sisyphus: boolean;
-	stopReason?: "user" | "agent";
+	stopReason?: StopReason;
 }
 
 
@@ -169,6 +171,22 @@ export function statusLabel(goal: Pick<GoalDisplayRecordLike, "sisyphus" | "stat
 	}
 	if (goal.status === "paused" && goal.stopReason === "agent") return `${prefix}paused (agent)`;
 	return `${prefix}${goal.status}`;
+}
+
+/**
+ * Pure continuation throttle gate.
+ *   minIntervalMs 0 → gate disabled → always fire.
+ *   lastSentAtMs null → never sent (or force-bypass) → fire.
+ *   nowMs - lastSentAtMs >= minIntervalMs → fire, else drop.
+ */
+export function shouldSendContinuation(
+	lastSentAtMs: number | null,
+	nowMs: number,
+	minIntervalMs: number,
+): boolean {
+	if (minIntervalMs <= 0) return true;
+	if (lastSentAtMs === null) return true;
+	return nowMs - lastSentAtMs >= minIntervalMs;
 }
 
 export function footerStatus(goal: GoalDisplayRecordLike, liveLockHolder?: boolean): string {

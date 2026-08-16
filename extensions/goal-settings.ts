@@ -42,6 +42,7 @@ import {
 	DEFAULT_ACTIVE_ENV_NAME,
 	DEFAULT_ACTIVE_ENV_TEMPLATE,
 } from "./goal-env-runtime.ts";
+import { logGoalTrace } from "./goal-trace.ts";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Auditor operational mode. */
@@ -52,6 +53,26 @@ export type AuditorPromptMode = "global-local" | "local" | "global-local-merge";
 
 /** Goal prompt resolution mode (supports all unified modes including override). */
 export type GoalPromptMode = PromptMode;
+
+/**
+ * Pause reason — distinguishes which source triggered the pause.
+ * Used for logging and per-reason configuration.
+ */
+export type PauseReason = "escape" | "command" | "abort";
+
+/**
+ * Per-reason pause configuration. Each pause source can be independently
+ * enabled or disabled. When disabled, the pause attempt is silently ignored.
+ * Default: all enabled (backward compatible).
+ */
+export interface PauseConfig {
+	/** Enable/disable Escape key pause. Default true. Env: PI_GOAL_PAUSE_ESCAPE. */
+	escape?: boolean;
+	/** Enable/disable /goal-pause command. Default true. Env: PI_GOAL_PAUSE_COMMAND. */
+	command?: boolean;
+	/** Enable/disable runtime abort pause (legacy, currently removed). Default false. Env: PI_GOAL_PAUSE_ABORT. */
+	abort?: boolean;
+}
 
 /** Resource filter applied to tools / mcp / skills / extensions arrays. */
 export interface AuditorResourceFilter {
@@ -69,6 +90,15 @@ export interface AuditorResourceFilter {
 export interface AuditorSubscription {
 	event: string;
 	mode: "async";
+}
+
+/**
+ * Continuation throttle config. minIntervalMs is the cooldown between
+ * auto-continuation sends; 0 disables the gate (legacy per-turn behavior).
+ * Default 600000 (10 minutes). Env: PI_GOAL_CONTINUATION_MIN_INTERVAL_MS.
+ */
+export interface GoalContinuationConfig {
+	minIntervalMs?: number;
 }
 
 /** Per-command hook configuration. */
@@ -198,8 +228,16 @@ export interface GoalSettings {
 	 * event-sourced goal_events.jsonl ledger or auditor-trace.jsonl.
 	 */
 	logging?: GoalLoggingConfig;
+	/**
+	 * Per-reason pause configuration. Each pause source (escape, command, abort)
+	 * can be independently enabled or disabled. When disabled, the pause attempt
+	 * is silently ignored and logged. Default: all enabled except abort.
+	 * Env overrides: PI_GOAL_PAUSE_ESCAPE, PI_GOAL_PAUSE_COMMAND, PI_GOAL_PAUSE_ABORT.
+	 */
+	pauseConfig?: PauseConfig;
 	disableBlockingTools?: boolean;
 	preAuditHooks?: PreAuditHooksConfig;
+	goalContinuation?: GoalContinuationConfig;
 }
 
 /**
@@ -254,6 +292,16 @@ export const PI_GOAL_FILE_ENV = "PI_GOAL_FILE";
  */
 export const PI_GOAL_AUTO_RESUME_ENV = "PI_GOAL_AUTO_RESUME";
 export const PI_GOAL_DISABLE_BLOCKING_TOOLS_ENV = "PI_GOAL_DISABLE_BLOCKING_TOOLS";
+/** Env override for escape key pause: "true"/"1" enable, "false"/"0" disable. Default enabled. */
+export const PI_GOAL_PAUSE_ESCAPE_ENV = "PI_GOAL_PAUSE_ESCAPE";
+/** Env override for /goal-pause command: "true"/"1" enable, "false"/"0" disable. Default enabled. */
+export const PI_GOAL_PAUSE_COMMAND_ENV = "PI_GOAL_PAUSE_COMMAND";
+/** Env override for runtime abort pause: "true"/"1" enable, "false"/"0" disable. Default disabled. */
+export const PI_GOAL_PAUSE_ABORT_ENV = "PI_GOAL_PAUSE_ABORT";
+/** Env override for the continuation throttle cooldown (ms). 0 disables the gate. */
+export const PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV = "PI_GOAL_CONTINUATION_MIN_INTERVAL_MS";
+/** Default continuation throttle cooldown: 10 minutes. */
+export const DEFAULT_CONTINUATION_MIN_INTERVAL_MS = 600_000;
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -295,6 +343,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
 	"logging",
 	"disableBlockingTools",
 	"preAuditHooks",
+	"goalContinuation",
+	"pauseConfig",
 ]);
 
 const AUDITOR_MODES = new Set<AuditorMode>(["inherit", "minimal"]);
@@ -655,6 +705,35 @@ function asAuditorSubscriptions(value: unknown): AuditorSubscription[] | undefin
 	return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Coerce unknown value into a GoalContinuationConfig. Validates nested keys
+ * (throws on unknown). minIntervalMs must be a non-negative integer
+ * (0 = gate disabled); negative or non-integer values throw.
+ */
+function asGoalContinuationBlock(raw: unknown): GoalContinuationConfig | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const rec = raw as Record<string, unknown>;
+	const knownNested = new Set(["minIntervalMs"]);
+	const unknownNested = Object.keys(rec).filter((k) => !knownNested.has(k));
+	if (unknownNested.length > 0) {
+		throw new Error(
+			`Unknown goalContinuation nested key(s): ${unknownNested.join(", ")}`,
+		);
+	}
+	if (rec.minIntervalMs === undefined) return undefined;
+	let value = rec.minIntervalMs;
+	if (typeof value === "string" && value.trim() !== "") {
+		const n = Number(value);
+		if (Number.isFinite(n)) value = n;
+	}
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+		throw new Error(
+			`Invalid goalContinuation.minIntervalMs: ${String(rec.minIntervalMs)} (must be a non-negative integer; 0 disables the gate)`,
+		);
+	}
+	return { minIntervalMs: value };
+}
+
 /** Parse auditorMode; invalid values fall back to undefined (caller defaults to "inherit"). */
 function asAuditorMode(value: unknown): AuditorMode | undefined {
 	const text = asNonEmptyString(value);
@@ -675,6 +754,28 @@ function asGoalPromptMode(value: unknown): GoalPromptMode | undefined {
 	return text && UNIFIED_PROMPT_MODES.has(text as PromptMode)
 		? (text as GoalPromptMode)
 		: undefined;
+}
+
+/**
+ * Coerce unknown value into PauseConfig. Validates keys; throws on unknown keys.
+ * Default when absent: escape=true, command=true, abort=false.
+ */
+function asPauseConfig(value: unknown): PauseConfig | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const rec = value as Record<string, unknown>;
+	const known = new Set<keyof PauseConfig>(["escape", "command", "abort"]);
+	const unknown = Object.keys(rec).filter((k) => !known.has(k as keyof PauseConfig));
+	if (unknown.length > 0) {
+		throw new Error(`Unknown pauseConfig key(s): ${unknown.join(", ")}`);
+	}
+	const cfg: PauseConfig = {};
+	const escape = asBool(rec.escape);
+	if (escape !== undefined) cfg.escape = escape;
+	const command = asBool(rec.command);
+	if (command !== undefined) cfg.command = command;
+	const abort = asBool(rec.abort);
+	if (abort !== undefined) cfg.abort = abort;
+	return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
 /**
@@ -785,6 +886,10 @@ export function parseGoalSettings(raw: unknown): GoalSettings {
 	if (disableBlockingTools !== undefined) settings.disableBlockingTools = disableBlockingTools;
 	const preAuditHooks = asPreAuditHooksBlock(record.preAuditHooks);
 	if (preAuditHooks) settings.preAuditHooks = preAuditHooks;
+	const goalContinuation = asGoalContinuationBlock(record.goalContinuation);
+	if (goalContinuation) settings.goalContinuation = goalContinuation;
+	const pauseConfig = asPauseConfig(record.pauseConfig);
+	if (pauseConfig) settings.pauseConfig = pauseConfig;
 	// Legacy alias mapping: auditorPrompt/auditorPromptMode → prompts.auditor
 	// ONLY when prompts.auditor is absent (explicit prompts.auditor wins).
 	// Read the raw mode value (not the legacy-validated one) so unified modes
@@ -891,7 +996,56 @@ export function loadGoalSettings(cwd: string, env: NodeJS.ProcessEnv = process.e
 		// disableBlockingTools: default TRUE (hide blockers). Env overrides.
 		disableBlockingTools: asBool(env[PI_GOAL_DISABLE_BLOCKING_TOOLS_ENV]) ?? fileConfig.disableBlockingTools ?? true,
 		preAuditHooks: fileConfig.preAuditHooks,
+		goalContinuation: resolveContinuationGateFromEnv(env, fileConfig.goalContinuation),
+		pauseConfig: resolvePauseConfigFromEnv(env, fileConfig.pauseConfig),
 	};
+}
+
+/**
+ * Resolve effective PauseConfig. Env overrides per-reason. Defaults:
+ *   escape=true, command=true, abort=false (abort path removed; kept for config compat).
+ */
+export function resolvePauseConfigFromEnv(env: NodeJS.ProcessEnv, filePause?: PauseConfig): PauseConfig {
+	return {
+		escape: asBool(env[PI_GOAL_PAUSE_ESCAPE_ENV]) ?? filePause?.escape ?? true,
+		command: asBool(env[PI_GOAL_PAUSE_COMMAND_ENV]) ?? filePause?.command ?? true,
+		abort: asBool(env[PI_GOAL_PAUSE_ABORT_ENV]) ?? filePause?.abort ?? false,
+	};
+}
+
+/**
+ * Resolve the effective continuation throttle config: PI_GOAL_CONTINUATION_MIN_INTERVAL_MS
+ * env overrides file config; default 600000. "0" disables the gate.
+ */
+function resolveContinuationGateFromEnv(
+	env: NodeJS.ProcessEnv,
+	fileContinuation?: GoalContinuationConfig,
+): GoalContinuationConfig {
+	const raw = env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
+	if (typeof raw === "string" && raw.trim() !== "") {
+		const n = Number(raw);
+		if (Number.isInteger(n) && n >= 0) return { minIntervalMs: n };
+	}
+	return { minIntervalMs: fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS };
+}
+
+/** Where the continuation gate value came from. */
+export type ContinuationGateSource = "file" | "env" | "default";
+
+/**
+ * Resolve the effective continuation gate for the current session.
+ * Defaults to the 10-minute cooldown when unconfigured. When `cwd` is given,
+ * emits an `auto_run.gate.resolve` trace entry with the resolved value and its
+ * source (env override > file config > default).
+ */
+export function resolveContinuationGate(settings: GoalSettings, cwd?: string): { minIntervalMs: number; source: ContinuationGateSource } {
+	const envRaw = process.env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
+	const envSet = typeof envRaw === "string" && envRaw.trim() !== "" && Number.isInteger(Number(envRaw)) && Number(envRaw) >= 0;
+	const fileContinuation = cwd !== undefined ? loadGoalSettingsFileConfig(cwd).goalContinuation : undefined;
+	const source: ContinuationGateSource = envSet ? "env" : fileContinuation?.minIntervalMs !== undefined ? "file" : "default";
+	const minIntervalMs = settings.goalContinuation?.minIntervalMs ?? fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
+	if (cwd) logGoalTrace(cwd, { level: "info", step: "auto_run.gate.resolve", minIntervalMs, source, message: `gate: ${minIntervalMs}ms (${source})` });
+	return { minIntervalMs, source };
 }
 
 /**
@@ -994,6 +1148,12 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	}
 	if (auditorTimeoutMs !== undefined) clean.auditorTimeoutMs = auditorTimeoutMs;
 	if (auditorTimeoutFloorMs !== undefined) clean.auditorTimeoutFloorMs = auditorTimeoutFloorMs;
+	if (settings.pauseConfig) {
+		const pcClean = asPauseConfig(settings.pauseConfig);
+		if (pcClean) clean.pauseConfig = pcClean;
+	}
+	const goalContinuation = asGoalContinuationBlock(settings.goalContinuation);
+	if (goalContinuation) clean.goalContinuation = goalContinuation;
 	const configPath = goalSettingsPath(cwd);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	const persisted: Record<string, unknown> = {};
@@ -1033,6 +1193,8 @@ export function saveGoalSettingsFileConfig(cwd: string, settings: GoalSettings):
 	if (clean.preAuditHooks) persisted.preAuditHooks = clean.preAuditHooks;
 	if (clean.auditorTimeoutMs !== undefined) persisted.auditorTimeoutMs = clean.auditorTimeoutMs;
 	if (clean.auditorTimeoutFloorMs !== undefined) persisted.auditorTimeoutFloorMs = clean.auditorTimeoutFloorMs;
+	if (clean.pauseConfig) persisted.pauseConfig = clean.pauseConfig;
+	if (clean.goalContinuation) persisted.goalContinuation = clean.goalContinuation;
 	fs.writeFileSync(configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 	return clean;
 }

@@ -347,7 +347,7 @@ describe("CLI create subcommand", () => {
 			"version", "id", "objective", "status", "autoContinue", "usage",
 			"sisyphus", "createdAt", "updatedAt", "activePath", "archivedPath",
 			"stopReason", "pauseReason", "pauseSuggestedAction", "skipAuditor",
-			"taskList", "verificationContract",
+			"taskList", "verificationContract", "goalHash",
 		]);
 
 		for (const key of Object.keys(parsed)) {

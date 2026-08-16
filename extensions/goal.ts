@@ -8,6 +8,7 @@ import {
 	footerStatus,
 	formatDuration,
 	formatTokenValue,
+	shouldSendContinuation,
 	statusLabel,
 	truncateText,
 } from "./goal-core.ts";
@@ -32,9 +33,12 @@ import {
 	isAuditorEnabledByDefault,
 	loadGoalSettings,
 	loadGoalSettingsFileConfig,
+	resolveContinuationGate,
 	saveGoalSettingsFileConfig,
 	type GoalSettings,
 	type CommandHooksConfig,
+	type PauseConfig,
+	type PauseReason,
 } from "./goal-settings.ts";
 import { emitAuditorSubscription } from "./goal-auditor-subscriptions.ts";
 import { logAuditorTrace } from "./auditor-log.ts";
@@ -72,6 +76,7 @@ import {
 	cloneGoal,
 	createGoal,
 	goalFocusDetails,
+	goalHash,
 	normalizeGoalRecord,
 	normalizeGoalFocusEntry,
 	normalizeTaskItem,
@@ -538,6 +543,26 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let continuationQueuedFor: string | null = null;
 	let continuationScheduledFor: string | null = null;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	// Continuation throttle: timestamp of the last auto-continuation send for
+	// lastContinuationSentGoalId. null = no send recorded (fresh goal / force
+	// bypass) → gate always fires. Reset on goal create/resume, inbound user
+	// message, and session_compact.
+	let lastContinuationSentAt: number | null = null;
+	let lastContinuationSentGoalId: string | null = null;
+	function resetContinuationThrottle(reason: "goal_created" | "goal_resumed" | "user_message" | "session_compact" | "auditor_rejection", ctx?: ExtensionContext): void {
+		const previousLastSentAt = lastContinuationSentAt;
+		const previousGoalId = lastContinuationSentGoalId;
+		lastContinuationSentAt = null;
+		lastContinuationSentGoalId = null;
+		if (ctx) logGoalTrace(ctx.cwd, {
+			level: "info",
+			step: "auto_run.throttle.reset",
+			message: `throttle reset: ${reason}`,
+			reason,
+			previousLastSentAt,
+			previousGoalId,
+		});
+	}
 	// Message send mutex: serializes all pi.sendMessage / pi.sendUserMessage
 	// calls so a second send cannot race past isStreaming=true before the
 	// first's prompt() resolves the streamingBehavior option. Without this,
@@ -857,7 +882,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function isActionableContinuationGoal(goalId: string | null | undefined): goalId is string {
-		return !!goalId && state.goal?.id === goalId && state.goal.status === "active" && state.goal.autoContinue;
+		// B3: staleness is an IDENTITY question only. A queued checkpoint for the
+		// focused goal is actionable regardless of transient status/autoContinue
+		// drift (pause races, queue-drain timing, forked sessions). Run-gating
+		// stays with the auto-run chokepoint (queueContinuation), which is the
+		// correct place for status checks — not stale-neutralization, which
+		// injects "[GOAL STALE]" instructions that halt live goals.
+		return !!goalId && state.goal?.id === goalId;
 	}
 
 	function isStaleCheckpointBlockedToolCall(toolName: string): boolean {
@@ -1573,14 +1604,23 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function pauseActiveGoal(ctx: ExtensionContext): void {
+	function pauseActiveGoal(ctx: ExtensionContext, reason: PauseReason = "command"): void {
 		if (!state.goal || state.goal.status !== "active") return;
+		// Per-reason pause config: skip pause entirely if this reason is disabled.
+		const pauseConfig: PauseConfig = cachedCwd
+			? (loadGoalSettings(cachedCwd).pauseConfig ?? { escape: true, command: true, abort: false })
+			: { escape: true, command: true, abort: false };
+		const isReasonEnabled = reason === "escape" ? pauseConfig.escape : reason === "command" ? pauseConfig.command : pauseConfig.abort;
+		if (isReasonEnabled === false) {
+			logGoalTrace(ctx.cwd, { level: "info", step: "pause.skipped_disabled", goalId: state.goal.id, message: `pause reason '${reason}' disabled by config; goal stays active` });
+			return;
+		}
 		const pausedGoalId = state.goal.id;
-		// User-initiated pause (Esc / aborted turn). Clear any stale agent pause reason.
+		// User-initiated pause (Esc / command). Clear any stale agent pause reason.
 		state.goal = { ...state.goal, autoContinue: false, pauseReason: undefined, pauseSuggestedAction: undefined };
-		stopActiveGoal("paused", "user", ctx);
+		stopActiveGoal("paused", reason, ctx);
 		resetGetGoalNudgeState(pausedGoalId);
-		ctx.ui.notify("Goal paused.", "info");
+		ctx.ui.notify(`Goal paused (${reason}).`, "info");
 	}
 
 	function syncTerminalInputPause(ctx: ExtensionContext): void {
@@ -1597,7 +1637,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				return { consume: true };
 			}
 			if (matchesKey(data, "escape") && state.goal?.status === "active" && state.goal.autoContinue) {
-				pauseActiveGoal(ctx);
+				const pauseConfig = cachedCwd
+					? (loadGoalSettings(cachedCwd).pauseConfig ?? { escape: true, command: true, abort: false })
+					: { escape: true, command: true, abort: false };
+				if (pauseConfig.escape === false) {
+					// Esc pause disabled — let pi handle Esc natively (stops session/turn)
+					return undefined;
+				}
+				pauseActiveGoal(ctx, "escape");
 				return { consume: true };
 			}
 
@@ -1926,6 +1973,15 @@ Verification contract:
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
+		// Throttle gate: drop the continuation when the cooldown since the last
+		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
+		const { minIntervalMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
+		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
+		if (!shouldSendContinuation(effectiveLastSentAt, Date.now(), minIntervalMs)) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.cooldown_drop", goalId, message: `continuation dropped: cooldown ${minIntervalMs}ms since last send` });
+			return;
+		}
 		void serializedSend(() => {
 			pi.sendMessage<GoalEventDetails>(
 				{
@@ -1942,6 +1998,21 @@ Verification contract:
 				},
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
+			const sentAt = Date.now();
+			const previousLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
+			lastContinuationSentAt = sentAt;
+			lastContinuationSentGoalId = goalId;
+			logGoalTrace(ctx.cwd, {
+				level: "info",
+				step: "auto_run.send.success",
+				goalId,
+				message: "continuation sent",
+				lastSentAt: previousLastSentAt,
+				sentAt,
+				nextAllowedAt: sentAt + minIntervalMs,
+				minIntervalMs,
+				source: gateSource,
+			});
 		});
 	}
 
@@ -1950,6 +2021,7 @@ Verification contract:
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		const goalId = state.goal.id;
+		logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue", goalId, message: "continuation queued" });
 		// Unit E task 4.1 — auto-run chokepoint (D6, single uniform guard): ALL
 		// auto-continuation requires THIS session to hold a live focus lock for
 		// the focused goal. No `force`/per-call-site bypass — D6 explicitly
@@ -1982,6 +2054,8 @@ Verification contract:
 		if (verificationContract) goal.verificationContract = verificationContract;
 		setGoal(goal, ctx, true, "created");
 		beginAccounting();
+		// Fresh goal: force-bypass the continuation cooldown on the first send.
+		resetContinuationThrottle("goal_created", ctx);
 		// Reset continuation nudge state — this is a fresh goal.
 		resetGetGoalNudgeState(state.goal?.id);
 		// A goal was committed — clear pending confirmation intent if any.
@@ -2409,12 +2483,25 @@ Verification contract:
 			ctx.ui.notify("Goal is already paused. Use /goal-resume to continue.", "info");
 			return;
 		}
-		pauseActiveGoal(ctx);
+		pauseActiveGoal(ctx, "command");
 	}
 
-	async function handleGoalResume(ctx: ExtensionContext): Promise<void> {
+	async function handleGoalResume(ctx: ExtensionContext, rawArgs?: string): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
 		const open = openGoals();
+		// If rawArgs provided, parse as goal id and focus+resume that specific goal.
+		// Mirrors /goal-focus <short-id> pattern — bypasses the picker.
+		if (rawArgs && rawArgs.trim()) {
+			const targetId = rawArgs.trim();
+			const matched = open.find(g => g.id === targetId || g.id.endsWith(`-${targetId}`));
+			if (!matched) {
+				ctx.ui.notify(`Goal not found: ${targetId}. Use /goal-list to see available goals.`, "warning");
+				return;
+			}
+			if (!(await confirmFocusOverride(ctx, matched.id))) return;
+			setFocusedGoalId(matched.id, ctx, "selected");
+			// Fall through to resume logic with state.goal = matched
+		} else
 		// Always show picker when 2+ open goals (bug fix: let user select)
 		if ((open.length > 1 || !state.goal) && open.length > 0) {
 			const selected = await chooseOpenGoal(ctx, "Resume or focus open goal");
@@ -2461,6 +2548,8 @@ Verification contract:
 		);
 		beginAccounting();
 		resetGetGoalNudgeState(state.goal.id);
+		// Explicit resume: force-bypass the continuation cooldown on the first send.
+		resetContinuationThrottle("goal_resumed", ctx);
 		// Unit E task 4.3: acquire the lock before queueContinuation. Reaps
 		// own-stale lock (pause+lapse self-heal). Fails if another live session
 		// holds it → auto-run blocked by the chokepoint.
@@ -2832,11 +2921,11 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 		},
 	}));
 
-	// /goal-resume: resume a paused goal.
+	// /goal-resume: resume a paused goal. /goal-resume <short-id> resumes a specific open goal.
 	pi.registerCommand("goal-resume", wrapCmdDef("goal-resume", {
-		description: "Resume a paused goal.",
-		handler: async (_rawArgs, ctx) => {
-			await handleGoalResume(ctx);
+		description: "Resume a paused goal. Use /goal-resume <short-id> to resume a specific open goal.",
+		handler: async (rawArgs, ctx) => {
+			await handleGoalResume(ctx, rawArgs);
 		},
 	}));
 
@@ -2868,8 +2957,9 @@ function wrapCmdDef<T extends { handler: (...args: never[]) => unknown }>(name: 
 			const lifecycleHint = view && (view.status === "active" || view.status === "paused")
 				? "\nLifecycle tools: if evidence proves the objective is satisfied, call complete_goal({verificationSummary: \"evidence\"}). If you are blocked, state the blocker in your final message and stop — the user will intervene. For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
 				: "";
+			const hashLine = view ? `\ngoalHash: ${goalHash(view)}` : "";
 			const text = view
-				? `${detailedSummary(view)}${lifecycleHint}${nudge}${otherCount > 0 ? `\nOther open goals: ${otherCount} (human can run /goal-list or /goal-focus)` : ""}`
+				? `${detailedSummary(view)}${lifecycleHint}${hashLine}${nudge}${otherCount > 0 ? `\nOther open goals: ${otherCount} (human can run /goal-list or /goal-focus)` : ""}`
 				: openGoals().length > 0
 					? buildUnfocusedOpenGoalsSummary(openGoals().length)
 					: detailedSummary(null);
@@ -3937,11 +4027,10 @@ ${objective}` : objective,
 						details: goalDetails(state.goal),
 					};
 				} else {
-					// ── Continue working → pause the goal ──────────────
-					pauseActiveGoal(ctx);
+					// ── Continue working → goal stays active (upstream parity) ──
 					setTurnStopped(state.goal?.id ?? null);
 					return {
-						content: [{ type: "text", text: "Goal paused — user chose to continue working after skipping audit." }],
+						content: [{ type: "text", text: "Audit aborted — the goal remains active and work continues." }],
 						details: state.goal ? goalDetails(state.goal) : undefined,
 					};
 				}
@@ -3986,10 +4075,15 @@ ${objective}` : objective,
 					auditor.model ? `Auditor model: ${auditor.model}${auditor.thinkingLevel ? `:${auditor.thinkingLevel}` : ""}` : undefined,
 					auditor.gateFailure ? `Pre-audit gate failed: ${auditor.gateFailure}` : undefined,
 					auditor.error ? `Auditor error: ${auditor.error}` : undefined,
+					auditor.earlyDisapprovalReason ? `Early disapproval reason: ${auditor.earlyDisapprovalReason}` : undefined,
 					"",
 					auditor.output || "Auditor produced no approval marker.",
 				].filter((line): line is string => line !== undefined).join("\n");
-				safeFireAndForget(() => 
+				// Force-bypass cooldown: rejection is a hard pivot — agent must
+				// address the auditor's objections on the next turn, not wait
+				// for the 10-min throttle window to elapse.
+				resetContinuationThrottle("auditor_rejection", ctx);
+				safeFireAndForget(() =>
 					pi.sendMessage<GoalAuditEventDetails>({
 						customType: GOAL_AUDIT_ENTRY,
 						content: rejectionText,
@@ -4496,12 +4590,14 @@ promptGuidelines: [
 			const candidate = message as { customType?: string; details?: unknown; content?: unknown };
 			const queuedGoalId = goalEventMessageId(candidate);
 			if (!queuedGoalId) return message;
-			if (
-				state.goal?.id === queuedGoalId
-				&& (state.goal.status === "active")
-				&& state.goal.autoContinue
-				&& latestGoalEventIndex.get(queuedGoalId) === index
-			) return message;
+			if (state.goal?.id === queuedGoalId) {
+				// B3: same-goal entries are NEVER rewritten to "[GOAL STALE]".
+				// Status/autoContinue drift on the focused goal must not neutralize
+				// its own queued checkpoints. Older duplicates for the same goal are
+				// display-suppressed (dedup) without stale text.
+				if (latestGoalEventIndex.get(queuedGoalId) === index) return message;
+				return { ...message, display: false } as typeof message;
+			}
 			changed = true;
 			const details = asRecord(candidate.details) ?? {};
 			return {
@@ -4586,10 +4682,10 @@ promptGuidelines: [
 		const tokens = assistantTurnTokens(message);
 		accountProgress(ctx, { completedTurnTokens: tokens });
 
-		if (isAbortedAssistantMessage(message)) {
-			pauseActiveGoal(ctx);
-			return;
-		}
+		// Abort-tolerant: runtime aborts (timeouts, MCP slow init, provider 5xx,
+		// tool-execution cancels) must NOT pause the goal. Only explicit user Esc
+		// (syncTerminalInputPause) or /goal-pause pauses. Fall through; agent_end
+		// queues the next continuation so the auto-run chain survives.
 		refreshGoalDisplayFromDisk(ctx);
 
 		// Archive a goal that was marked complete by complete_goal but whose archival
@@ -4656,11 +4752,14 @@ promptGuidelines: [
 	});
 
 	pi.on("message_end", async (event, ctx) => {
-		if (isAbortedAssistantMessage(event.message)) pauseActiveGoal(ctx);
+		// Abort-tolerant: runtime aborts do not pause (see turn_end note).
 		const raw = asRecord(event.message);
 		if (raw?.role === "custom" && raw.customType === GOAL_EVENT_ENTRY && raw.display !== false) {
 			return { message: { ...event.message, display: false } as typeof event.message };
 		}
+		// Inbound user message: force-bypass the continuation cooldown so the
+		// next auto-continuation after explicit user interaction always fires.
+		if (raw?.role === "user") resetContinuationThrottle("user_message", ctx);
 	});
 
 	pi.on("session_start", async (event, ctx) => {
@@ -4743,6 +4842,8 @@ promptGuidelines: [
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (state.goal) persist(ctx);
 		beginAccounting();
+		// Session compact: force-bypass the continuation cooldown for the next send.
+		resetContinuationThrottle("session_compact", ctx);
 		// Arm a deterministic compaction summary for the next agent turn.
 		// This replaces the generic reminder with artifact-backed state.
 		if (shouldArmPostCompactReminder(state.goal)) {
@@ -4788,6 +4889,18 @@ promptGuidelines: [
 			// Reconcile from disk to pick up any external state changes before
 			// evaluating whether the checkpoint is actionable.
 			reconcileFocusedGoalFromDisk(ctx);
+			// B3: forked sessions / focus switches hold no in-memory goal while a
+			// queued checkpoint belongs to an OPEN ACTIVE goal on disk. Adopt
+			// focus from the disk pool instead of misclassifying the checkpoint
+			// as stale. (Archived/paused/foreign goals are NOT adopted — those
+			// remain genuinely stale.)
+			if (state.goal?.id !== incomingGoalId) {
+				const adoptable = goalsById.get(incomingGoalId);
+				if (adoptable && adoptable.status === "active") {
+					setFocusedGoalId(incomingGoalId, ctx, "selected");
+					setGoal(adoptable, ctx, false);
+				}
+			}
 			checkpointGoalId = incomingGoalId;
 			clearContinuationState();
 			if (!isActionableContinuationGoal(incomingGoalId)) {
@@ -4894,10 +5007,10 @@ promptGuidelines: [
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		if (endedGoalId && state.goal.id !== endedGoalId) return;
 		if (!reconcileFocusedGoalFromDisk(ctx)) return;
-		if (hasAbortedAssistantMessage(event.messages) || ctx.signal?.aborted) {
-			pauseActiveGoal(ctx);
-			return;
-		}
+		// Abort-tolerant: runtime aborts / ctx.signal.aborted do NOT pause.
+		// Only explicit user Esc (syncTerminalInputPause) or /goal-pause pauses.
+		// Fall through to queueContinuation so the auto-run chain survives
+		// transient runtime aborts (timeouts, MCP init, provider failures).
 		persist(ctx);
 		updateUI(ctx);
 		queueContinuation(ctx);
