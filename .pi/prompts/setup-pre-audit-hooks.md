@@ -6,7 +6,7 @@ argument-hint: "<purpose> [script-path]"
 
 $ARGUMENTS
 
-Make the cmd in the goal-xx about setting up the pre-audit hooks;
+Setting up the pre-audit hooks in goal-xx.
 
 ---
 
