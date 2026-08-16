@@ -627,6 +627,25 @@ describe("trace: resolveContinuationGate (auto_run.gate.resolve)", () => {
 			`expected source=file + minIntervalMs=4242; got: ${JSON.stringify(entries.map(({ source, minIntervalMs }) => ({ source, minIntervalMs })))}`,
 		);
 	});
+
+	it("logs source=file when the file EXPLICITLY sets minIntervalMs=600000 (equal to default — no value-diff inference)", async () => {
+		// RED first (cubic PR#68 R2-1): value-diff inference reported "default"
+		// here because 600000 === DEFAULT_CONTINUATION_MIN_INTERVAL_MS. True
+		// provenance must report "file" for an explicit file setting.
+		fs.writeFileSync(
+			path.join(cwd, ".pi", "pi-goal-xx-settings.json"),
+			JSON.stringify({ goalContinuation: { minIntervalMs: 600_000 } }),
+		);
+		const { pi: p, ctx } = freshPi();
+		await createGoalAndFlush(p, ctx, "objective: gate explicit-default file trace. success criteria: done.");
+
+		const entries = entriesFor("auto_run.gate.resolve");
+		assert.ok(entries.length >= 1, `expected auto_run.gate.resolve entry; steps seen: ${stepsSeen()}`);
+		assert.ok(
+			entries.some((e) => e.source === "file" && e.minIntervalMs === 600_000),
+			`expected source=file + minIntervalMs=600000 for explicit file setting; got: ${JSON.stringify(entries.map(({ source, minIntervalMs }) => ({ source, minIntervalMs })))}`,
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------

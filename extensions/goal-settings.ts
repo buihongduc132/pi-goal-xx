@@ -1039,16 +1039,20 @@ export type ContinuationGateSource = "file" | "env" | "default";
  * source (env override > file config > default).
  */
 export function resolveContinuationGate(settings: GoalSettings, cwd?: string): { minIntervalMs: number; source: ContinuationGateSource } {
-	// Resolve entirely from the already-resolved `settings` argument — NO second
-	// disk read. loadGoalSettings populates goalContinuation.minIntervalMs from
-	// (env > file > default), so the resolved value alone determines the gate.
-	// The only ambiguity is an explicit file value exactly equal to the default,
-	// which is behaviorally identical and reported as "default".
+	// TRUE provenance, not value-diff inference: env presence wins; otherwise a
+	// single file-config read (performed ONLY at gate resolution — which happens
+	// once the send decision is reached, never inside the 50ms busy retry loop)
+	// reports whether the file set minIntervalMs explicitly. An explicit file
+	// value that happens to equal the default is still `source: "file"`.
+	// The effective VALUE comes from the already-resolved `settings` argument
+	// (env > file > default merged by loadGoalSettings) — no second guess.
 	const envRaw = process.env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
 	const envSet = typeof envRaw === "string" && envRaw.trim() !== "" && Number.isInteger(Number(envRaw)) && Number(envRaw) >= 0;
-	const settingsMin = settings.goalContinuation?.minIntervalMs;
-	const source: ContinuationGateSource = envSet ? "env" : settingsMin !== undefined && settingsMin !== DEFAULT_CONTINUATION_MIN_INTERVAL_MS ? "file" : "default";
-	const minIntervalMs = settingsMin ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
+	const fileSet = cwd
+		? loadGoalSettingsFileConfig(cwd, process.env).goalContinuation?.minIntervalMs !== undefined
+		: false;
+	const source: ContinuationGateSource = envSet ? "env" : fileSet ? "file" : "default";
+	const minIntervalMs = settings.goalContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
 	if (cwd) logGoalTrace(cwd, { level: "info", step: "auto_run.gate.resolve", minIntervalMs, source, message: `gate: ${minIntervalMs}ms (${source})` }, resolveTraceSink(settings.logging));
 	return { minIntervalMs, source };
 }

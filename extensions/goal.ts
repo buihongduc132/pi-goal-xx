@@ -570,7 +570,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			reason,
 			previousLastSentAt,
 			previousGoalId,
-		});
+		}, traceSink());
 	}
 	// Message send mutex: serializes all pi.sendMessage / pi.sendUserMessage
 	// calls so a second send cannot race past isStreaming=true before the
@@ -1571,7 +1571,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 					message: next === null
 						? "continuation send skipped: goal cleared while send armed"
 						: "continuation send skipped: focus moved to a different goal while send armed",
-				});
+				}, traceSink());
 			}
 			clearContinuationState();
 			clearActiveAccounting();
@@ -1973,11 +1973,10 @@ Verification contract:
 	function sendQueuedContinuation(ctx: ExtensionContext, goalId: string): void {
 		continuationTimer = null;
 		continuationScheduledFor = null;
-		syncGoalTools();
 		if (!isActionableContinuationGoal(goalId)) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			const skipReason = state.goal ? "not_actionable" : "no_goal";
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.skip", goalId, reason: skipReason, message: skipReason === "no_goal" ? "continuation send skipped: no goal in memory" : "continuation send skipped: goal no longer actionable (paused/stopped/focus moved)" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.skip", goalId, reason: skipReason, message: skipReason === "no_goal" ? "continuation send skipped: no goal in memory" : "continuation send skipped: goal no longer actionable (paused/stopped/focus moved)" }, traceSink());
 			return;
 		}
 
@@ -1993,13 +1992,19 @@ Verification contract:
 			continuationScheduledFor = goalId;
 			continuationTimer = setTimeout(() => sendQueuedContinuation(ctx, goalId), CONTINUATION_IDLE_RETRY_MS);
 			continuationTimer.unref?.();
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.retry", goalId, delayMs: CONTINUATION_IDLE_RETRY_MS, message: "session busy; retrying continuation send" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.retry", goalId, delayMs: CONTINUATION_IDLE_RETRY_MS, message: "session busy; retrying continuation send" }, traceSink());
 			return;
 		}
 		// Settings + throttle gate are resolved ONLY once the send decision is
 		// actually reached (session idle). The 50ms retry loop above stays free
-		// of disk reads and trace appends while the session is busy.
+		// of disk reads and trace appends while the session is busy. That
+		// includes syncGoalTools — it performs several loadGoalSettings disk
+		// reads internally, so it must run AFTER the idle gate, never before.
+		syncGoalTools();
 		const settings = loadGoalSettings(ctx.cwd);
+		// Keep the cached trace sink fresh for the pre-decision lifecycle sites
+		// (send.skip / send.retry above use traceSink() and must honor level=off).
+		cachedTraceSink = resolveTraceSink(settings.logging);
 		// Throttle gate: drop the continuation when the cooldown since the last
 		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
 		const { minIntervalMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
@@ -2014,18 +2019,18 @@ Verification contract:
 			// last send was for a DIFFERENT goal (cross-goal throttle mismatch).
 			goalIdMatch: lastContinuationSentGoalId === null || lastContinuationSentGoalId === goalId,
 			minIntervalMs,
-		});
+		}, traceSink());
 		continuationQueuedFor = goalId;
 		const goal = state.goal;
 		if (!goal) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.skip", goalId, reason: "no_goal", message: "continuation send skipped: no goal in memory" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.send.skip", goalId, reason: "no_goal", message: "continuation send skipped: no goal in memory" }, traceSink());
 			return;
 		}
 		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
 		if (!shouldSendContinuation(effectiveLastSentAt, Date.now(), minIntervalMs)) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.cooldown_drop", goalId, message: `continuation dropped: cooldown ${minIntervalMs}ms since last send` });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.cooldown_drop", goalId, message: `continuation dropped: cooldown ${minIntervalMs}ms since last send` }, traceSink());
 			return;
 		}
 		void serializedSend(() => {
@@ -2058,30 +2063,30 @@ Verification contract:
 				nextAllowedAt: sentAt + minIntervalMs,
 				minIntervalMs,
 				source: gateSource,
-			});
+			}, traceSink());
 		});
 	}
 
 
 	function queueContinuation(ctx: ExtensionContext, reason: ContinuationQueueReason): void {
 		if (confirmationIntent !== null) {
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal?.id, reason: "confirmation_intent", message: "continuation queue skipped: /goals confirmation intent active" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal?.id, reason: "confirmation_intent", message: "continuation queue skipped: /goals confirmation intent active" }, traceSink());
 			return;
 		}
 		if (tweakDraftingFor !== null) {
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal?.id, reason: "tweak_drafting", message: "continuation queue skipped: /goal-tweak draft in progress" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal?.id, reason: "tweak_drafting", message: "continuation queue skipped: /goal-tweak draft in progress" }, traceSink());
 			return;
 		}
 		if (!state.goal || state.goal.status !== "active") {
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal?.id, reason: "not_active", message: "continuation queue skipped: no active focused goal" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal?.id, reason: "not_active", message: "continuation queue skipped: no active focused goal" }, traceSink());
 			return;
 		}
 		if (!state.goal.autoContinue) {
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal.id, reason: "no_auto_continue", message: "continuation queue skipped: goal has autoContinue disabled" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId: state.goal.id, reason: "no_auto_continue", message: "continuation queue skipped: goal has autoContinue disabled" }, traceSink());
 			return;
 		}
 		const goalId = state.goal.id;
-		logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue", goalId, reason, message: "continuation queued" });
+		logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue", goalId, reason, message: "continuation queued" }, traceSink());
 		// Unit E task 4.1 — auto-run chokepoint (D6, single uniform guard): ALL
 		// auto-continuation requires THIS session to hold a live focus lock for
 		// the focused goal. No `force`/per-call-site bypass — D6 explicitly
@@ -2092,11 +2097,11 @@ Verification contract:
 		// on a previously-held lock (session_compact, session_tree) correctly
 		// block when the lease lapsed — auto-run is NOT fail-open (D7).
 		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
-			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.blocked", goalId, message: "continuation blocked: focus lock not held by self" });
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.blocked", goalId, message: "continuation blocked: focus lock not held by self" }, traceSink());
 			return;
 		}
 		if (continuationQueuedFor === goalId || continuationScheduledFor === goalId) {
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId, reason: "already_queued", message: "continuation queue skipped: already queued/scheduled for this goal" });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.queue.skip", goalId, reason: "already_queued", message: "continuation queue skipped: already queued/scheduled for this goal" }, traceSink());
 			return;
 		}
 		clearContinuationTimer();
@@ -2104,7 +2109,7 @@ Verification contract:
 		try {
 			delay = ctx.isIdle() && !ctx.hasPendingMessages() ? 0 : CONTINUATION_IDLE_RETRY_MS;
 		} catch (err) {
-			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.idle_check_failed", goalId, message: "ctx.isIdle()/hasPendingMessages() threw", error: err instanceof Error ? err.message : String(err) });
+			logGoalTrace(ctx.cwd, { level: "warn", step: "auto_run.idle_check_failed", goalId, message: "ctx.isIdle()/hasPendingMessages() threw", error: err instanceof Error ? err.message : String(err) }, traceSink());
 			return;
 		}
 		continuationScheduledFor = goalId;
