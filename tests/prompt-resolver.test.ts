@@ -212,15 +212,21 @@ describe("resolvePrompt — append mode", () => {
 		assert.equal(r.injected, undefined);
 	});
 
-	it("append + inline → hardcoded + inline block", () => {
+	it("append + inline → inline REPLACES default (inline always wins as override)", () => {
+		// UNIFIED INLINE SEMANTICS: inline always wins as override regardless
+		// of mode. This closes the off+inline divergence between the generic
+		// resolver and loadAuditorPrompt. Spec: 'Inline always wins regardless
+		// of mode'. File-sourced bodies remain mode-dependent.
 		const r = resolvePrompt(
 			KEY,
-			{ mode: "append", inline: "INLINE-APPENDED" },
+			{ mode: "append", inline: "INLINE-WINS" },
 			sb.cwd,
 			DEFAULT_PROMPT,
 			{ home: sb.home },
 		);
-		assert.equal(r.final, `${DEFAULT_PROMPT}\n\nINLINE-APPENDED`);
+		assert.equal(r.final, "INLINE-WINS");
+		assert.equal(r.source, "inline");
+		assert.ok(!r.final.includes(DEFAULT_PROMPT), "hardcodedDefault dropped under inline");
 	});
 
 	it("append + merge of both files → hardcoded + merged block", () => {
@@ -341,7 +347,10 @@ describe("resolvePrompt — global-local (default mode)", () => {
 // 6. Inline always wins regardless of mode
 // ---------------------------------------------------------------------------
 describe("resolvePrompt — inline always wins regardless of mode", () => {
-	it("inline + both files + global-local-merge → final contains inline, neither file", () => {
+	it("inline + both files + global-local-merge → inline REPLACES default (unified semantics)", () => {
+		// UNIFIED INLINE SEMANTICS: inline always wins as override — replaces
+		// hardcodedDefault entirely, drops all file bodies. Mode is irrelevant
+		// when inline is present (spec: 'Inline always wins regardless of mode').
 		sb.writeGlobal("GLOBAL-BODY");
 		sb.writeLocal("LOCAL-BODY");
 		const r = resolvePrompt(
@@ -351,9 +360,11 @@ describe("resolvePrompt — inline always wins regardless of mode", () => {
 			DEFAULT_PROMPT,
 			{ home: sb.home },
 		);
-		assert.equal(r.final, `${DEFAULT_PROMPT}\n\nX`);
+		assert.equal(r.final, "X");
+		assert.equal(r.source, "inline");
 		assert.ok(!r.final.includes("GLOBAL-BODY"));
 		assert.ok(!r.final.includes("LOCAL-BODY"));
+		assert.ok(!r.final.includes(DEFAULT_PROMPT), "hardcodedDefault dropped under inline");
 	});
 
 	it("inline + override mode → final = inline, hardcodedDefault dropped", () => {
@@ -369,9 +380,9 @@ describe("resolvePrompt — inline always wins regardless of mode", () => {
 		assert.equal(r.final, "INLINE");
 	});
 
-	it("inline + off mode → inline STILL wins (off only suppresses file injection)", () => {
-		sb.writeGlobal("G");
-		sb.writeLocal("L");
+	it("inline + off mode → inline STILL wins as override (unified semantics)", () => {
+		sb.writeGlobal("GLOBALFILEBODY");
+		sb.writeLocal("LOCALFILEBODY");
 		const r = resolvePrompt(
 			KEY,
 			{ mode: "off", inline: "INLINE-DESPITE-OFF" },
@@ -379,8 +390,14 @@ describe("resolvePrompt — inline always wins regardless of mode", () => {
 			DEFAULT_PROMPT,
 			{ home: sb.home },
 		);
-		// Inline always wins per spec — off suppresses FILE injection only.
-		assert.equal(r.final, `${DEFAULT_PROMPT}\n\nINLINE-DESPITE-OFF`);
+		// UNIFIED INLINE SEMANTICS: inline always wins as override — replaces
+		// hardcodedDefault entirely. Off suppresses FILE injection only;
+		// inline bypasses the mode check entirely. Matches loadAuditorPrompt.
+		assert.equal(r.final, "INLINE-DESPITE-OFF");
+		assert.equal(r.source, "inline");
+		assert.ok(!r.final.includes(DEFAULT_PROMPT), "hardcodedDefault dropped under inline+off");
+		assert.ok(!r.final.includes("GLOBALFILEBODY"), "global file not consulted under off");
+		assert.ok(!r.final.includes("LOCALFILEBODY"), "local file not consulted under off");
 	});
 
 	it("blank inline is ignored (treated as absent)", () => {
@@ -673,7 +690,9 @@ describe("resolvePrompt — empty / whitespace file handling", () => {
 // 12. cwd-safe behavior: empty-string cwd
 // ---------------------------------------------------------------------------
 describe("resolvePrompt — empty-string cwd safety", () => {
-	it("empty cwd + inline → inline still resolves (no fs context needed)", () => {
+	it("empty cwd + inline → inline resolves as override (unified semantics, no fs context needed)", () => {
+		// UNIFIED INLINE SEMANTICS: inline always wins as override regardless
+		// of mode. No fs context needed — inline bypasses the mode check.
 		const r = resolvePrompt(
 			KEY,
 			{ mode: "global-local", inline: "INLINE-NO-CWD" },
@@ -681,7 +700,9 @@ describe("resolvePrompt — empty-string cwd safety", () => {
 			DEFAULT_PROMPT,
 			{ home: sb.home },
 		);
-		assert.equal(r.final, `${DEFAULT_PROMPT}\n\nINLINE-NO-CWD`);
+		assert.equal(r.final, "INLINE-NO-CWD");
+		assert.equal(r.source, "inline");
+		assert.ok(!r.final.includes(DEFAULT_PROMPT), "hardcodedDefault dropped under inline");
 	});
 
 	it("empty cwd + global file → global still resolves via home", () => {

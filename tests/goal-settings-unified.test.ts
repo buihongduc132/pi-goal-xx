@@ -200,7 +200,11 @@ test("legacy alias resolves behaviorally via resolvePrompt", async () => {
 	const parsed = loadGoalSettingsFileConfig(cwd);
 	const audCfg = (parsed.prompts as Record<string, PromptConfig>).auditor;
 	const r = resolvePrompt("auditor", audCfg, cwd, "DEFAULT", { home: os.tmpdir() });
-	assert.equal(r.final, "DEFAULT\n\nLEGACY-INLINE");
+	// UNIFIED INLINE SEMANTICS: inline always wins as override — replaces
+	// hardcodedDefault entirely. Legacy auditorPrompt maps to inline, so
+	// it bypasses the mode check. Matches loadAuditorPrompt short-circuit.
+	assert.equal(r.final, "LEGACY-INLINE");
+	assert.equal(r.source, "inline");
 });
 
 // ---------------------------------------------------------------------------
