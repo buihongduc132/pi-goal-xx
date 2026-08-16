@@ -71,8 +71,17 @@ function isToolDisabled(settings: GoalSettings | undefined, toolName: string): b
 }
 
 /**
+ * Both ask tools (goal_question + goal_questionnaire) disabled?
+ * Callers use this to suppress "ask tool" advertising when no ask tool
+ * can actually be called.
+ */
+export function bothAskToolsDisabled(settings: GoalSettings | undefined): boolean {
+	return isToolDisabled(settings, "goal_question") && isToolDisabled(settings, "goal_questionnaire");
+}
+
+/**
  * Resolve a per-tool replacement via `toolInstructions[name]`.
- * Returns the resolved text (source !== "none") or "" when no replacement
+ * Returns the resolved text (source !== "none") or "" when no replacement 
  * resolves (empty file, no inline, mode "off" with no inline).
  *
  * Resolution key: `tool-instruction-<toolName>` (file: `tool-instruction-<toolName>.md`).

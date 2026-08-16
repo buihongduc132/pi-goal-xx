@@ -278,6 +278,24 @@ describe("goalTweakDraftingPrompt — ask-tool reference (S3)", () => {
 			"goalTweakDraftingPrompt must reference the available ask tool",
 		);
 	});
+
+	it("both ask tools disabled + replacement resolves → NO ask-tool prefix (R4-1)", () => {
+		const settings: GoalSettings = {
+			disabledTools: ["goal_question", "goal_questionnaire"],
+			toolInstructions: {
+				goal_question: { inline: "Use the internal clarification channel XYZ for questions." },
+			},
+		} as unknown as GoalSettings;
+		const out = goalTweakDraftingPrompt(makeGoal({ id: "gR4" }), "tweak it", settings);
+		assert.ok(
+			!out.includes("or by using the ask tool"),
+			"must NOT advertise an ask tool when both ask tools are disabled (R4-1)",
+		);
+		assert.ok(
+			out.includes("internal clarification channel XYZ"),
+			"configured replacement must still be emitted",
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------

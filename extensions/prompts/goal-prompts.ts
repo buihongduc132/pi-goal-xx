@@ -11,6 +11,7 @@ import {
 	pauseGoalSisyphusBullet,
 	pauseGoalTweakInstruction,
 	askUserInstruction,
+	bothAskToolsDisabled,
 	DEFAULT_ASK_USER_INSTRUCTION,
 	abortGoalInstruction,
 } from "./tool-instruction-parts.ts";
@@ -344,9 +345,12 @@ function tweakClarifyLine(settings?: GoalSettings, cwd?: string): string {
 		// Plain-conversation default: this fork registers no ask tools by
 		// default and the default instruction says to ask in the agent's own
 		// message, so an "ask tool" clause would contradict it.
-		const prefix = askInstruction === DEFAULT_ASK_USER_INSTRUCTION
-			? "- You MAY clarify via plain chat:"
-			: "- You MAY clarify via plain chat or by using the ask tool:";
+		// Both-disabled with a replacement: no ask tool can be called, so an
+		// "ask tool" clause would advertise an uncallable tool (PR #67 R4-1).
+		const askToolCallable = !bothAskToolsDisabled(settings) && askInstruction !== DEFAULT_ASK_USER_INSTRUCTION;
+		const prefix = askToolCallable
+			? "- You MAY clarify via plain chat or by using the ask tool:"
+			: "- You MAY clarify via plain chat:";
 		// Default and single-tool texts already end with the guard; configured
 		// replacements may omit it — append when missing, never duplicate.
 		const instruction = askInstruction.includes(WORKHORSE_CLARIFY_GUARD)
