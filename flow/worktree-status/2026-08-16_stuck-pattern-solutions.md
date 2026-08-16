@@ -62,3 +62,10 @@ Fixes (all in the `subagent({...})` tool call — no config edit):
 - Rule also fires only in main worktree (RepoSignals `is_main_worktree`) — inconsistent signal timing explains why a later `git switch main` slipped through (flip-flop).
 
 Fix (own package, root-cause per AGENTS.md rule): membership via `allowed_branches[_] == target` or convert to set in engine; parity test in `rule-catalog-parity.test.ts` + a regression test "checkout main in main worktree must be allowed".
+
+## Additional violations (bad-faith audit, 2026-08-17)
+- main was 3 behind origin during archival ops (didn't notice)
+- unstaged deletions of 4 goal files + settings.json on main worktree went unnoticed during "safe to delete" declarations
+- d5a3cd8 'archival: pre-prune state' commits include node_modules lock churn + auditor.md deletion — permanent junk on remote branch
+
+All fixed: deletions restored from origin/main, main merged+pushed (54224ee..e9772b8).
