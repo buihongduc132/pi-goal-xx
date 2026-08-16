@@ -348,7 +348,7 @@ describe("goalDraftingPrompt draftingAskLine disabled-tool paths", () => {
 		assert.ok(!/Use goal_questionnaire/.test(p));
 	});
 
-	it("GD1: both disabled + goal_question inline replacement → replacement reaches drafting prompt (RED)", () => {
+	it("GD1: both disabled + goal_question inline replacement → replacement reaches drafting prompt", () => {
 		const settings = {
 			disabledTools: ["goal_question", "goal_questionnaire"],
 			toolInstructions: { goal_question: { inline: "Use intercom to clarify." } },

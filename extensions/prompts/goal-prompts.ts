@@ -11,6 +11,7 @@ import {
 	pauseGoalSisyphusBullet,
 	pauseGoalTweakInstruction,
 	askUserInstruction,
+	DEFAULT_ASK_USER_INSTRUCTION,
 	abortGoalInstruction,
 } from "./tool-instruction-parts.ts";
 import type { GoalRecord, GoalTask, TaskStatus } from "../goal-record.ts";
@@ -334,14 +335,26 @@ export function goalTweakDraftingPrompt(current: GoalRecord, hint: string, setti
  * Clarification line for goalTweakDraftingPrompt.
  * References the available ask tool(s) based on settings.
  */
+/** Workhorse-clarification guard shared by ask-tool instruction texts. */
+const WORKHORSE_CLARIFY_GUARD = "Do NOT use workhorse/reconnaissance tools for clarification.";
+
 function tweakClarifyLine(settings?: GoalSettings, cwd?: string): string {
 	const askInstruction = askUserInstruction(settings, cwd);
 	if (askInstruction) {
-		// askUserInstruction already ends with the workhorse-clarification
-		// sentence — do NOT append it again (GP4: duplicate sentence).
-		return `- You MAY clarify via plain chat or by using the ask tool: ${askInstruction}`;
+		// Plain-conversation default: this fork registers no ask tools by
+		// default and the default instruction says to ask in the agent's own
+		// message, so an "ask tool" clause would contradict it.
+		const prefix = askInstruction === DEFAULT_ASK_USER_INSTRUCTION
+			? "- You MAY clarify via plain chat:"
+			: "- You MAY clarify via plain chat or by using the ask tool:";
+		// Default and single-tool texts already end with the guard; configured
+		// replacements may omit it — append when missing, never duplicate.
+		const instruction = askInstruction.includes(WORKHORSE_CLARIFY_GUARD)
+			? askInstruction
+			: `${askInstruction} ${WORKHORSE_CLARIFY_GUARD}`;
+		return `${prefix} ${instruction}`;
 	}
-	return "- You MAY clarify via plain chat. Do NOT use workhorse/reconnaissance tools for clarification.";
+	return `- You MAY clarify via plain chat. ${WORKHORSE_CLARIFY_GUARD}`;
 }
 
 function goalTweakDraftingBase(current: GoalRecord, hint: string, settings?: GoalSettings, cwd?: string): string {
