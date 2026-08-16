@@ -42,6 +42,7 @@ import {
 	DEFAULT_ACTIVE_ENV_NAME,
 	DEFAULT_ACTIVE_ENV_TEMPLATE,
 } from "./goal-env-runtime.ts";
+import { logGoalTrace } from "./goal-trace.ts";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Auditor operational mode. */
@@ -1028,12 +1029,23 @@ function resolveContinuationGateFromEnv(
 	return { minIntervalMs: fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS };
 }
 
+/** Where the continuation gate value came from. */
+export type ContinuationGateSource = "file" | "env" | "default";
+
 /**
  * Resolve the effective continuation gate for the current session.
- * Defaults to the 10-minute cooldown when unconfigured.
+ * Defaults to the 10-minute cooldown when unconfigured. When `cwd` is given,
+ * emits an `auto_run.gate.resolve` trace entry with the resolved value and its
+ * source (env override > file config > default).
  */
-export function resolveContinuationGate(settings: GoalSettings): { minIntervalMs: number } {
-	return { minIntervalMs: settings.goalContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS };
+export function resolveContinuationGate(settings: GoalSettings, cwd?: string): { minIntervalMs: number; source: ContinuationGateSource } {
+	const envRaw = process.env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
+	const envSet = typeof envRaw === "string" && envRaw.trim() !== "" && Number.isInteger(Number(envRaw)) && Number(envRaw) >= 0;
+	const fileContinuation = cwd !== undefined ? loadGoalSettingsFileConfig(cwd).goalContinuation : undefined;
+	const source: ContinuationGateSource = envSet ? "env" : fileContinuation?.minIntervalMs !== undefined ? "file" : "default";
+	const minIntervalMs = settings.goalContinuation?.minIntervalMs ?? fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
+	if (cwd) logGoalTrace(cwd, { level: "info", step: "auto_run.gate.resolve", minIntervalMs, source, message: `gate: ${minIntervalMs}ms (${source})` });
+	return { minIntervalMs, source };
 }
 
 /**
