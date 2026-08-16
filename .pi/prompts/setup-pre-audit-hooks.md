@@ -4,6 +4,8 @@ description: Configure pi-goal-xx pre-audit hooks — gate scripts, pass criteri
 argument-hint: "<purpose> [script-path]"
 ---
 
+$ARGUMENTS
+
 Make the cmd in the goal-xx about setting up the pre-audit hooks;
 
 ---
