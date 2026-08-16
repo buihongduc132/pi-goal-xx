@@ -19,12 +19,12 @@ These branches are redundant copies. Worktrees NOT removed yet (manual prune pen
 | wt-auditor-fix | fix/auditor-vc5-vc7 | ALL IN MAIN (VC5/VC7 via PR#10; dirty files = PR#12 verbatim) | worktree removed; dirty state committed archival on branch (42f6b6e+1); branch kept — `git branch -D fix/auditor-vc5-vc7` manual (guard blocks -D) |
 | pi-goal-xx-baseline | detached 3e18789 | SUPERSEDED (strict auditor.md ships globally at ~/.pi/pi-goal-xx/prompts/auditor.md; main a0ea402 deleted in-repo copy) | worktree removed; commit tagged `baseline-3e18789` |
 
-## STILL ALIVE (do NOT delete)
+## STILL ALIVE (updated 2026-08-17)
 
 | Worktree | Branch | Status |
 |---|---|---|
-| wt-mutation | mutation/pi-goal-xx | WIP — +1009/-108 uncommitted UNIQUE lines (pause-goal instructions, goal-draft tool-awareness, 833 test lines, 2 untracked test files, mutation-verification findings doc). HIGH data-loss risk. Commit/stash before any prune. 8 repo-global stashes survive independently. |
-| wt-continuation-logs | feat/continuation-full-logs | ACTIVE WIP (08-16, today) — 1 commit + 1 untracked test. NOT audited. |
+| wt-mutation | mutation/pi-goal-xx | NOW COMMITTED (aee9aa4 + 7ba3bf7) and PR #67 OPEN — cubic review round in progress. |
+| wt-continuation-logs | feat/continuation-full-logs | COMMITTED (b5126ec + 725fc19 + 0ced78c + 69458e3) and PR #68 OPEN — cubic review round in progress. |
 
 ## Pruned batch 2 (2026-08-16, using oracle/scout findings — archive-then-clean-remove, no --force)
 
