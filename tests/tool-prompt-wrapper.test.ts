@@ -52,6 +52,32 @@ describe("wrapToolDefinition — append mode", () => {
 		const out = wrapToolDefinition(tool, settings, cwd);
 		assert.ok(out.promptGuidelines!.some((g) => g.includes("GL-RULE")));
 	});
+	it("adds guidelines when tool has none", () => {
+		const cwd = tmpCwdWithToolPrompt("tool-create-goal", "GL-RULE");
+		const settings = { prompts: { "tool-create-goal": { mode: "append" } } } as GoalSettings;
+		const out = wrapToolDefinition({ name: "create-goal", promptSnippet: "s" }, settings, cwd);
+		assert.deepEqual(out.promptGuidelines, ["[PI GOAL CUSTOM PROMPT key=tool-create-goal source=local]\nGL-RULE"]);
+	});
+
+	it("does not mutate input and preserves extra properties", () => {
+		const cwd = tmpCwdWithToolPrompt("tool-get-goal", "EXTRA");
+		const settings = { prompts: { "tool-get-goal": { mode: "append" } } } as GoalSettings;
+		const tool = { name: "get-goal", promptSnippet: "orig", promptGuidelines: ["base"], extra: "preserved" };
+		const out = wrapToolDefinition(tool, settings, cwd);
+		assert.notStrictEqual(out, tool);
+		assert.equal(out.extra, "preserved");
+		assert.deepEqual(tool, { name: "get-goal", promptSnippet: "orig", promptGuidelines: ["base"], extra: "preserved" });
+	});
+
+	it("uses configured prompts directory", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-tool-custom-"));
+		const promptsDir = "custom-prompts";
+		fs.mkdirSync(path.join(cwd, promptsDir), { recursive: true });
+		fs.writeFileSync(path.join(cwd, promptsDir, "tool-get-goal.md"), "CUSTOM-DIR", "utf8");
+		const settings = { promptsDir, prompts: { "tool-get-goal": { mode: "append" } } } as GoalSettings;
+		const out = wrapToolDefinition({ name: "get-goal", promptSnippet: "orig" }, settings, cwd);
+		assert.match(out.promptSnippet!, /CUSTOM-DIR/);
+	});
 });
 
 describe("wrapToolDefinition — override mode", () => {

@@ -89,6 +89,44 @@ describe("buildGoalCompactSummary", () => {
 		assert.match(out, /- completion requested$/m);
 	});
 
+	it("renders pause, resume, and tweak events individually", () => {
+		const cases: Array<[GoalLedgerEvent, RegExp]> = [
+			[{ type: "goal_paused", goalId: "g-1", reason: "blocked", at: AT }, /- paused: blocked/],
+			[{ type: "goal_resumed", goalId: "g-1", reason: "unblocked", at: AT }, /- resumed: unblocked/],
+			[{ type: "goal_tweaked", goalId: "g-1", changeSummary: "narrowed scope", at: AT }, /- tweaked: narrowed scope/],
+		];
+		for (const [event, expected] of cases) {
+			assert.match(buildGoalCompactSummary(makeGoal(), [event]), expected);
+		}
+	});
+
+	it("renders audit report only for disapproved verdict", () => {
+		const approved = buildGoalCompactSummary(makeGoal(), [
+			{ type: "audit_result", goalId: "g-1", verdict: "approved", report: "approved details", at: AT },
+		]);
+		const disapproved = buildGoalCompactSummary(makeGoal(), [
+			{ type: "audit_result", goalId: "g-1", verdict: "disapproved", report: "missing evidence", at: AT },
+		]);
+		assert.match(approved, /- auditor approved$/m);
+		assert.doesNotMatch(approved, /approved details/);
+		assert.match(disapproved, /- auditor disapproved: missing evidence/);
+	});
+
+	it("renders each optional pause field only when present", () => {
+		const reasonOnly = buildGoalCompactSummary(makeGoal({ pauseReason: "blocked" }), []);
+		const actionOnly = buildGoalCompactSummary(makeGoal({ pauseSuggestedAction: "ask user" }), []);
+		assert.match(reasonOnly, /Pause reason: blocked/);
+		assert.doesNotMatch(reasonOnly, /Suggested action:/);
+		assert.match(actionOnly, /Suggested action: ask user/);
+		assert.doesNotMatch(actionOnly, /Pause reason:/);
+	});
+
+	it("renders unknown event without adding an event line", () => {
+		const unknown = { type: "future_event", goalId: "g-1", at: AT } as unknown as GoalLedgerEvent;
+		const out = buildGoalCompactSummary(makeGoal(), [unknown]);
+		assert.match(out, /Recent events:/);
+		assert.doesNotMatch(out, /future_event/);
+	});
 	it("renders approved audit result without report suffix", () => {
 		const events: GoalLedgerEvent[] = [
 			{ type: "audit_result", goalId: "g-1", verdict: "approved", report: "great", at: AT },
@@ -125,6 +163,8 @@ describe("buildCompactionSummary", () => {
 		assert.match(out, /\[NO GOALS\]/);
 		assert.match(out, /\[INSTRUCTION\]/);
 		assert.match(out, /Continue from the focused goal/);
+		assert.doesNotMatch(out, /Stryker was here/);
+		assert.doesNotMatch(out, /\[TERMINAL GOALS — 0 completed or aborted\]/);
 	});
 
 	it("renders FOCUSED GOAL section", () => {
@@ -150,6 +190,7 @@ describe("buildCompactionSummary", () => {
 		});
 		assert.match(out, /\[OTHER OPEN GOALS — 3 total\]/);
 		assert.match(out, /- o0 — active — open 0/);
+		assert.doesNotMatch(out, /- o2 — active — open 2/);
 		assert.match(out, /... and 1 more/);
 	});
 
@@ -169,6 +210,27 @@ describe("buildCompactionSummary", () => {
 		assert.match(out, /- ab1 — aborted at/);
 	});
 
+	it("does not render no-goals block when open goals exist", () => {
+		const out = buildCompactionSummary({
+			goalsById: new Map([["open", makeGoal({ id: "open" })]]),
+			focusedGoalId: null,
+			ledgerEvents: [],
+		});
+		assert.doesNotMatch(out, /\[NO GOALS\]/);
+	});
+
+	it("does not render no-goals block when only terminal goals exist", () => {
+		const out = buildCompactionSummary({
+			goalsById: new Map(),
+			focusedGoalId: null,
+			ledgerEvents: [{ type: "goal_completed", goalId: "done", at: AT }],
+		});
+		assert.doesNotMatch(out, /\[NO GOALS\]/);
+		assert.match(out, /\[TERMINAL GOALS — 1 completed or aborted\]/);
+		assert.doesNotMatch(out, /\[TERMINAL GOALS — 0 completed or aborted\]/);
+		assert.doesNotMatch(out, /Stryker was here/);
+	});
+
 	it("excludes completed goals from OTHER OPEN GOALS", () => {
 		const map = new Map<string, GoalRecord>([
 			["f", makeGoal({ id: "f" })],
@@ -179,7 +241,29 @@ describe("buildCompactionSummary", () => {
 			focusedGoalId: "f",
 			ledgerEvents: [],
 		});
-		// No other-open block since the only non-focused goal is complete
 		assert.doesNotMatch(out, /OTHER OPEN GOALS/);
+	});
+
+	it("ignores missing focused goal ids", () => {
+		const out = buildCompactionSummary({
+			goalsById: new Map([["open", makeGoal({ id: "open" })]]),
+			focusedGoalId: "missing",
+			ledgerEvents: [],
+		});
+		assert.doesNotMatch(out, /\[FOCUSED GOAL\]/);
+		assert.match(out, /- open — active/);
+	});
+
+	it("does not report zero overflow at the open-goal cap", () => {
+		const out = buildCompactionSummary({
+			goalsById: new Map([
+				["a", makeGoal({ id: "a" })],
+				["b", makeGoal({ id: "b" })],
+			]),
+			focusedGoalId: null,
+			ledgerEvents: [],
+			capOpenGoals: 2,
+		});
+		assert.doesNotMatch(out, /\.\.\. and 0 more/);
 	});
 });

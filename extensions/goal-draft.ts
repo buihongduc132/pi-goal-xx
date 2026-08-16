@@ -2,6 +2,7 @@ import type { GoalTask } from "./goal-record.ts";
 import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
 import type { GoalSettings } from "./goal-settings.ts";
 import { expandContractTemplates } from "./contract-templating.ts";
+import { askUserInstruction } from "./prompts/tool-instruction-parts.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
 
@@ -256,7 +257,37 @@ export function resolveGoalDraftingBlock(settings: GoalSettings | undefined, cwd
  * are disabled, or references the available tool when only one is disabled.
  */
 function draftingAskLine(settings?: GoalSettings, cwd?: string): string {
-	return "- If the topic is vague, ask one focused question with a recommended default via plain conversation.";
+	const qDisabled = Boolean(settings?.disabledTools?.includes("goal_question"));
+	const qqDisabled = Boolean(settings?.disabledTools?.includes("goal_questionnaire"));
+	const plainLine = "- If the topic is vague, ask one focused question with a recommended default via plain conversation.";
+
+	if (!qDisabled && !qqDisabled) {
+		return [
+			"- Use goal_question or goal_questionnaire to clarify the user's intent when the topic is ambiguous. Both tools return user intent into the conversation.",
+			plainLine,
+		].join("\n");
+	}
+	if (qDisabled && qqDisabled) {
+		// GD1: honor a configured replacement (goal_question key first, then
+		// goal_questionnaire — same fallback order as askUserInstruction) so
+		// toolInstructions replacements are not silently discarded.
+		const replacement = askUserInstruction(settings, cwd);
+		if (replacement) {
+			return [`- ${replacement}`, plainLine].join("\n");
+		}
+		return plainLine;
+	}
+	if (!qqDisabled) {
+		return [
+			`- Use goal_questionnaire to clarify the user's intent when the topic is ambiguous.`,
+			plainLine,
+		].join("\n");
+	}
+	// only goal_questionnaire disabled
+	return [
+		`- Use goal_question to clarify the user's intent when the topic is ambiguous.`,
+		plainLine,
+	].join("\n");
 }
 
 function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, settings?: GoalSettings, cwd?: string): string {
@@ -315,6 +346,7 @@ function goalDraftingPromptBase(topic: string, focus: GoalDraftingFocus, setting
 		"</goal_topic>",
 		"",
 		...commonProtocol,
+		draftingAskLine(settings, cwd),
 		"",
 		...(focus === "sisyphus" ? sisyphusFocusItems : goalFocusItems),
 	].join("\n");

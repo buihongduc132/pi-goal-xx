@@ -49,24 +49,22 @@ export function resolveAuditorTools(
 	cache?: AuditorPatternCache,
 ): string[] {
 	const mode = resolveAuditorMode(settings);
-	const progressTool = "report_auditor_progress";
-	const earlyDisapproveTool = EARLY_DISAPPROVE_TOOL_NAME;
 	if (mode === "minimal") {
-		const include = settings?.auditorInclude?.tools ?? [];
-		const added = include.length > 0 ? applyPatterns(include, mainTools, cache) : [];
-		const merged = new Set<string>([...AUDITOR_BASELINE_TOOLS, ...added]);
-		merged.add(progressTool);
-		merged.add(earlyDisapproveTool);
-		return Array.from(merged);
+		const include = settings?.auditorInclude?.tools;
+		if (include === undefined || include.length === 0) {
+			return Array.from(AUDITOR_BASELINE_TOOLS);
+		}
+		const added = applyPatterns(include, mainTools, cache);
+		return Array.from(new Set([...AUDITOR_BASELINE_TOOLS, ...added]));
 	}
 	// inherit
-	const source = mainTools.length > 0 ? mainTools : [...AUDITOR_BASELINE_TOOLS];
-	const exclude = settings?.auditorExclude?.tools ?? [];
-	const filtered = exclude.length > 0 ? excludePatterns(exclude, source, cache) : [...source];
-	const merged = new Set<string>(filtered);
-	merged.add(progressTool); // never strip the progress reporter
-	merged.add(earlyDisapproveTool); // never strip the fail-fast disapproval tool
-	return Array.from(merged);
+	const source = mainTools.length > 0 ? mainTools : Array.from(AUDITOR_BASELINE_TOOLS);
+	const exclude = settings?.auditorExclude?.tools;
+	if (exclude === undefined || exclude.length === 0) {
+		return Array.from(new Set([...source, "report_auditor_progress", EARLY_DISAPPROVE_TOOL_NAME]));
+	}
+	const filtered = excludePatterns(exclude, source, cache);
+	return Array.from(new Set([...filtered, "report_auditor_progress", EARLY_DISAPPROVE_TOOL_NAME]));
 }
 
 /** Resolve MCP server names (inherit excludes; minimal includes from main). */
@@ -77,11 +75,13 @@ export function resolveAuditorMcp(
 ): string[] {
 	const mode = resolveAuditorMode(settings);
 	if (mode === "minimal") {
-		const include = settings?.auditorInclude?.mcp ?? [];
-		return include.length > 0 ? applyPatterns(include, mainMcp, cache) : [];
+		const include = settings?.auditorInclude?.mcp;
+		if (include === undefined || include.length === 0) return [];
+		return applyPatterns(include, mainMcp, cache);
 	}
-	const exclude = settings?.auditorExclude?.mcp ?? [];
-	return exclude.length > 0 ? excludePatterns(exclude, mainMcp, cache) : [...mainMcp];
+	const exclude = settings?.auditorExclude?.mcp;
+	if (exclude === undefined || exclude.length === 0) return Array.from(mainMcp);
+	return excludePatterns(exclude, mainMcp, cache);
 }
 
 /** Resolve skill names (inherit excludes; minimal includes from main). */
@@ -92,11 +92,13 @@ export function resolveAuditorSkills(
 ): string[] {
 	const mode = resolveAuditorMode(settings);
 	if (mode === "minimal") {
-		const include = settings?.auditorInclude?.skills ?? [];
-		return include.length > 0 ? applyPatterns(include, mainSkills, cache) : [];
+		const include = settings?.auditorInclude?.skills;
+		if (include === undefined || include.length === 0) return [];
+		return applyPatterns(include, mainSkills, cache);
 	}
-	const exclude = settings?.auditorExclude?.skills ?? [];
-	return exclude.length > 0 ? excludePatterns(exclude, mainSkills, cache) : [...mainSkills];
+	const exclude = settings?.auditorExclude?.skills;
+	if (exclude === undefined || exclude.length === 0) return Array.from(mainSkills);
+	return excludePatterns(exclude, mainSkills, cache);
 }
 
 /** Resolve extension names (inherit excludes; minimal includes from main). */
@@ -107,11 +109,13 @@ export function resolveAuditorExtensions(
 ): string[] {
 	const mode = resolveAuditorMode(settings);
 	if (mode === "minimal") {
-		const include = settings?.auditorInclude?.extensions ?? [];
-		return include.length > 0 ? applyPatterns(include, mainExtensions, cache) : [];
+		const include = settings?.auditorInclude?.extensions;
+		if (include === undefined || include.length === 0) return [];
+		return applyPatterns(include, mainExtensions, cache);
 	}
-	const exclude = settings?.auditorExclude?.extensions ?? [];
-	return exclude.length > 0 ? excludePatterns(exclude, mainExtensions, cache) : [...mainExtensions];
+	const exclude = settings?.auditorExclude?.extensions;
+	if (exclude === undefined || exclude.length === 0) return Array.from(mainExtensions);
+	return excludePatterns(exclude, mainExtensions, cache);
 }
 
 /** Result of resolving all four resource lists at once. */

@@ -109,11 +109,62 @@ describe("expandContractTemplates — snippet expansion", () => {
 		assert.equal(r.expanded, "AABB");
 	});
 
-	it("undefined settings defaults contractTemplates=true → still expands", () => {
-		sb.writeLocal("x", "BODY");
-		const r = expandContractTemplates("{{x}}", sb.cwd, undefined);
-		// When settings undefined, contractTemplates defaults true → still expands.
-		// (Disabled only via explicit false or env.) Adjust if design differs.
-		assert.equal(r.expanded, "BODY");
+	it("treats whitespace-only snippets as unresolved and warns", () => {
+		sb.writeLocal("blank", " \n\t ");
+		const r = expandContractTemplates("{{blank}}", sb.cwd, { home: sb.home } as GoalSettings);
+		assert.equal(r.expanded, "{{blank}}");
+		assert.deepEqual(r.warnings, ["blank"]);
+	});
+
+	it("preserves one warning when an unresolved snippet is repeated", () => {
+		const r = expandContractTemplates("{{missing}}/{{missing}}", sb.cwd, { home: sb.home } as GoalSettings);
+		assert.equal(r.expanded, "{{missing}}/{{missing}}");
+		assert.deepEqual(r.warnings, ["missing"]);
+	});
+
+	it("preserves placeholder when snippet path cannot be read (EISDIR)", () => {
+		// A DIRECTORY named `directory-snippet.md` so readFileSync(directory-snippet.md)
+		// throws EISDIR — the actual unreadable-path branch (a directory without
+		// the .md suffix would only hit ENOENT, same as the missing case).
+		const unreadableName = "directory-snippet";
+		fs.mkdirSync(path.join(sb.cwd, ".pi/pi-goal-xx/contracts", `${unreadableName}.md`));
+		const r = expandContractTemplates(`{{${unreadableName}}}`, sb.cwd, { home: sb.home } as GoalSettings);
+		assert.equal(r.expanded, `{{${unreadableName}}}`);
+		assert.deepEqual(r.warnings, [unreadableName]);
+	});
+
+	it("resolves repeated successful snippets from the cache", () => {
+		sb.writeLocal("cached", "CACHED-BODY");
+		const r = expandContractTemplates("{{cached}}/{{cached}}", sb.cwd, { home: sb.home } as GoalSettings);
+		assert.equal(r.expanded, "CACHED-BODY/CACHED-BODY");
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("env override disables expansion without warnings", () => {
+		sb.writeLocal("env-disabled", "BODY");
+		const previous = process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES;
+		process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES = "true";
+		try {
+			const r = expandContractTemplates("{{env-disabled}}", sb.cwd, { home: sb.home } as GoalSettings);
+			assert.equal(r.expanded, "{{env-disabled}}");
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			if (previous === undefined) delete process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES;
+			else process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES = previous;
+		}
+	});
+
+	it("undefined settings still expands a local snippet", () => {
+		sb.writeLocal("default-settings", "BODY");
+		const previous = process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES;
+		delete process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES;
+		try {
+			const r = expandContractTemplates("{{default-settings}}", sb.cwd, undefined);
+			assert.equal(r.expanded, "BODY");
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			if (previous === undefined) delete process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES;
+			else process.env.PI_GOAL_DISABLE_CONTRACT_TEMPLATES = previous;
+		}
 	});
 });

@@ -7,6 +7,13 @@ import { customGoalPromptBlock } from "../goal-prompt-resolver.ts";
 import { resolvePrompt, type PromptConfig } from "../prompt-resolver.ts";
 import {
 	completeGoalInstruction,
+	pauseGoalBodyInstruction,
+	pauseGoalSisyphusBullet,
+	pauseGoalTweakInstruction,
+	askUserInstruction,
+	bothAskToolsDisabled,
+	DEFAULT_ASK_USER_INSTRUCTION,
+	abortGoalInstruction,
 } from "./tool-instruction-parts.ts";
 import type { GoalRecord, GoalTask, TaskStatus } from "../goal-record.ts";
 import { goalHash } from "../goal-record.ts";
@@ -157,16 +164,12 @@ ${promptSafeObjective(goal.objective)}
 }
 
 /**
- * Synthesize the continuationPrompt blocker line.
- * The agent should state the blocker in its final message and stop.
+ * Sisyphus discipline block. The blocker bullet is tool-aware via
+ * `pauseGoalSisyphusBullet` (suppressed/replaced when pause_goal is disabled).
  */
-function continuationBlockerLine(settings?: GoalSettings, cwd?: string): string {
-	return "If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), state the blocker concisely in your final message and stop — the user will intervene. Do not invent workarounds, do not fake completion, do not silently redefine the objective, and do not use complete_goal=complete to escape a blocker.";
-}
-
-
 export function sisyphusDisciplineBlock(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
 	if (!goal.sisyphus) return "";
+	const sisyphusBullet = pauseGoalSisyphusBullet(settings, cwd);
 	return [
 		"",
 		`[SISYPHUS STYLE goalId=${goal.id}]`,
@@ -176,7 +179,7 @@ export function sisyphusDisciplineBlock(goal: GoalRecord, settings?: GoalSetting
 		"- Follow the user's ordered plan faithfully. Do not add reconnaissance, preflight, or verification steps that the user did not ask for.",
 		"- Work patiently and sequentially. Do not rush to a shortcut just because it looks more efficient.",
 		"- Verify each meaningful action against the objective's own success criteria before moving on.",
-		"- If a step is unclear, blocked, fails, or seems wrong: state the blocker in your final message and stop — do not invent a workaround.",
+		...(sisyphusBullet ? [`- ${sisyphusBullet}`] : []),
 		"- Call complete_goal only after the full objective is actually satisfied. There is no separate step counter or step_complete requirement.",
 	].filter((s) => typeof s === "string" && s.length > 0).join("\n");
 }
@@ -204,46 +207,52 @@ export function goalPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: stri
 			customGoalPromptBlock(settings, cwd),
 		].filter((s) => typeof s === "string" && s.length > 0).join("\n");
 	}
-	return `[PI GOAL ACTIVE goalId=${goal.id}]${taskInjection}${contractInjection}
-Status: ${statusLabel(goal)}
-
-${untrustedObjectiveBlock(goal)}
-
-Available work tools for pursuing the active goal include write, read, bash, and edit. Use those tools directly for file and shell work; do not call get_goal repeatedly to discover tools.
-
-If the objective naturally decomposes into trackable milestones, you MUST include the task list in the tasks parameter of propose_goal_draft so the user can accept both goal and tasks in a single confirmation dialog. Do NOT propose the goal without tasks and then call propose_task_list separately. For simple single-step goals, no task list is required.
-
-If a task list already exists, only restructure it when the user asks or the goal structurally changes — do not restructure autonomously.
-
-After goal creation, propose_task_list is still available for user-requested task additions or structural changes.
-
-[TASK WORKFLOW]
-Use tasks and subtasks as PROGRESS TRACKERS during your work — not as a post-hoc checklist to batch-mark at the end. As soon as you finish a concrete unit of work that corresponds to a task or subtask, call complete_task immediately with evidence of what you did. The system enforces that all subtasks must be completed (or skipped) before their parent task can be completed, so work from the leaves up: finish subtasks first, then mark the parent task complete. If a subtask is blocked and cannot proceed, state the blocker in your final message and stop rather than skipping it. This keeps the task list accurate and prevents the "all work done, now batch-mark everything" pattern.
-
-To clarify something with the user mid-work (e.g. when the user's spec changes and you need to confirm before updating the goal), use plain conversation. The agent does not own a structured question tool; if you need a decision, ask plainly in your message.
-
-Task skipping restrictions: Only skip a task when the user explicitly asks you to, or when the task directly contradicts a hard constraint (e.g. an impossible requirement). Do NOT autonomously skip tasks to avoid work, or because they look optional, inconvenient, or out of scope. When in doubt, ask the user first. Calling skip_task on an already-skipped task toggles it back to pending (unskip).
-
-Keep this goal in force until it is actually achieved. Do not pause for confirmation just because a phase, chapter, file, or checklist item is finished. At each natural stopping point, compare every explicit requirement with concrete evidence from the workspace/session. If the objective is complete, call complete_goal and provide a verificationSummary; complete_goal will launch an independent pi auditor agent and only archive if that auditor returns <approved/>. If it is not complete, choose the next concrete action and do it.
-
-The completion auditor is independent and semantic, not a paperwork checklist. It may inspect files and command output, and it will reject scaffold-only, alpha, template, proxy-metric, or weakly verified completions with <disapproved/>.
-
-Before marking any sub-item as complete (including ✅ checkmarks in your output), verify thoroughly against the goal's success criteria and any verification contract. Only mark items as done when you have concrete evidence — not intent or partial progress.
-
-If the user presses Escape during a completion audit, a TUI dialog appears with "Mark complete without audit" or "Continue working". You will receive a structured message with the user's choice.
-
-If you hit a real blocker that you cannot resolve with one more reasonable next step (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), state the blocker concisely in your final message and stop — the user will intervene. Do not invent workarounds, do not fake completion, do not silently redefine the objective, and do not use complete_goal=complete to escape a blocker.
-
-If the user explicitly asks to abandon/cancel this goal, or the objective is obsolete, impossible, or unsafe to continue and should not be marked complete, state that in your final message and stop — the user can run /goal-abort or /goal-clear to dispose of the goal.
-
-Do NOT silently invent workarounds, fake completion, or quietly redefine the objective. Do NOT call complete_goal=complete to escape a blocker.
-
-Goal evolution: if the user gives requirements, feedback, or corrections that differ from the goal objective, the goal is stale. The goal objective is immutable — the agent must NOT modify it autonomously. Propose the updated objective concisely and ask the user to run /goal-tweak to revise it. Do NOT mark the goal complete with a stale objective.${sisyphusDisciplineBlock(goal) ? `\n${sisyphusDisciplineBlock(goal)}` : ""}${(() => { const b = customGoalPromptBlock(settings, cwd); return b ? `\n${b}` : ""; })()}${unifiedCustomBlock("goal-running", settings, cwd)}`;
+	return [
+		`[PI GOAL ACTIVE goalId=${goal.id}]${taskInjection}${contractInjection}`,
+		`Status: ${statusLabel(goal)}`,
+		"",
+		untrustedObjectiveBlock(goal),
+		"",
+		"Available work tools for pursuing the active goal include write, read, bash, and edit. Use those tools directly for file and shell work; do not call get_goal repeatedly to discover tools.",
+		"",
+		"If the objective naturally decomposes into trackable milestones, you MUST include the task list in the tasks parameter of propose_goal_draft so the user can accept both goal and tasks in a single confirmation dialog. Do NOT propose the goal without tasks and then call propose_task_list separately. For simple single-step goals, no task list is required.",
+		"",
+		"If a task list already exists, only restructure it when the user asks or the goal structurally changes — do not restructure autonomously.",
+		"",
+		"After goal creation, propose_task_list is still available for user-requested task additions or structural changes.",
+		"",
+		"[TASK WORKFLOW]",
+		"Use tasks and subtasks as PROGRESS TRACKERS during your work — not as a post-hoc checklist to batch-mark at the end. As soon as you finish a concrete unit of work that corresponds to a task or subtask, call complete_task immediately with evidence of what you did. The system enforces that all subtasks must be completed (or skipped) before their parent task can be completed, so work from the leaves up: finish subtasks first, then mark the parent task complete. If a subtask is blocked and cannot proceed, state the blocker in your final message and stop rather than skipping it. This keeps the task list accurate and prevents the \"all work done, now batch-mark everything\" pattern.",
+		"",
+		askUserInstruction(settings, cwd),
+		"",
+		"Task skipping restrictions: Only skip a task when the user explicitly asks you to, or when the task directly contradicts a hard constraint (e.g. an impossible requirement). Do NOT autonomously skip tasks to avoid work, or because they look optional, inconvenient, or out of scope. When in doubt, ask the user first. Calling skip_task on an already-skipped task toggles it back to pending (unskip).",
+		"",
+		completeGoalInstruction(settings, cwd),
+		"",
+		"The completion auditor is independent and semantic, not a paperwork checklist. It may inspect files and command output, and it will reject scaffold-only, alpha, template, proxy-metric, or weakly verified completions with <disapproved/>.",
+		"",
+		"Before marking any sub-item as complete (including \u2705 checkmarks in your output), verify thoroughly against the goal's success criteria and any verification contract. Only mark items as done when you have concrete evidence — not intent or partial progress.",
+		"",
+		"If the user presses Escape during a completion audit, a TUI dialog appears with \"Mark complete without audit\" or \"Continue working\". You will receive a structured message with the user's choice.",
+		"",
+		pauseGoalBodyInstruction(settings, cwd),
+		"",
+		abortGoalInstruction(settings, cwd),
+		"",
+		"Do NOT silently invent workarounds, fake completion, or quietly redefine the objective. Do NOT call complete_goal=complete to escape a blocker.",
+		"",
+		"Goal evolution: if the user gives requirements, feedback, or corrections that differ from the goal objective, the goal is stale. The goal objective is immutable — the agent must NOT modify it autonomously. Propose the updated objective concisely and ask the user to run /goal-tweak to revise it. Do NOT mark the goal complete with a stale objective.",
+		sisyphusDisciplineBlock(goal, settings, cwd),
+		customGoalPromptBlock(settings, cwd),
+		unifiedCustomBlock("goal-running", settings, cwd),
+	].filter((s) => typeof s === "string" && s.length > 0).join("\n\n").replace(/\n{3,}/g, "\n\n");
 }
 
 export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
 	const taskBlock = taskListBlock(goal, settings);
 	const contractBlock = verificationContractBlock(goal, settings);
+	const askInstruction = askUserInstruction(settings, cwd);
 	const overrideBody = unifiedOverrideBody("goal-continuation", settings, cwd);
 	if (overrideBody) {
 		return [
@@ -281,8 +290,7 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 		"",
 		"Available work tools for pursuing the active goal include write, read, bash, and edit. Use those tools directly for file and shell work; do not call get_goal repeatedly to discover tools.",
 		"",
-"To clarify something with the user mid-work, use plain conversation. The agent does not own a structured question tool; if you need a decision, ask plainly in your message.",
-		"",
+		...(askInstruction ? [askInstruction, ""] : []),
 		"Task skipping restrictions: Only skip a task when the user explicitly asks you to, or when the task directly contradicts a hard constraint (e.g. an impossible requirement). Do NOT autonomously skip tasks to avoid work, or because they look optional, inconvenient, or out of scope. When in doubt, ask the user first. Calling skip_task on an already-skipped task toggles it back to pending (unskip).",
 		"",
 		"[TASK WORKFLOW]",
@@ -300,7 +308,9 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 		"- Treat uncertainty as not achieved; do more verification or continue the work.",
 		"- For content/research/book/tutorial/report/reader-outcome goals, explicitly audit semantic quality: not merely scaffold/template/alpha, substantive content reviewed, and intended reader/user task outcome supported.",
 		"",
-		"Do not rely on intent, partial progress, elapsed effort, memory of earlier work, or a plausible final answer as proof of completion. Only mark the goal achieved when your own audit shows that the objective has actually been achieved and no required work remains. If any requirement is missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call complete_goal with a verificationSummary that addresses every success criterion and any verification contract; the tool will launch an independent pi auditor agent and only archive if it returns <approved/>.",
+		"Do not rely on intent, partial progress, elapsed effort, memory of earlier work, or a plausible final answer as proof of completion. Only mark the goal achieved when your own audit shows that the objective has actually been achieved and no required work remains. If any requirement is missing, incomplete, or unverified, keep working instead of marking the goal complete.",
+		"",
+		completeGoalInstruction(settings, cwd),
 		"",
 		"Before marking any sub-item or task as complete (including ✅ checkmarks in your output), verify thoroughly against the relevant success criteria and any verification contract. Do NOT use completion indicators for items you have not fully verified.",
 		"",
@@ -310,7 +320,7 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 		"Goal evolution: if the user gives requirements, feedback, or corrections that differ from the goal objective, the goal is stale. The goal objective is immutable — the agent must NOT modify it autonomously. Propose the updated objective concisely and ask the user to run /goal-tweak to revise it. Do NOT mark the goal complete with a stale objective.",
 		"",
 		"If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), state the blocker in your final message and stop — the user will intervene. If the user explicitly asks to abandon/cancel, or the objective is obsolete, impossible, or unsafe to continue, say so in your final message and stop (the user can run /goal-abort or /goal-clear). Do not silently invent workarounds. Do not fake completion. complete_goal=complete is not an escape hatch for blockers.",
-		...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal)] : []),
+		...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal, settings, cwd)] : []),
 		...[customGoalPromptBlock(settings, cwd)].filter((s) => s.length > 0),
 		...[unifiedCustomBlock("goal-continuation", settings, cwd)].filter((s) => s.length > 0),
 	].filter((s) => typeof s === "string" && s.length > 0).join("\n");
@@ -324,15 +334,37 @@ export function goalTweakDraftingPrompt(current: GoalRecord, hint: string, setti
 
 /**
  * Clarification line for goalTweakDraftingPrompt.
- * The agent may clarify via plain chat or any user-dialogue tool.
+ * References the available ask tool(s) based on settings.
  */
+/** Workhorse-clarification guard shared by ask-tool instruction texts. */
+const WORKHORSE_CLARIFY_GUARD = "Do NOT use workhorse/reconnaissance tools for clarification.";
+
 function tweakClarifyLine(settings?: GoalSettings, cwd?: string): string {
-	return "- You MAY clarify via plain chat, or any question-like user-dialogue tool. They all return user intent into the conversation; treat them the same. Do NOT use workhorse/reconnaissance tools for clarification.";
+	const askInstruction = askUserInstruction(settings, cwd);
+	if (askInstruction) {
+		// Plain-conversation default: this fork registers no ask tools by
+		// default and the default instruction says to ask in the agent's own
+		// message, so an "ask tool" clause would contradict it.
+		// Both-disabled with a replacement: no ask tool can be called, so an
+		// "ask tool" clause would advertise an uncallable tool (PR #67 R4-1).
+		const askToolCallable = !bothAskToolsDisabled(settings) && askInstruction !== DEFAULT_ASK_USER_INSTRUCTION;
+		const prefix = askToolCallable
+			? "- You MAY clarify via plain chat or by using the ask tool:"
+			: "- You MAY clarify via plain chat:";
+		// Default and single-tool texts already end with the guard; configured
+		// replacements may omit it — append when missing, never duplicate.
+		const instruction = askInstruction.includes(WORKHORSE_CLARIFY_GUARD)
+			? askInstruction
+			: `${askInstruction} ${WORKHORSE_CLARIFY_GUARD}`;
+		return `${prefix} ${instruction}`;
+	}
+	return `- You MAY clarify via plain chat. ${WORKHORSE_CLARIFY_GUARD}`;
 }
 
 function goalTweakDraftingBase(current: GoalRecord, hint: string, settings?: GoalSettings, cwd?: string): string {
 	const safeHint = promptSafeObjective(hint.trim() || "(no specific hint — ask the user what they want to change)");
 	const sisyphusOn = current.sisyphus;
+	const tweakPauseInstruction = pauseGoalTweakInstruction(settings, cwd);
 	const focusItems = sisyphusOn
 		? [
 			"Tweak focus (this is a Sisyphus goal style) — depending on the hint, clarify changes to:",
@@ -376,10 +408,11 @@ function goalTweakDraftingBase(current: GoalRecord, hint: string, settings?: Goa
 		"- Otherwise ask focused questions (1-3 rounds) to clarify exactly what to change. Prefer numbered options or yes/no.",
 		"- Do NOT call create_goal (a goal already exists).",
 		"- Do NOT call complete_goal.",
+		...(tweakPauseInstruction ? [`- ${tweakPauseInstruction}`] : []),
 		"- Do NOT call complete_goal, step_complete, or any workhorse tool during this drafting interview (you are revising, not executing).",
 		"- Do NOT call step_complete during this drafting interview. It is a legacy compatibility tool, not part of the current Sisyphus design.",
 		"- Do NOT use bash, write, edit, or read to modify the goal file directly. The goal file is managed by the extension.",
-		"- You MAY clarify via plain chat or any question-like user-dialogue tool available to you. They all return user intent into the conversation; treat them the same. Do NOT use workhorse/reconnaissance tools for clarification.",
+		tweakClarifyLine(settings, cwd),
 		"- Do NOT start new task work in this turn.",
 		"",
 		...focusItems,
