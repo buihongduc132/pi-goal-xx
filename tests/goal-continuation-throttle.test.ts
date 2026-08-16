@@ -27,7 +27,11 @@ import {
 } from "../extensions/goal-settings.ts";
 import { createGoal, type GoalRecord } from "../extensions/goal-record.ts";
 
-let resolveContinuationGate: (settings: GoalSettings) => { minIntervalMs: number };
+let resolveContinuationGate: (
+	settings: GoalSettings,
+	cwd?: string,
+	env?: NodeJS.ProcessEnv,
+) => { minIntervalMs: number; source?: string };
 let shouldSendContinuation: (
 	lastSentAtMs: number | null,
 	nowMs: number,
@@ -123,6 +127,22 @@ describe("resolveContinuationGate", () => {
 		const settings = parseGoalSettings({});
 		const gate = resolveContinuationGate(settings);
 		assert.strictEqual(gate.minIntervalMs, 600000);
+	});
+
+	it("labels source 'env' when settings were loaded with an alternate env (effective-env provenance)", async () => {
+		// R3-1: loadGoalSettings accepts an alternate env; the gate must derive
+		// its source label from THAT env, not from process.env (which lacks the
+		// var here → naive impl mislabels as 'default').
+		await loadGateFns();
+		const env: Record<string, string> = {
+			PI_CODING_AGENT_DIR: "/tmp/pgxx-r3-gate-env",
+			PI_GOAL_CONTINUATION_MIN_INTERVAL_MS: "0",
+		};
+		const settings = loadGoalSettings("/tmp/pgxx-r3-gate-cwd", env);
+		assert.strictEqual(settings.goalContinuation?.minIntervalMs, 0);
+		const gate = resolveContinuationGate(settings, "/tmp/pgxx-r3-gate-cwd", env);
+		assert.strictEqual(gate.source, "env");
+		assert.strictEqual(gate.minIntervalMs, 0);
 	});
 });
 
