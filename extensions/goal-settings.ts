@@ -1038,7 +1038,11 @@ export type ContinuationGateSource = "file" | "env" | "default";
  * emits an `auto_run.gate.resolve` trace entry with the resolved value and its
  * source (env override > file config > default).
  */
-export function resolveContinuationGate(settings: GoalSettings, cwd?: string): { minIntervalMs: number; source: ContinuationGateSource } {
+export function resolveContinuationGate(
+	settings: GoalSettings,
+	cwd?: string,
+	env: NodeJS.ProcessEnv = process.env,
+): { minIntervalMs: number; source: ContinuationGateSource } {
 	// TRUE provenance, not value-diff inference: env presence wins; otherwise a
 	// single file-config read (performed ONLY at gate resolution — which happens
 	// once the send decision is reached, never inside the 50ms busy retry loop)
@@ -1046,10 +1050,14 @@ export function resolveContinuationGate(settings: GoalSettings, cwd?: string): {
 	// value that happens to equal the default is still `source: "file"`.
 	// The effective VALUE comes from the already-resolved `settings` argument
 	// (env > file > default merged by loadGoalSettings) — no second guess.
-	const envRaw = process.env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
+	// `env` is the effective environment the settings were loaded with (same
+	// contract as loadGoalSettings); defaulting to process.env preserves the
+	// runtime call-site behavior. R3-1: alternate-env loads must not be
+	// re-derived from process.env — that mislabels the source.
+	const envRaw = env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
 	const envSet = typeof envRaw === "string" && envRaw.trim() !== "" && Number.isInteger(Number(envRaw)) && Number(envRaw) >= 0;
 	const fileSet = cwd
-		? loadGoalSettingsFileConfig(cwd, process.env).goalContinuation?.minIntervalMs !== undefined
+		? loadGoalSettingsFileConfig(cwd, env).goalContinuation?.minIntervalMs !== undefined
 		: false;
 	const source: ContinuationGateSource = envSet ? "env" : fileSet ? "file" : "default";
 	const minIntervalMs = settings.goalContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
