@@ -287,9 +287,10 @@ describe("runGoalQuestionnaire — TUI interactions", () => {
 		component.handleInput("t");
 		component.handleInput("\r"); // submit
 
-		// Should be on summary tab now
+		// Should be on summary tab now — assert the summary-tab marker alone
+		// (the tab row always renders "✓ Submit", so that clause was tautological)
 		let lines = component.render(80);
-		assert.ok(lines.some(l => l.includes("Ready to submit") || l.includes("Submit")));
+		assert.ok(lines.some(l => l.includes("Ready to submit")));
 
 		// Submit on summary tab
 		component.handleInput("\r");
@@ -677,9 +678,11 @@ describe("runGoalQuestionnaire — TUI interactions", () => {
 		const theme = createMockTheme();
 		const component = renderFn(tui, theme, {}, done);
 
-		// Render should show recommended tag (★) on option B
+		// Render should show recommended tag (★) on option B — assert the marker
+		// alone ("B" is always rendered as a choice, so the old disjunction was
+		// tautological and could not catch broken marker rendering)
 		let lines = component.render(80);
-		assert.ok(lines.some(l => l.includes("★") || l.includes("B")));
+		assert.ok(lines.some(l => l.includes("★")));
 
 		// Select recommended option
 		component.handleInput("\r");
@@ -770,9 +773,10 @@ describe("runGoalQuestionnaire — TUI interactions", () => {
 		// Q1: select A
 		component.handleInput("\r");
 
-		// Q2: options=[] auto-enters text editor (inputMode=true, no 'Press Enter to write' hint)
+		// Q2: options=[] auto-enters text editor — assert the concrete input-mode
+		// marker row (the old `|| lines.length > 0` was tautological)
 		let lines = component.render(80);
-		assert.ok(lines.some(l => l.includes("Write") || l.includes("editor")) || lines.length > 0);
+		assert.ok(lines.some(l => l.includes("Your answer:")));
 		// Verify inputMode auto-entered: hint row for option navigation absent
 		assert.ok(!lines.some(l => l.includes("Enter select")));
 

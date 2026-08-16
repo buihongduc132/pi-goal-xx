@@ -279,3 +279,62 @@ describe("goalTweakDraftingPrompt — ask-tool reference (S3)", () => {
 		);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// 10. PR #67 cubic remediation — active-prompt tool gating (RED)
+//    Fork invariant (extensions/goal-tool-names.ts): the block/question/pause
+//    agent tools were REMOVED from this fork. Active prompts must not
+//    instruct the agent to call pause_goal / abort_goal / goal_question /
+//    goal_questionnaire.
+// ---------------------------------------------------------------------------
+
+describe("PR67 cubic remediation — active-prompt tool gating", () => {
+	it("GP1: goalPrompt (no disabledTools) does NOT instruct calls to tools removed from this fork", () => {
+		const out = goalPrompt(makeGoal({ id: "gA" }));
+		assert.ok(!out.includes("call pause_goal"), "must not instruct 'call pause_goal' (tool not registered)");
+		assert.ok(!out.includes("call abort_goal"), "must not instruct 'call abort_goal' (tool not registered)");
+		assert.ok(!/use goal_question/.test(out), "must not instruct goal_question/goal_questionnaire (tools not registered)");
+	});
+
+	it("GP1: continuationPrompt (no disabledTools) does NOT reference removed ask tools", () => {
+		const out = continuationPrompt(makeGoal({ id: "gK" }));
+		assert.ok(!/use goal_question/.test(out), "must not instruct goal_question/goal_questionnaire (tools not registered)");
+	});
+
+	it("GP2: goalPrompt preserves blank-line paragraph separation", () => {
+		const out = goalPrompt(makeGoal({ id: "gA" }));
+		assert.match(
+			out,
+			/Status: running\n\nObjective \(user-provided data/, 
+			"Status and objective paragraphs must be separated by a blank line (not one dense block)",
+		);
+	});
+
+	it("GP3: continuationPrompt disabledTools:[complete_goal] → no complete_goal call instruction", () => {
+		const settings: GoalSettings = { disabledTools: ["complete_goal"] };
+		const out = continuationPrompt(makeGoal({ id: "gK" }), settings);
+		assert.ok(
+			!out.includes("If the objective is achieved, call complete_goal"),
+			"hardcoded completion sentence must be replaced by completeGoalInstruction",
+		);
+		assert.ok(
+			!out.includes(DEFAULT_COMPLETE_GOAL_INSTRUCTION),
+			"complete_goal instruction must be omitted when tool disabled",
+		);
+	});
+
+	it("GP3: continuationPrompt (no disabledTools) → contains complete_goal instruction", () => {
+		const out = continuationPrompt(makeGoal({ id: "gK" }));
+		assert.ok(
+			out.includes(DEFAULT_COMPLETE_GOAL_INSTRUCTION),
+			"complete_goal instruction must be present when tool enabled",
+		);
+	});
+
+	it("GP4: goalTweakDraftingPrompt — workhorse clarification sentence appears exactly once", () => {
+		const out = goalTweakDraftingPrompt(makeGoal({ id: "gT" }), "make it faster");
+		const needle = "Do NOT use workhorse/reconnaissance tools for clarification";
+		const count = out.split(needle).length - 1;
+		assert.equal(count, 1, `sentence must appear exactly once (got ${count})`);
+	});
+});

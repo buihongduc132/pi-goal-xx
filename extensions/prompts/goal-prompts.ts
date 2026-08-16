@@ -244,7 +244,7 @@ export function goalPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: stri
 		sisyphusDisciplineBlock(goal, settings, cwd),
 		customGoalPromptBlock(settings, cwd),
 		unifiedCustomBlock("goal-running", settings, cwd),
-	].filter((s) => typeof s === "string" && s.length > 0).join("\n").replace(/\n{3,}/g, "\n\n");
+	].filter((s) => typeof s === "string" && s.length > 0).join("\n\n").replace(/\n{3,}/g, "\n\n");
 }
 
 export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cwd?: string): string {
@@ -306,7 +306,9 @@ export function continuationPrompt(goal: GoalRecord, settings?: GoalSettings, cw
 		"- Treat uncertainty as not achieved; do more verification or continue the work.",
 		"- For content/research/book/tutorial/report/reader-outcome goals, explicitly audit semantic quality: not merely scaffold/template/alpha, substantive content reviewed, and intended reader/user task outcome supported.",
 		"",
-		"Do not rely on intent, partial progress, elapsed effort, memory of earlier work, or a plausible final answer as proof of completion. Only mark the goal achieved when your own audit shows that the objective has actually been achieved and no required work remains. If any requirement is missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call complete_goal with a verificationSummary that addresses every success criterion and any verification contract; the tool will launch an independent pi auditor agent and only archive if it returns <approved/>.",
+		"Do not rely on intent, partial progress, elapsed effort, memory of earlier work, or a plausible final answer as proof of completion. Only mark the goal achieved when your own audit shows that the objective has actually been achieved and no required work remains. If any requirement is missing, incomplete, or unverified, keep working instead of marking the goal complete.",
+		"",
+		completeGoalInstruction(settings, cwd),
 		"",
 		"Before marking any sub-item or task as complete (including ✅ checkmarks in your output), verify thoroughly against the relevant success criteria and any verification contract. Do NOT use completion indicators for items you have not fully verified.",
 		"",
@@ -335,7 +337,9 @@ export function goalTweakDraftingPrompt(current: GoalRecord, hint: string, setti
 function tweakClarifyLine(settings?: GoalSettings, cwd?: string): string {
 	const askInstruction = askUserInstruction(settings, cwd);
 	if (askInstruction) {
-		return `- You MAY clarify via plain chat or by using the ask tool: ${askInstruction} Do NOT use workhorse/reconnaissance tools for clarification.`;
+		// askUserInstruction already ends with the workhorse-clarification
+		// sentence — do NOT append it again (GP4: duplicate sentence).
+		return `- You MAY clarify via plain chat or by using the ask tool: ${askInstruction}`;
 	}
 	return "- You MAY clarify via plain chat. Do NOT use workhorse/reconnaissance tools for clarification.";
 }

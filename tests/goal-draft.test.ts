@@ -347,6 +347,15 @@ describe("goalDraftingPrompt draftingAskLine disabled-tool paths", () => {
 		assert.match(p, /Use goal_question to clarify/);
 		assert.ok(!/Use goal_questionnaire/.test(p));
 	});
+
+	it("GD1: both disabled + goal_question inline replacement → replacement reaches drafting prompt (RED)", () => {
+		const settings = {
+			disabledTools: ["goal_question", "goal_questionnaire"],
+			toolInstructions: { goal_question: { inline: "Use intercom to clarify." } },
+		} as unknown as GoalSettings;
+		const p = goalDraftingPrompt("topic", "goal", settings);
+		assert.ok(p.includes("Use intercom to clarify."), "configured replacement must reach goalDraftingPrompt");
+	});
 });
 
 // ── Branch coverage: goalDraftingPromptBase topic + sisyphus ───────────────

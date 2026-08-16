@@ -78,8 +78,9 @@ describe("wrapToolDefinition — append mode", () => {
 		const out = wrapToolDefinition({ name: "get-goal", promptSnippet: "orig" }, settings, cwd);
 		assert.match(out.promptSnippet!, /CUSTOM-DIR/);
 	});
+});
 
-
+describe("wrapToolDefinition — override mode", () => {
 	it("replaces promptSnippet entirely", () => {
 		const settings = { prompts: { "tool-get-goal": { mode: "override", inline: "OVERRIDE-SNIPPET" } } } as GoalSettings;
 		const tool: ToolLike = { name: "get-goal", promptSnippet: "orig", promptGuidelines: [] };

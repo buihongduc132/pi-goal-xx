@@ -151,12 +151,14 @@ describe("acquireLock — corrupt lock reap", () => {
 		assert.equal(result.ok, true);
 	});
 
-	it("returns ok: false when held by other after EEXIST retry", () => {
+	it("returns ok: false on initial read when lock freshly held by other (no retry path taken)", () => {
 		const cwd = tmpCwd();
 		// Pre-write a held lock owned by other
 		const other: LockOwner = { sessionId: "other", pid: process.pid };
 		acquireLock(cwd, "g1", other, LEASE_MS);
-		// Now self tries to acquire — should fail
+		// Now self tries to acquire — first readLock sees a fresh other-held lock
+		// and returns { ok: false, heldByOther } before writeLockExclusive is
+		// ever attempted (the EEXIST re-read branch stays uncovered here).
 		const self: LockOwner = { sessionId: "s1", pid: process.pid };
 		const result = acquireLock(cwd, "g1", self, LEASE_MS);
 		assert.equal(result.ok, false);

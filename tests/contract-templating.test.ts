@@ -122,9 +122,12 @@ describe("expandContractTemplates — snippet expansion", () => {
 		assert.deepEqual(r.warnings, ["missing"]);
 	});
 
-	it("preserves placeholder when snippet path cannot be read", () => {
+	it("preserves placeholder when snippet path cannot be read (EISDIR)", () => {
+		// A DIRECTORY named `directory-snippet.md` so readFileSync(directory-snippet.md)
+		// throws EISDIR — the actual unreadable-path branch (a directory without
+		// the .md suffix would only hit ENOENT, same as the missing case).
 		const unreadableName = "directory-snippet";
-		fs.mkdirSync(path.join(sb.cwd, ".pi/pi-goal-xx/contracts", unreadableName));
+		fs.mkdirSync(path.join(sb.cwd, ".pi/pi-goal-xx/contracts", `${unreadableName}.md`));
 		const r = expandContractTemplates(`{{${unreadableName}}}`, sb.cwd, { home: sb.home } as GoalSettings);
 		assert.equal(r.expanded, `{{${unreadableName}}}`);
 		assert.deepEqual(r.warnings, [unreadableName]);

@@ -431,14 +431,23 @@ describe("reconstructGoalLedger — comprehensive", () => {
 	});
 
 	it("goal_focused clears terminalGoals focus flags", () => {
-		const events: GoalLedgerEvent[] = [
+		// Focus g1 FIRST so it becomes a terminal goal with latestFocus=true —
+		// otherwise goal_completed creates it with latestFocus=false already and
+		// the final assertion cannot detect whether the clearing loop ran.
+		const focusG1: GoalLedgerEvent[] = [
 			{ type: "goal_completed", goalId: "g1", at: "t1" },
+			{ type: "goal_focused", goalId: "g1", reason: "selected", at: "t1.5" },
+		];
+		assert.equal(reconstructGoalLedger(focusG1).terminalGoals.get("g1")!.latestFocus, true);
+
+		const events: GoalLedgerEvent[] = [
+			...focusG1,
 			{ type: "goal_created", goalId: "g2", objective: "y", sisyphus: false, autoContinue: true, at: "t2" },
 			{ type: "goal_focused", goalId: "g2", reason: "selected", at: "t3" },
 		];
 		const recon = reconstructGoalLedger(events);
 		assert.equal(recon.focusedGoalId, "g2");
-		// terminal goal g1 should have latestFocus=false after goal_focused for g2
+		// terminal goal g1 was focused at t1.5; the t3 focus for g2 must clear it
 		assert.equal(recon.terminalGoals.get("g1")!.latestFocus, false);
 	});
 

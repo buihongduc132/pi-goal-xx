@@ -2,6 +2,7 @@ import type { GoalTask } from "./goal-record.ts";
 import { resolvePrompt, type PromptConfig } from "./prompt-resolver.ts";
 import type { GoalSettings } from "./goal-settings.ts";
 import { expandContractTemplates } from "./contract-templating.ts";
+import { askUserInstruction } from "./prompts/tool-instruction-parts.ts";
 
 export type GoalDraftingFocus = "goal" | "sisyphus";
 
@@ -267,6 +268,13 @@ function draftingAskLine(settings?: GoalSettings, cwd?: string): string {
 		].join("\n");
 	}
 	if (qDisabled && qqDisabled) {
+		// GD1: honor a configured replacement (goal_question key first, then
+		// goal_questionnaire — same fallback order as askUserInstruction) so
+		// toolInstructions replacements are not silently discarded.
+		const replacement = askUserInstruction(settings, cwd);
+		if (replacement) {
+			return [`- ${replacement}`, plainLine].join("\n");
+		}
 		return plainLine;
 	}
 	if (!qqDisabled) {
