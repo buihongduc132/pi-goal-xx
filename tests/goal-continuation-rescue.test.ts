@@ -317,7 +317,12 @@ describe("scheduling: activity-stamp (lastAgentActivity)", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "more work" }], usage: {} },
 		});
 		const lateAtUpper = Date.now();
-		await flushContinuation(50);
+		// Design: activity does NOT re-arm immediately — the armed timer keeps
+		// its stale fireAt, fires, finds T1 unelapsed vs the LATER activity, and
+		// re-arms with fireAt = latestActivity + idleRescueMs. Wait long enough
+		// for that fire→re-arm cycle so the LAST arm entry tracks the recent
+		// activity (not the stale first arm).
+		await flushContinuation(WAIT_RESCUE_MS);
 
 		const arms = rescueArmEntries();
 		assert.ok(arms.length >= 1, "expected auto_run.rescue_arm entries");
