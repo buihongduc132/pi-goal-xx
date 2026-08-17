@@ -1,0 +1,27 @@
+- id: LD1
+  turn: turn8
+  parts: ["correction-global-path"]
+  user_quote: |
+    "You JUST reading ``` The file doesn't exist in the CWD. Reading the one from the deployed location:
+     read ~/.pi/agent/git/github.com/buihongduc132/pi-goal-xx/.pi/pi-goal-xx/prompts/auditor.md
+    ``` --- why the hell saying lies?
+    Why the hell it is in such WIERD path ;
+    where the fuck do the configuration of GLOBAL path;"
+  decision: auditor custom prompt at ~/.pi/agent/git/.../auditor.md is DEAD — never loaded by resolver. Correct global path is /home/bhd/.pi/pi-goal-xx/prompts/auditor.md
+  status: locked
+
+- id: LD2
+  turn: turn10
+  parts: ["fix-applied"]
+  user_quote: |
+    "Fucker , fix it ; Then add the flow/lessons_learn/ for me ; then commit it ;"
+  decision: auditor.md copied to /home/bhd/.pi/pi-goal-xx/prompts/auditor.md (global) and <cwd>/.pi/pi-goal-xx/prompts/auditor.md (local). lesson_learn committed as 08dcda4.
+  status: locked
+
+- id: LD3
+  turn: turn12
+  parts: ["goal-creation-prompt-answer"]
+  user_quote: |
+    "Now where is the prompt when creating the goal?"
+  decision: NO custom prompt injection at goal creation time. customGoalPromptBlock only fires in runtime prompts (active goal turns). Drafting flow is pi-core — out of reach of this package.
+  status: locked

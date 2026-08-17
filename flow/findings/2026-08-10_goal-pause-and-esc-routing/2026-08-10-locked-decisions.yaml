@@ -1,0 +1,31 @@
+# Locked Decisions — 2026-08-10 goal-pause-and-esc-routing
+
+# IMMUTABLE INPUT to future proposals. Each entry traces to exact turn + user words.
+# Future artifact MUST cite [LDn] — reader jumps to turn → section → verbatim quote.
+
+- id: LD1
+  turn: turn3
+  parts: ["user-block"]
+  user_quote: |
+    "No , if it aborted , we are not even skipping , just fucking continue ;
+    We are NOT needing it to stop ;"
+  decision: Runtime aborts (timeouts, MCP failures, provider 5xx) must NOT pause the goal. Only explicit user Esc or /goal-pause pauses.
+  status: locked
+
+- id: LD2
+  turn: turn9
+  parts: ["user-block"]
+  user_quote: |
+    "a. make ALL paths of pausing to be having different type in logs to be able to troubleshoot ;
+    b. make EACH pausing approach to be configurable ;
+    Then config it GLOBAL that Esc DO NOT pause ;"
+  decision: All pause paths must log distinct reason types (escape/command/abort). Each pause source independently configurable. Global config sets escape=false.
+  status: locked
+
+- id: LD3
+  turn: turn12
+  parts: ["user-block"]
+  user_quote: |
+    "It should not pause the goal but it is still have to be able to stop the session in pi natively ;"
+  decision: When escape=false, Esc must pass through to pi (return undefined) so pi can stop the session/turn natively. Esc must NOT be swallowed.
+  status: locked

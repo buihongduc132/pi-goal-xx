@@ -1,0 +1,11 @@
+status: ongoing
+threads:
+  - id: OT1
+    topic: override mode scope — replace custom block only or entire goalPrompt() output?
+    raised_in: turn14
+    status: open
+    note: |
+      customGoalPromptBlock wraps output in <goal_custom_prompt> tags and appends.
+      In override mode: should it replace only the injected custom block, or the
+      whole goalPrompt() hardcoded lifecycle instructions?
+      Must be decided before implementation of goal-prompt-resolver migration.
