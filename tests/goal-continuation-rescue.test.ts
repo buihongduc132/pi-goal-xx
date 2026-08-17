@@ -416,6 +416,32 @@ describe("scheduling: fire-dispatch routing", () => {
 		);
 		assert.ok(rescueFireEntries().length >= 1, "rescue_fire traced after the re-armed fire");
 	});
+
+	it("busy re-arm is cadence-bounded: T1 edge past + pending messages → ≤ 25 re-arms per 500ms (50ms floor, no setTimeout(0) spin)", async () => {
+		// Verifier PROBE1 regression: armRescueTimer computed delay =
+		// Math.max(0, fireAt - now); with the T1 edge already in the past and
+		// the session busy, every fire re-armed at setTimeout(0) → ~590
+		// arms/sec (lock read + trace append each). The delay must be floored
+		// at CONTINUATION_IDLE_RETRY_MS (50ms) so sustained busy yields at most
+		// ~20 arms/sec → ≤ 25 in a 500ms window (slack for scheduling).
+		const { pi: p, ctx } = freshPi();
+		await armRescueAfterCooldownDrop(p, ctx, "objective: bounded rearm. success criteria: done.");
+		assert.ok(rescueArmEntries().length >= 1, "sanity: rescue armed");
+
+		const originalHasPending = (ctx as any).hasPendingMessages;
+		(ctx as any).hasPendingMessages = () => true; // busy at every fire
+		const armsBefore = rescueArmEntries().length;
+		await flushContinuation(500);
+		const armsAfter = rescueArmEntries().length;
+		(ctx as any).hasPendingMessages = originalHasPending;
+
+		const reArms = armsAfter - armsBefore;
+		assert.ok(
+			reArms <= 25,
+			`busy re-arm storm: ${reArms} rescue_arm entries in 500ms (expected ≤ 25 with the 50ms floor); pre-fix spin was ~295`,
+		);
+		assert.equal(countContinuations(p), 1, "no send leaked while busy");
+	});
 });
 
 // ===========================================================================
@@ -491,6 +517,72 @@ describe("send invariant: one-stamp via serializedSend", () => {
 			LONG_MIN_INTERVAL_MS,
 			"rescue send ran through the resolved gate (minIntervalMs present in the trace)",
 		);
+	});
+
+	it("simultaneous T1+T2 eligibility fires exactly ONE send (no double-send): t2Elapsed checked first, single dispatchContinuationSend", async () => {
+		// Both edges eligible at fire time (fast cooldown AND idle ≥ rescue):
+		// the fire path must dispatch exactly one send, not one per edge.
+		const { pi: p, ctx } = freshPi();
+		process.env.PI_GOAL_CONTINUATION_MIN_INTERVAL_MS = String(FAST_MIN_INTERVAL_MS);
+		process.env.PI_GOAL_CONTINUATION_IDLE_RESCUE_MS = String(FAST_IDLE_RESCUE_MS);
+		await createGoalAndFirstSend(p, ctx, "objective: no double send. success criteria: done.");
+		assert.equal(countContinuations(p), 1, "sanity: first send happened");
+
+		await driveWorkTurn(p, ctx); // queue → cooldown drop (gate still closed)
+		await flushContinuation(WAIT_T2_MS); // both edges elapse: cooldown 1s + idle 250ms
+
+		const sends = sendSuccessEntries();
+		const fires = rescueFireEntries();
+		assert.equal(
+			countContinuations(p),
+			2,
+			`exactly one send when both T1 and T2 edges are in play; got ${countContinuations(p)}`,
+		);
+		assert.equal(sends.length, 2, `exactly two send.success entries total (first + one edge fire); got ${sends.length}`);
+		assert.ok(fires.length >= 1, "at least one rescue_fire dispatched");
+		// Single dispatch regardless of which edge won the race: with
+		// idleRescueMs=250 < minIntervalMs=1000, the T1 edge is nearer and may
+		// legitimately fire first (T2 not yet elapsed at that moment). The
+		// invariant is ONE send per fire — never one per edge.
+		const firedVias = fires.map((f) => f.via).filter(Boolean);
+		assert.ok(
+			firedVias.every((v) => v === "T1" || v === "T2"),
+			`fire via attribution is a single known edge; saw ${firedVias.join(",")}`,
+		);
+		assert.equal(new Set(firedVias).size, firedVias.length === 0 ? 0 : 1, "no mixed-edge multi-fire");
+	});
+
+	it("idleRescueMs=0 runtime: T1 disabled → pure cooldown behavior — arms via T2, fires at lastSend+minInterval, no rescue_fire via T1", async () => {
+		// Plan tests-scheduling requires a RUNTIME test for idleRescueMs=0
+		// (schema/gate tests alone insufficient): the armed timer must route
+		// via T2 (cooldown edge) with fireAt = lastSendAt + minIntervalMs,
+		// and the eventual send must be attributed via T2 — never T1.
+		const { pi: p, ctx } = freshPi();
+		process.env.PI_GOAL_CONTINUATION_MIN_INTERVAL_MS = String(FAST_MIN_INTERVAL_MS);
+		process.env.PI_GOAL_CONTINUATION_IDLE_RESCUE_MS = "0"; // T1 off
+		await createGoalAndFirstSend(p, ctx, "objective: t1 disabled. success criteria: done.");
+		assert.equal(countContinuations(p), 1, "sanity: first send happened");
+
+		await driveWorkTurn(p, ctx); // cooldown still closed (1s) → drop path
+		await flushContinuation(80);
+
+		const arms = rescueArmEntries();
+		assert.ok(arms.length >= 1, "cooldown drop armed a rescue timer");
+		const arm = arms[arms.length - 1]!;
+		assert.equal(arm.via, "T2", `idleRescueMs=0 arms via T2 (cooldown edge); saw via=${arm.via}`);
+		const lastSend = sendSuccessEntries()[0]!.sentAt as number;
+		assert.ok(
+			Math.abs((arm.fireAt as number) - (lastSend + FAST_MIN_INTERVAL_MS)) < 150,
+			`fireAt ≈ lastSend+minInterval (${lastSend + FAST_MIN_INTERVAL_MS}); got ${arm.fireAt}`,
+		);
+
+		await flushContinuation(WAIT_T2_MS); // cooldown elapses
+		assert.equal(countContinuations(p), 2, "T2 fire sent the queued continuation");
+		const fires = rescueFireEntries();
+		assert.ok(fires.length >= 1, "rescue_fire traced");
+		const vias = fires.map((f) => f.via);
+		assert.ok(vias.every((v) => v !== "T1"), `no T1 fire when idleRescueMs=0; saw ${vias.join(",")}`);
+		assert.ok(vias.includes("T2"), "fire attributed via T2");
 	});
 });
 

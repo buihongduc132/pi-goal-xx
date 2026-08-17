@@ -2007,7 +2007,11 @@ Verification contract:
 		const fireAt = Math.min(t1Edge, t2Edge);
 		if (!Number.isFinite(fireAt)) return;
 		const via = t1Edge <= t2Edge ? "T1" : "T2";
-		const delay = Math.max(0, fireAt - now);
+		// Floor the delay at CONTINUATION_IDLE_RETRY_MS so a re-arm with the T1
+		// edge already in the past (busy session) cannot spin setTimeout(0).
+		// Every re-fire still recomputes fireAt, so the timer remains exact —
+		// the floor only bounds the busy re-arm cadence (50ms like the idle retry).
+		const delay = Math.max(CONTINUATION_IDLE_RETRY_MS, fireAt - now);
 		continuationScheduledFor = goalId;
 		continuationTimer = setTimeout(() => fireRescueContinuation(ctx, goalId, minIntervalMs, idleRescueMs), delay);
 		continuationTimer.unref?.();
