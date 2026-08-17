@@ -10,3 +10,7 @@ coverage/
 # Git worktrees (local checkouts) — never commit.
 .worktrees/
 .wt-*/
+/coverage-mutation-baseline/
+/.fusion/
+/.pi-opa-net/
+/.pi/pi-goal-xx/

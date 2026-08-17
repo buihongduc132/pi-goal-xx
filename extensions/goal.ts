@@ -549,6 +549,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// message, and session_compact.
 	let lastContinuationSentAt: number | null = null;
 	let lastContinuationSentGoalId: string | null = null;
+	// Idle-rescue scheduling (continuation-idle-rescue plan): last time the
+	// assistant produced a message. The rescue timer is armed at
+	// min(lastAgentActivity + idleRescueMs, lastSendAt + minIntervalMs) so a
+	// cooldown-drop never dead-ends the auto-run chain.
+	let lastAgentActivity: number = Date.now();
 	function resetContinuationThrottle(reason: "goal_created" | "goal_resumed" | "user_message" | "session_compact" | "auditor_rejection", ctx?: ExtensionContext): void {
 		const previousLastSentAt = lastContinuationSentAt;
 		const previousGoalId = lastContinuationSentGoalId;
@@ -1973,14 +1978,106 @@ Verification contract:
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
-		// Throttle gate: drop the continuation when the cooldown since the last
-		// send for THIS goal has not elapsed. minIntervalMs=0 disables the gate.
-		const { minIntervalMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
+		// Throttle gate: when the cooldown since the last send for THIS goal has
+		// not elapsed, do NOT dead-end. Keep the slot armed and schedule exactly
+		// ONE rescue timer (see armRescueTimer). idleRescueMs=0 disables the T1
+		// edge; minIntervalMs=0 disables the gate entirely (path unreachable).
+		const { minIntervalMs, idleRescueMs, source: gateSource } = resolveContinuationGate(settings, ctx.cwd);
 		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
 		if (!shouldSendContinuation(effectiveLastSentAt, Date.now(), minIntervalMs)) {
-			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
-			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.cooldown_drop", goalId, message: `continuation dropped: cooldown ${minIntervalMs}ms since last send` });
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.cooldown_drop", goalId, message: `continuation deferred: cooldown ${minIntervalMs}ms since last send — rescue timer armed` });
+			armRescueTimer(ctx, goalId, minIntervalMs, idleRescueMs);
 			return;
+		}
+		dispatchContinuationSend(ctx, goalId, settings, minIntervalMs, gateSource, null);
+	}
+
+	/**
+	 * Arm the single-slot rescue timer at
+	 * min(lastAgentActivity + idleRescueMs, lastSendAt + minIntervalMs).
+	 * Emits auto_run.rescue_arm {fireAt, via} where via is "T1" when the
+	 * idle-rescue edge is nearer, "T2" when the cooldown edge is nearer or
+	 * T1 is disabled (idleRescueMs = 0).
+	 */
+	function armRescueTimer(ctx: ExtensionContext, goalId: string, minIntervalMs: number, idleRescueMs: number): void {
+		const now = Date.now();
+		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
+		const t2Edge = effectiveLastSentAt !== null ? effectiveLastSentAt + minIntervalMs : now;
+		const t1Edge = idleRescueMs > 0 ? lastAgentActivity + idleRescueMs : Number.POSITIVE_INFINITY;
+		const fireAt = Math.min(t1Edge, t2Edge);
+		if (!Number.isFinite(fireAt)) return;
+		const via = t1Edge <= t2Edge ? "T1" : "T2";
+		// Floor the delay at CONTINUATION_IDLE_RETRY_MS so a re-arm with the T1
+		// edge already in the past (busy session) cannot spin setTimeout(0).
+		// Every re-fire still recomputes fireAt, so the timer remains exact —
+		// the floor only bounds the busy re-arm cadence (50ms like the idle retry).
+		const delay = Math.max(CONTINUATION_IDLE_RETRY_MS, fireAt - now);
+		continuationScheduledFor = goalId;
+		continuationTimer = setTimeout(() => fireRescueContinuation(ctx, goalId, minIntervalMs, idleRescueMs), delay);
+		continuationTimer.unref?.();
+		logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.rescue_arm", goalId, fireAt, via, message: `rescue armed: fire in ${delay}ms via ${via}` });
+	}
+
+	/**
+	 * Rescue timer fire: send when T2 elapsed, or T1 elapsed + idle + no
+	 * pending messages (idle-rescue); otherwise re-arm with a recomputed
+	 * fireAt (conditions unmet — e.g. a turn is still running).
+	 */
+	function fireRescueContinuation(ctx: ExtensionContext, goalId: string, minIntervalMs: number, idleRescueMs: number): void {
+		continuationTimer = null;
+		continuationScheduledFor = null;
+		syncGoalTools();
+		if (!isActionableContinuationGoal(goalId)) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
+		// D6 chokepoint: re-check focus lock at fire time. Lock loss (lease
+		// expiry, another session took over) invalidates the armed rescue.
+		if (!isLockHeldBySelf(ctx.cwd, goalId)) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
+		const now = Date.now();
+		const effectiveLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
+		const t2Elapsed = effectiveLastSentAt === null || now - effectiveLastSentAt >= minIntervalMs;
+		if (t2Elapsed) {
+			dispatchContinuationSend(ctx, goalId, loadGoalSettings(ctx.cwd), minIntervalMs, "default", "T2");
+			return;
+		}
+		const t1Elapsed = idleRescueMs > 0 && now - lastAgentActivity >= idleRescueMs;
+		let idleSafe = false;
+		try {
+			idleSafe = !ctx.hasPendingMessages() && ctx.isIdle();
+		} catch {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
+		if (t1Elapsed && idleSafe) {
+			dispatchContinuationSend(ctx, goalId, loadGoalSettings(ctx.cwd), minIntervalMs, "default", "T1");
+			return;
+		}
+		// Neither edge sendable (or conditions unmet) → re-arm with recomputed
+		// fireAt. Slot stays occupied (single-slot invariant).
+		armRescueTimer(ctx, goalId, minIntervalMs, idleRescueMs);
+	}
+
+	/**
+	 * Single gated send path for BOTH the normal continuation and both rescue
+	 * edges. Routes through serializedSend, stamps lastContinuationSentAt +
+	 * lastContinuationSentGoalId (one-send invariant: T1 firing pushes the
+	 * next T2 eligibility to sentAt + minIntervalMs), and reuses
+	 * continuationPrompt unchanged. rescueVia is "T1" | "T2" | null (null =
+	 * normal non-rescue send).
+	 */
+	function dispatchContinuationSend(ctx: ExtensionContext, goalId: string, settings: GoalSettings, minIntervalMs: number, gateSource: string, rescueVia: "T1" | "T2" | null): void {
+		const goal = state.goal;
+		if (!goal || goal.id !== goalId) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
+		continuationQueuedFor = goalId;
+		if (rescueVia !== null) {
+			logGoalTrace(ctx.cwd, { level: "info", step: "auto_run.rescue_fire", goalId, via: rescueVia, message: `rescue fired via ${rescueVia}` });
 		}
 		void serializedSend(() => {
 			pi.sendMessage<GoalEventDetails>(
@@ -2002,11 +2099,12 @@ Verification contract:
 			const previousLastSentAt = lastContinuationSentGoalId === goalId ? lastContinuationSentAt : null;
 			lastContinuationSentAt = sentAt;
 			lastContinuationSentGoalId = goalId;
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			logGoalTrace(ctx.cwd, {
 				level: "info",
 				step: "auto_run.send.success",
 				goalId,
-				message: "continuation sent",
+				message: rescueVia !== null ? `continuation sent (rescue via ${rescueVia})` : "continuation sent",
 				lastSentAt: previousLastSentAt,
 				sentAt,
 				nextAllowedAt: sentAt + minIntervalMs,
@@ -4757,9 +4855,16 @@ promptGuidelines: [
 		if (raw?.role === "custom" && raw.customType === GOAL_EVENT_ENTRY && raw.display !== false) {
 			return { message: { ...event.message, display: false } as typeof event.message };
 		}
-		// Inbound user message: force-bypass the continuation cooldown so the
-		// next auto-continuation after explicit user interaction always fires.
-		if (raw?.role === "user") resetContinuationThrottle("user_message", ctx);
+		// Assistant activity stamp (idle-rescue): the most recent assistant
+		// message anchors the T1 rescue edge (lastAgentActivity + idleRescueMs).
+		if (raw?.role === "assistant") lastAgentActivity = Date.now();
+		// Inbound user message: clear any armed rescue (a stale rescue must not
+		// fire mid-conversation) and force-bypass the continuation cooldown so
+		// the next auto-continuation after explicit user interaction fires.
+		if (raw?.role === "user") {
+			clearContinuationState();
+			resetContinuationThrottle("user_message", ctx);
+		}
 	});
 
 	pi.on("session_start", async (event, ctx) => {
