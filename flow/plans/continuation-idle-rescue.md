@@ -24,46 +24,46 @@ Source: current context — exploration session 2026-08-17, captured in `flow/in
 
 Plan done when ALL below true:
 
-- [ ] Active auto-run goal with incomplete work never sits idle past `idleRescueMs` (default 30s) — a rescue continuation arrives and triggers a new turn (no manual re-prompt).
-- [ ] At most 1 continuation send per window regardless of firing path (rescue T1 vs cooldown T2) — no double-send.
-- [ ] Continuously-working sessions keep existing 10-min cooldown semantics unchanged (T2-only path).
-- [ ] `idleRescueMs: 0` restores pure-cooldown behavior (reschedule fix retained, T1 disabled).
-- [ ] Message rotation pool NOT implemented (deferred — user decision).
+- [x] Active auto-run goal with incomplete work never sits idle past `idleRescueMs` (default 30s) — a rescue continuation arrives and triggers a new turn (no manual re-prompt).
+- [x] At most 1 continuation send per window regardless of firing path (rescue T1 vs cooldown T2) — no double-send.
+- [x] Continuously-working sessions keep existing 10-min cooldown semantics unchanged (T2-only path).
+- [x] `idleRescueMs: 0` restores pure-cooldown behavior (reschedule fix retained, T1 disabled).
+- [x] Message rotation pool NOT implemented (deferred — user decision).
 
 ## Tasks
 
 ### Scheduling
 
-- [ ] `reschedule-on-drop`: cooldown drop path in `sendQueuedContinuation` keeps the slot armed and schedules exactly ONE timer `fireAt = min(lastAgentActivity + idleRescueMs, lastSendAt + minIntervalMs)` instead of returning dead. Probe: `rg -n "fireAt|min\(" extensions/goal.ts`.
-- [ ] `activity-stamp`: `lastAgentActivity` timestamp stamped on assistant `message_end` (extensions/goal.ts message_end handler). Probe: `rg -n "lastAgentActivity" extensions/goal.ts`.
-- [ ] `fire-dispatch`: timer fire routes — T2 elapsed → send; else idle ≥ idleRescueMs + no pending msgs → send (T1); else re-arm with recomputed fireAt. Probe: unit test busy-vs-idle fire dispatch.
-- [ ] `single-slot`: exactly 1 armed continuation max; enqueue while slot occupied → dropped (existing `continuationQueuedFor`/`continuationScheduledFor` guard retained; drop path no longer clears slot). Probe: unit test double-enqueue.
+- [x] `reschedule-on-drop`: cooldown drop path in `sendQueuedContinuation` keeps the slot armed and schedules exactly ONE timer `fireAt = min(lastAgentActivity + idleRescueMs, lastSendAt + minIntervalMs)` instead of returning dead. Probe: `rg -n "fireAt|min\(" extensions/goal.ts`.
+- [x] `activity-stamp`: `lastAgentActivity` timestamp stamped on assistant `message_end` (extensions/goal.ts message_end handler). Probe: `rg -n "lastAgentActivity" extensions/goal.ts`.
+- [x] `fire-dispatch`: timer fire routes — T2 elapsed → send; else idle ≥ idleRescueMs + no pending msgs → send (T1); else re-arm with recomputed fireAt. Probe: unit test busy-vs-idle fire dispatch.
+- [x] `single-slot`: exactly 1 armed continuation max; enqueue while slot occupied → dropped (existing `continuationQueuedFor`/`continuationScheduledFor` guard retained; drop path no longer clears slot). Probe: unit test double-enqueue.
 
 ### Send invariant
 
-- [ ] `one-stamp`: BOTH T1 and T2 send paths route through the single `serializedSend` send fn and stamp `lastContinuationSentAt` + `lastContinuationSentGoalId` (1-send invariant). Probe: unit test — rescue send pushes next T2 eligibility to `sentAt + minIntervalMs`.
-- [ ] `same-prompt`: rescue send reuses `continuationPrompt(goal, settings, cwd)` unchanged (full checkpoint + `goalHash:` line) — no new prompt content, no rotation. Probe: snapshot — rescue message content identical to normal continuation for same goal state.
-- [ ] `no-new-bypass`: rescue path preserves ALL upstream gates — `isActionableContinuationGoal`, D6 focus-lock chokepoint (checked at enqueue), work-tool gate (upstream at message_end). No new force/bypass surface introduced. Probe: `rg -n "force" extensions/goal.ts` shows no new force path in rescue code.
+- [x] `one-stamp`: BOTH T1 and T2 send paths route through the single `serializedSend` send fn and stamp `lastContinuationSentAt` + `lastContinuationSentGoalId` (1-send invariant). Probe: unit test — rescue send pushes next T2 eligibility to `sentAt + minIntervalMs`.
+- [x] `same-prompt`: rescue send reuses `continuationPrompt(goal, settings, cwd)` unchanged (full checkpoint + `goalHash:` line) — no new prompt content, no rotation. Probe: snapshot — rescue message content identical to normal continuation for same goal state.
+- [x] `no-new-bypass`: rescue path preserves ALL upstream gates — `isActionableContinuationGoal`, D6 focus-lock chokepoint (checked at enqueue), work-tool gate (upstream at message_end). No new force/bypass surface introduced. Probe: `rg -n "force" extensions/goal.ts` shows no new force path in rescue code.
 
 ### Cancellation
 
-- [ ] `user-msg-cancel`: inbound user message clears armed slot + timer AND performs existing `resetContinuationThrottle("user_message")` — stale rescue never fires mid-conversation. Probe: unit test — arm rescue, send user msg, no continuation fires.
-- [ ] `lifecycle-cancel`: goal pause / complete / archive / abort clears armed slot + timer (same path as existing `clearContinuationTimer` call sites). Probe: `rg -n "clearContinuationTimer" extensions/goal.ts` — rescue timers covered.
+- [x] `user-msg-cancel`: inbound user message clears armed slot + timer AND performs existing `resetContinuationThrottle("user_message")` — stale rescue never fires mid-conversation. Probe: unit test — arm rescue, send user msg, no continuation fires.
+- [x] `lifecycle-cancel`: goal pause / complete / archive / abort clears armed slot + timer (same path as existing `clearContinuationTimer` call sites). Probe: `rg -n "clearContinuationTimer" extensions/goal.ts` — rescue timers covered.
 
 ### Config
 
-- [ ] `config-schema`: `goalContinuation.idleRescueMs` exists in `GoalContinuationConfig` (extensions/goal-settings.ts), non-negative int, default 30000, `0` disables T1; validated in `asGoalContinuationBlock` (unknown-nested-key + value checks). Probe: `rg -n "idleRescueMs" extensions/goal-settings.ts`.
-- [ ] `config-env`: env override `PI_GOAL_CONTINUATION_IDLE_RESCUE_MS` resolved in `resolveContinuationGate` (or sibling) with source tracking (env > file > default), mirroring `minIntervalMs` pattern. Probe: `rg -n "PI_GOAL_CONTINUATION_IDLE_RESCUE_MS" extensions/goal-settings.ts`.
+- [x] `config-schema`: `goalContinuation.idleRescueMs` exists in `GoalContinuationConfig` (extensions/goal-settings.ts), non-negative int, default 30000, `0` disables T1; validated in `asGoalContinuationBlock` (unknown-nested-key + value checks). Probe: `rg -n "idleRescueMs" extensions/goal-settings.ts`.
+- [x] `config-env`: env override `PI_GOAL_CONTINUATION_IDLE_RESCUE_MS` resolved in `resolveContinuationGate` (or sibling) with source tracking (env > file > default), mirroring `minIntervalMs` pattern. Probe: `rg -n "PI_GOAL_CONTINUATION_IDLE_RESCUE_MS" extensions/goal-settings.ts`.
 
 ### Observability
 
-- [ ] `trace-steps`: `auto_run.rescue_arm` (fields: `fireAt`, `via` = T1|T2 projection) and `auto_run.rescue_fire` (fields: `via`) emitted via `logGoalTrace`, alongside existing `auto_run.queue` / `auto_run.cooldown_drop` / `auto_run.send.success`. Probe: `rg -n "rescue_arm|rescue_fire" extensions/goal.ts`.
+- [x] `trace-steps`: `auto_run.rescue_arm` (fields: `fireAt`, `via` = T1|T2 projection) and `auto_run.rescue_fire` (fields: `via`) emitted via `logGoalTrace`, alongside existing `auto_run.queue` / `auto_run.cooldown_drop` / `auto_run.send.success`. Probe: `rg -n "rescue_arm|rescue_fire" extensions/goal.ts`.
 
 ### Tests
 
-- [ ] `tests-scheduling`: node:test coverage for — drop→reschedule (slot armed, no dead return), T1 fire at 30s idle, busy→re-arm, double-enqueue drop, `idleRescueMs=0` disables T1 (cooldown-only still reschedules). Probe: `npx tsx --test tests/goal-continuation-rescue.test.ts` green (or equivalent file).
-- [ ] `tests-invariant`: coverage for 1-send invariant — T1 fire stamps `lastSentAt` (next T2 = +10min), T2 fire stamps, no double-send when both conditions true simultaneously. Probe: same test file green.
-- [ ] `tests-cancellation`: coverage for user-msg cancel + pause/complete cancel of armed rescue. Probe: same test file green.
+- [x] `tests-scheduling`: node:test coverage for — drop→reschedule (slot armed, no dead return), T1 fire at 30s idle, busy→re-arm, double-enqueue drop, `idleRescueMs=0` disables T1 (cooldown-only still reschedules). Probe: `npx tsx --test tests/goal-continuation-rescue.test.ts` green (or equivalent file).
+- [x] `tests-invariant`: coverage for 1-send invariant — T1 fire stamps `lastSentAt` (next T2 = +10min), T2 fire stamps, no double-send when both conditions true simultaneously. Probe: same test file green.
+- [x] `tests-cancellation`: coverage for user-msg cancel + pause/complete cancel of armed rescue. Probe: same test file green.
 
 ## Idempotency
 
