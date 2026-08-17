@@ -96,9 +96,16 @@ export interface AuditorSubscription {
  * Continuation throttle config. minIntervalMs is the cooldown between
  * auto-continuation sends; 0 disables the gate (legacy per-turn behavior).
  * Default 600000 (10 minutes). Env: PI_GOAL_CONTINUATION_MIN_INTERVAL_MS.
+ * idleRescueMs is the idle-rescue window: when a queued continuation is
+ * dropped by the cooldown gate, a rescue timer armed at
+ * min(lastAgentActivity + idleRescueMs, lastSendAt + minIntervalMs) keeps
+ * the slot alive so the auto-run chain never deadlocks. 0 disables the
+ * rescue edge (pure cooldown behavior). Default 30000 (30 seconds).
+ * Env: PI_GOAL_CONTINUATION_IDLE_RESCUE_MS.
  */
 export interface GoalContinuationConfig {
 	minIntervalMs?: number;
+	idleRescueMs?: number;
 }
 
 /** Per-command hook configuration. */
@@ -300,8 +307,12 @@ export const PI_GOAL_PAUSE_COMMAND_ENV = "PI_GOAL_PAUSE_COMMAND";
 export const PI_GOAL_PAUSE_ABORT_ENV = "PI_GOAL_PAUSE_ABORT";
 /** Env override for the continuation throttle cooldown (ms). 0 disables the gate. */
 export const PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV = "PI_GOAL_CONTINUATION_MIN_INTERVAL_MS";
+
+export const PI_GOAL_CONTINUATION_IDLE_RESCUE_MS_ENV = "PI_GOAL_CONTINUATION_IDLE_RESCUE_MS";
 /** Default continuation throttle cooldown: 10 minutes. */
 export const DEFAULT_CONTINUATION_MIN_INTERVAL_MS = 600_000;
+
+export const DEFAULT_CONTINUATION_IDLE_RESCUE_MS = 30_000;
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -713,25 +724,42 @@ function asAuditorSubscriptions(value: unknown): AuditorSubscription[] | undefin
 function asGoalContinuationBlock(raw: unknown): GoalContinuationConfig | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
 	const rec = raw as Record<string, unknown>;
-	const knownNested = new Set(["minIntervalMs"]);
+	const knownNested = new Set(["minIntervalMs", "idleRescueMs"]);
 	const unknownNested = Object.keys(rec).filter((k) => !knownNested.has(k));
 	if (unknownNested.length > 0) {
 		throw new Error(
 			`Unknown goalContinuation nested key(s): ${unknownNested.join(", ")}`,
 		);
 	}
-	if (rec.minIntervalMs === undefined) return undefined;
-	let value = rec.minIntervalMs;
-	if (typeof value === "string" && value.trim() !== "") {
-		const n = Number(value);
-		if (Number.isFinite(n)) value = n;
+	if (rec.minIntervalMs === undefined && rec.idleRescueMs === undefined) return undefined;
+	const out: GoalContinuationConfig = {};
+	if (rec.minIntervalMs !== undefined) {
+		let value = rec.minIntervalMs;
+		if (typeof value === "string" && value.trim() !== "") {
+			const n = Number(value);
+			if (Number.isFinite(n)) value = n;
+		}
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+			throw new Error(
+				`Invalid goalContinuation.minIntervalMs: ${String(rec.minIntervalMs)} (must be a non-negative integer; 0 disables the gate)`,
+			);
+		}
+		out.minIntervalMs = value;
 	}
-	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-		throw new Error(
-			`Invalid goalContinuation.minIntervalMs: ${String(rec.minIntervalMs)} (must be a non-negative integer; 0 disables the gate)`,
-		);
+	if (rec.idleRescueMs !== undefined) {
+		let rescueValue = rec.idleRescueMs;
+		if (typeof rescueValue === "string" && rescueValue.trim() !== "") {
+			const n = Number(rescueValue);
+			if (Number.isFinite(n)) rescueValue = n;
+		}
+		if (typeof rescueValue !== "number" || !Number.isInteger(rescueValue) || rescueValue < 0) {
+			throw new Error(
+				`Invalid goalContinuation.idleRescueMs: ${String(rec.idleRescueMs)} (must be a non-negative integer; 0 disables the rescue)`,
+			);
+		}
+		out.idleRescueMs = rescueValue;
 	}
-	return { minIntervalMs: value };
+	return out;
 }
 
 /** Parse auditorMode; invalid values fall back to undefined (caller defaults to "inherit"). */
@@ -1021,12 +1049,28 @@ function resolveContinuationGateFromEnv(
 	env: NodeJS.ProcessEnv,
 	fileContinuation?: GoalContinuationConfig,
 ): GoalContinuationConfig {
+	const out: GoalContinuationConfig = {};
 	const raw = env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
+	let haveAny = false;
 	if (typeof raw === "string" && raw.trim() !== "") {
 		const n = Number(raw);
-		if (Number.isInteger(n) && n >= 0) return { minIntervalMs: n };
+		if (Number.isInteger(n) && n >= 0) { out.minIntervalMs = n; haveAny = true; }
 	}
-	return { minIntervalMs: fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS };
+	if (out.minIntervalMs === undefined) {
+		out.minIntervalMs = fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
+	}
+	const rawRescue = env[PI_GOAL_CONTINUATION_IDLE_RESCUE_MS_ENV];
+	if (typeof rawRescue === "string" && rawRescue.trim() !== "") {
+		const n = Number(rawRescue);
+		if (Number.isInteger(n) && n >= 0) { out.idleRescueMs = n; haveAny = true; }
+	}
+	if (out.idleRescueMs === undefined) {
+		out.idleRescueMs = fileContinuation?.idleRescueMs ?? DEFAULT_CONTINUATION_IDLE_RESCUE_MS;
+	}
+	if (!haveAny && fileContinuation === undefined) {
+		// No env, no file: still return fully-defaulted config (both keys).
+	}
+	return out;
 }
 
 /** Where the continuation gate value came from. */
@@ -1038,14 +1082,21 @@ export type ContinuationGateSource = "file" | "env" | "default";
  * emits an `auto_run.gate.resolve` trace entry with the resolved value and its
  * source (env override > file config > default).
  */
-export function resolveContinuationGate(settings: GoalSettings, cwd?: string): { minIntervalMs: number; source: ContinuationGateSource } {
+export function resolveContinuationGate(settings: GoalSettings, cwd?: string): { minIntervalMs: number; idleRescueMs: number; source: ContinuationGateSource } {
 	const envRaw = process.env[PI_GOAL_CONTINUATION_MIN_INTERVAL_MS_ENV];
-	const envSet = typeof envRaw === "string" && envRaw.trim() !== "" && Number.isInteger(Number(envRaw)) && Number(envRaw) >= 0;
+	const envSet = cwd !== undefined && typeof envRaw === "string" && envRaw.trim() !== "" && Number.isInteger(Number(envRaw)) && Number(envRaw) >= 0;
 	const fileContinuation = cwd !== undefined ? loadGoalSettingsFileConfig(cwd).goalContinuation : undefined;
 	const source: ContinuationGateSource = envSet ? "env" : fileContinuation?.minIntervalMs !== undefined ? "file" : "default";
-	const minIntervalMs = settings.goalContinuation?.minIntervalMs ?? fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
-	if (cwd) logGoalTrace(cwd, { level: "info", step: "auto_run.gate.resolve", minIntervalMs, source, message: `gate: ${minIntervalMs}ms (${source})` });
-	return { minIntervalMs, source };
+	const minIntervalMs = envSet
+		? Number(envRaw)
+		: settings.goalContinuation?.minIntervalMs ?? fileContinuation?.minIntervalMs ?? DEFAULT_CONTINUATION_MIN_INTERVAL_MS;
+	const rescueEnvRaw = process.env[PI_GOAL_CONTINUATION_IDLE_RESCUE_MS_ENV];
+	const rescueEnvSet = cwd !== undefined && typeof rescueEnvRaw === "string" && rescueEnvRaw.trim() !== "" && Number.isInteger(Number(rescueEnvRaw)) && Number(rescueEnvRaw) >= 0;
+	const idleRescueMs = rescueEnvSet
+		? Number(rescueEnvRaw)
+		: settings.goalContinuation?.idleRescueMs ?? fileContinuation?.idleRescueMs ?? DEFAULT_CONTINUATION_IDLE_RESCUE_MS;
+	if (cwd) logGoalTrace(cwd, { level: "info", step: "auto_run.gate.resolve", minIntervalMs, idleRescueMs, source, message: `gate: ${minIntervalMs}ms cooldown / ${idleRescueMs}ms idle-rescue (${source})` });
+	return { minIntervalMs, idleRescueMs, source };
 }
 
 /**
