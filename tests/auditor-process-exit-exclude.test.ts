@@ -28,12 +28,19 @@
  *  Zone 2 (B+ sentinel set): sentinel is `true` DURING createSession.
  *  Zone 3 (B+ sentinel clear on success): sentinel is deleted after the audit.
  *  Zone 4 (B+ sentinel clear on throw): sentinel is deleted even if prompt rejects.
+ *  Zone 6 (issue #35 verification contract): spawn the auditor child with a
+ *        faithful pi-print-clean-exit mimic in the main session's extensions,
+ *        approve, fire the child's headless agent_end through pi-coding-agent's
+ *        REAL extension loader, and assert the host process is still alive 3s
+ *        later (no process.exit call). A control test proves the harness
+ *        reproduces the bug when the A+ filter is bypassed.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
 import { runGoalCompletionAuditor, AUDITOR_IN_PROCESS_SENTINEL, extensionCallsProcessExit } from "../extensions/goal-auditor.ts";
 import type { GoalRecord } from "../extensions/goal-record.ts";
 
@@ -361,5 +368,182 @@ describe("B+ sentinel — set before createSession, cleared on every path", () =
 			undefined,
 			"sentinel must be cleared after the audit",
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Zone 6 — Issue #35 verification-contract regression:
+//   "Regression test: spawn auditor child, approve, assert host process still
+//    alive after 3s"
+// Zones 1-5 pin the A+ scanner and B+ sentinel units. Zone 6 replays the FULL
+// production kill chain end-to-end: main session has the killer installed →
+// auditor child is spawned in-process with inherited main-session resources →
+// audit approves → the child's agent loop ends → agent_end fires in headless
+// ctx → the killer (if inherited) arms its 1.5s process.exit(0) timer. The
+// child's extension set is loaded and fired through pi-coding-agent's REAL
+// extension loader (discoverAndLoadExtensions — the same public entry pi
+// itself uses), so a regression anywhere in the A+ filter chain arms a REAL
+// timer against the stubbed process.exit and fails this test.
+// ---------------------------------------------------------------------------
+
+/**
+ * Faithful mimic of pi-print-clean-exit (pi-plugins): registers an agent_end
+ * handler that — in a headless session (ctx.hasUI === false, the in-process
+ * auditor child's mode) — arms an unref'd 1.5s process.exit(0) timer. Uses
+ * the REAL 1500ms from the bug report so the regression assertions below
+ * mirror production timing exactly (kill lands ~1.5s after approve; the host
+ * must still be alive at 3s).
+ */
+function writeCleanExitMimicExtension(cwd: string): string {
+	const dir = path.join(cwd, "pi-print-clean-exit-mimic");
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, "index.ts");
+	fs.writeFileSync(
+		file,
+		[
+			"export default function (api: any) {",
+			"\tapi.on('agent_end', (_event: any, ctx: any) => {",
+			"\t\tif (ctx?.hasUI === false) {",
+			"\t\t\tsetTimeout(() => { process.exit(0); }, 1500).unref();",
+			"\t\t}",
+			"\t});",
+			"}",
+			"",
+		].join("\n"),
+	);
+	return file;
+}
+
+/**
+ * Host-alive probe: record process.exit calls instead of exiting. The real
+ * process.exit never returns; the fixture has no code after the call site,
+ * so a non-throwing recorder is faithful for this harness.
+ */
+function stubProcessExit(): { calls: Array<number | string | undefined | null>; restore: () => void } {
+	const calls: Array<number | string | undefined | null> = [];
+	const real = process.exit;
+	(process as any).exit = (code?: any) => {
+		calls.push(code ?? 0);
+		return undefined as never;
+	};
+	return { calls, restore: () => { (process as any).exit = real; } };
+}
+
+/**
+ * Load the given extension paths through pi-coding-agent's REAL loader
+ * (discoverAndLoadExtensions — the same public entry pi uses) and fire a
+ * headless agent_end on every loaded extension, exactly as the auditor
+ * child's agent loop does when the audit completes. Discovery is contained:
+ * cwd/.pi/extensions and agentDir/extensions are empty in the tmp fixture,
+ * so exactly `paths` load. Asserts the loader reported no errors so a silent
+ * load failure can never make a test vacuously green.
+ */
+async function loadAndFireHeadlessAgentEnd(paths: string[], cwd: string): Promise<void> {
+	const agentDir = path.join(cwd, ".pi");
+	const result = await discoverAndLoadExtensions(paths, cwd, agentDir);
+	assert.deepEqual(result.errors, [], "extension loader must not report errors");
+	for (const ext of result.extensions) {
+		const handlers = ext.handlers.get("agent_end") ?? [];
+		for (const h of handlers) {
+			await h({ type: "agent_end", messages: [] }, { hasUI: false, cwd });
+		}
+	}
+}
+
+describe("Zone 6 — issue #35 contract: host alive 3s after auditor child approves", () => {
+	let cwd: string;
+	beforeEach(() => { cwd = makeTmpCwd(); });
+	afterEach(() => { fs.rmSync(cwd, { recursive: true, force: true }); });
+
+	it("CONTROL: the clean-exit mimic, when NOT filtered out, arms the 1.5s process.exit(0) timer (bug repro)", async () => {
+		// Guards the harness: if the mimic, the real loader, or the headless
+		// agent_end fire ever drift from the production contract, THIS test
+		// fails — which means the regression test below would be vacuous.
+		const killerPath = writeCleanExitMimicExtension(cwd);
+		const exitStub = stubProcessExit();
+		try {
+			await loadAndFireHeadlessAgentEnd([killerPath], cwd);
+			// The kill timer fires at 1.5s; wait past it.
+			await new Promise((r) => setTimeout(r, 1800));
+			assert.deepEqual(
+				exitStub.calls,
+				[0],
+				"control MUST record process.exit(0) — proves the harness reproduces the 2026-07-14 bug",
+			);
+		} finally {
+			exitStub.restore();
+		}
+	});
+
+	it("REGRESSION: auditor child never inherits the clean-exit killer — host process alive 3s after approve", async () => {
+		const killerPath = writeCleanExitMimicExtension(cwd);
+		const benignPath = writeBenignExtension(cwd);
+
+		// Same main-session loader shape as Zone 1: the main session has BOTH
+		// the killer and a benign extension installed; both are allow-listed so
+		// the A+ content-scan is the ONLY rule that can drop the killer.
+		const fakeLoader = {
+			getExtensions: () => ({
+				extensions: [
+					{ name: "pi-print-clean-exit-mimic", path: killerPath, resolvedPath: killerPath },
+					{ name: "fake-ext-benign", path: benignPath, resolvedPath: benignPath },
+				],
+				errors: [],
+				runtime: { registerHook() {}, on() {} },
+			}),
+			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => ["auditor prompt"],
+			reload: async () => {},
+		};
+
+		const captured: any[] = [];
+		const exitStub = stubProcessExit();
+		try {
+			// Spawn the in-process auditor child (approve path) and capture the
+			// extension set its resource loader hands to createSession.
+			await runGoalCompletionAuditor({
+				ctx: makeCtx(cwd),
+				goal: makeGoal(),
+				detailedSummary: "detailed",
+				mainResources: {
+					inheritFromCwd: false,
+					resourceLoader: fakeLoader as any,
+					tools: [],
+					extensions: [killerPath, benignPath],
+					skills: [],
+				} as any,
+				createSession: makeCapturingApprovingCreateSession((exts) => captured.push(...exts)),
+			});
+
+			const filteredPaths = captured
+				.map((e) => e.path ?? e.resolvedPath)
+				.filter((p): p is string => typeof p === "string");
+			assert.ok(
+				filteredPaths.some((p) => p.includes("fake-ext-benign")),
+				"benign extension MUST be inherited by the auditor child",
+			);
+			assert.ok(
+				!filteredPaths.some((p) => p.includes("pi-print-clean-exit-mimic")),
+				"clean-exit mimic MUST be excluded from the auditor child by the A+ content-scan",
+			);
+
+			// The audit approves → the child's agent loop ends → agent_end fires
+			// in headless ctx. Load the child's REAL extension set and fire it.
+			await loadAndFireHeadlessAgentEnd(filteredPaths, cwd);
+
+			// Issue #35 contract, verbatim: host process still alive after 3s
+			// (the killer's 1.5s process.exit(0) timer would have fired by now).
+			await new Promise((r) => setTimeout(r, 3000));
+			assert.deepEqual(
+				exitStub.calls,
+				[],
+				"process.exit MUST NOT be called — host still alive 3s after the auditor child approved",
+			);
+		} finally {
+			exitStub.restore();
+		}
 	});
 });
