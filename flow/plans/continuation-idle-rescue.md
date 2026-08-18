@@ -2,8 +2,8 @@
 
 > Plan ID: `continuation-idle-rescue`
 > Created: 2026-08-17 · Last reconciled: 2026-08-17
-> Status: pending
-> Items: 14 total (0 implemented, 14 pending)
+> Status: done
+> Items: 14 total (14 implemented, 0 pending)
 > Branch: main
 > Location: flow/plans/continuation-idle-rescue.md
 
