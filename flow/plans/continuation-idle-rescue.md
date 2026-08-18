@@ -1,9 +1,9 @@
 # Continuation Idle Rescue (fix cooldown-drop deadlock)
 
 > Plan ID: `continuation-idle-rescue`
-> Created: 2026-08-17 · Last reconciled: 2026-08-17
+> Created: 2026-08-17 · Last reconciled: 2026-08-18
 > Status: done
-> Items: 14 total (14 implemented, 0 pending)
+> Items: 15 total (15 implemented, 0 pending) + 5/5 DOD criteria satisfied
 > Branch: main
 > Location: flow/plans/continuation-idle-rescue.md
 
