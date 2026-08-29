@@ -40,3 +40,18 @@ Ref: `flow/lesson_learn/2_arrow-implicit-return-promise-chain.md`
 Context: replaceGoal() → createGoal() → newGoalId() always mints fresh ID, never checks disk. 4 goals with same objective accumulated in goal-dashboard/.pi/goals/.
 Solutions: Added findDuplicateActiveGoal() in goal-files.ts (whitespace-normalized objective scan). Wired REJECT into start_goal/create_goal/propose_goal_draft, WARN into /goals-set. Dedup in caller not replaceGoal (re-creation paths need excludeGoalId bypass).
 Ref: `flow/lesson_learn/3_start-goal-no-dedup.md`
+
+4: Auditor stream double-capture — assistant text captured twice into audit output.
+Context: goal-auditor output capture path buffered stream chunks AND final text.
+Solutions: Single capture point; dedupe on flush.
+Ref: `flow/lesson_learn/4_auditor-stream-double-capture.md`
+
+5: Design published on wrong stack — no fact-lock before architecture artifacts.
+Context: Full Go BE design posted while jewilo=Rust was already verified same session; user caught contradiction one turn later → v3 redesign, 2 superseded artifacts (BHD-283).
+Solutions: FACT-LOCK ritual before ANY design artifact: list dependencies → re-verify language/runtime/interface (1 manifest read each) → list user constraints verbatim → surface contradictions BEFORE designing.
+Ref: `flow/lesson_learn/5_design-fact-lock-before-publish.md`
+
+6: Guessing unproven surfaces — flags, paths, discovery hops.
+Context: multica flags guessed (`--body-file`→unknown), skill path guessed (ENOENT), 3-hop route discovery where 1 scoped fd resolves.
+Solutions: HARD: first-time subcommand → `--help` BEFORE first call; skill paths via one-shot `fd` across all roots (~/.pi/agent, ~/.agents, ~/.claude); scoped leaf-name search before any dir walk. One-guess budget then mandatory help/search. multica writes = at-least-once: list-before-create, verify-after-write, never blind-retry (see multica-configuration LSL).
+Ref: `flow/lesson_learn/6_verify-surface-before-first-use.md`
