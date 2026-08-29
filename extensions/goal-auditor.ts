@@ -73,6 +73,11 @@ export interface GoalAuditorResult {
 	error?: string;
 	timedOut?: boolean;
 	/**
+	 * Set when the timeout fired but a verdict marker (<approved/> or <disapproved/>)
+	 * was recovered from the captured output stream.
+	 */
+	recoveredFromTimeout?: boolean;
+	/**
 	 * LD1/LD9/OT8: true when the auditor aborted mid-stream by calling the
 	 * `early_disapprove` tool. Distinct from a parsed <disapproved/> verdict
 	 * (which sets `disapproved` only) and from `error` (infrastructure failure).
@@ -1284,6 +1289,53 @@ export async function runGoalCompletionAuditor(args: {
 		// {approved:false, error:"Auditor timeout"}.
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
+		const handleTimeoutReturn = (): GoalAuditorResult => {
+			const recoveredParts = [...outputParts];
+			if (textDeltaAccum.trim() && !recoveredParts.includes(textDeltaAccum.trim())) {
+				recoveredParts.push(textDeltaAccum.trim());
+			}
+			const recoveredOutput = recoveredParts.join("\n\n").trim();
+			const decision = parseAuditorDecision(recoveredOutput);
+			if (decision.approved || decision.disapproved) {
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: decision.approved,
+					disapproved: decision.disapproved,
+					model: modelLabel(model),
+					output: recoveredOutput,
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return {
+					...decision,
+					output: recoveredOutput,
+					model: modelLabel(model),
+					thinkingLevel,
+					timedOut: true,
+					recoveredFromTimeout: true,
+				};
+			}
+			const timeoutOutput = outputParts.join("\n\n").trim();
+			const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
+			logAuditorTrace(args.ctx.cwd, buildEndEntry({
+				goalId: args.goal.id,
+				approved: false,
+				disapproved: true,
+				model: modelLabel(model),
+				error: timeoutError,
+				output: timeoutOutput,
+				elapsedMs: Date.now() - startedAt,
+			}));
+			return {
+				approved: false,
+				disapproved: true,
+				output: timeoutOutput,
+				model: modelLabel(model),
+				thinkingLevel,
+				error: timeoutError,
+				timedOut: true,
+			};
+		};
+
 		// Emit initial progress
 		progress.label = "Starting audit...";
 		progress.percentage = 0;
@@ -1315,13 +1367,25 @@ export async function runGoalCompletionAuditor(args: {
 			});
 			timeoutId = setTimeout(() => {
 				timedOut = true;
+				const recoveredParts = [...outputParts];
+				if (textDeltaAccum.trim() && !recoveredParts.includes(textDeltaAccum.trim())) {
+					recoveredParts.push(textDeltaAccum.trim());
+				}
+				const recoveredOutput = recoveredParts.join("\n\n").trim();
+				const decision = parseAuditorDecision(recoveredOutput);
+				const verdictRecovered: "approved" | "disapproved" | null = decision.approved
+					? "approved"
+					: decision.disapproved
+						? "disapproved"
+						: null;
 				logAuditorTrace(args.ctx.cwd, {
 					ts: new Date().toISOString(),
 					phase: "timeout",
-						goalId: args.goal.id,
-						timeoutMs: effectiveTimeoutMs,
-					});
-					safeAbort();
+					goalId: args.goal.id,
+					timeoutMs: effectiveTimeoutMs,
+					verdictRecovered,
+				});
+				safeAbort();
 				// Reject the race so prompt unblocks even if abort() threw.
 				if (timeoutReject) {
 					const err = new Error("__auditor_prompt_timeout__");
@@ -1362,26 +1426,7 @@ export async function runGoalCompletionAuditor(args: {
 				};
 			}
 			if (timedOut) {
-				const timeoutOutput = outputParts.join("\n\n").trim();
-				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
-				logAuditorTrace(args.ctx.cwd, buildEndEntry({
-					goalId: args.goal.id,
-					approved: false,
-					disapproved: true,
-					model: modelLabel(model),
-					error: timeoutError,
-					output: timeoutOutput,
-					elapsedMs: Date.now() - startedAt,
-				}));
-				return {
-					approved: false,
-					disapproved: true,
-					output: timeoutOutput,
-					model: modelLabel(model),
-					thinkingLevel,
-					error: timeoutError,
-					timedOut: true,
-				};
+				return handleTimeoutReturn();
 			}
 			// LD1/LD9/OT8: early disapproval via the early_disapprove tool. The
 			// flag is set in the subscribe callback on tool_execution_start for
@@ -1499,26 +1544,7 @@ export async function runGoalCompletionAuditor(args: {
 		} catch (error) {
 			// Check timeout BEFORE generic error handling
 			if (timedOut) {
-				const timeoutOutput = outputParts.join("\n\n").trim();
-				const timeoutError = `Auditor timeout after ${effectiveTimeoutMs}ms`;
-				logAuditorTrace(args.ctx.cwd, buildEndEntry({
-					goalId: args.goal.id,
-					approved: false,
-					disapproved: true,
-					model: modelLabel(model),
-					error: timeoutError,
-					output: timeoutOutput,
-					elapsedMs: Date.now() - startedAt,
-				}));
-				return {
-					approved: false,
-					disapproved: true,
-					output: timeoutOutput,
-					model: modelLabel(model),
-					thinkingLevel,
-					error: timeoutError,
-					timedOut: true,
-				};
+				return handleTimeoutReturn();
 			}
 			// Check rejectionMessage (from unhandledRejection guard)
 			if (rejectionMessage) {
