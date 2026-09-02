@@ -55,3 +55,8 @@ Ref: `flow/lesson_learn/5_design-fact-lock-before-publish.md`
 Context: multica flags guessed (`--body-file`→unknown), skill path guessed (ENOENT), 3-hop route discovery where 1 scoped fd resolves.
 Solutions: HARD: first-time subcommand → `--help` BEFORE first call; skill paths via one-shot `fd` across all roots (~/.pi/agent, ~/.agents, ~/.claude); scoped leaf-name search before any dir walk. One-guess budget then mandatory help/search. multica writes = at-least-once: list-before-create, verify-after-write, never blind-retry (see multica-configuration LSL).
 Ref: `flow/lesson_learn/6_verify-surface-before-first-use.md`
+
+7: Reasoning-budget exhaustion masquerades as "auditor disabled".
+Context: role-smart (glm-5.3) burned 100% completion tokens on reasoning_content → 0-byte verdict → silent fail-closed disapproval; user saw "auditor DISABLED". Plus stage-copy settings drift pinned the dead model.
+Solutions: G5 (be5296f): thinking_delta tracking; empty text + reasoning evidence → classified exhaustion error, never marker-parse empty output. Pin adequately-budgeted auditor model. Plugin configs resolved outside agent dir MUST be deploy-gated.
+Ref: `flow/lesson_learn/7_auditor-reasoning-exhaustion.md`
