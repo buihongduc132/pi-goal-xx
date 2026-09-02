@@ -616,6 +616,14 @@ export async function runGoalCompletionAuditor(args: {
 	// (observed with some LiteLLM-proxied models that produce tool-calling
 	// loops without a final text response).
 	let textDeltaAccum = "";
+	// G5: reasoning-budget exhaustion evidence (2026-09-02 incident). Track
+	// whether the model produced structured reasoning (thinking_delta stream)
+	// alongside the (missing) text. Empty text + non-empty thinking + no tool
+	// verdict = the model spent its whole output budget reasoning — a distinct
+	// failure class from truncation and from a genuine disapproval. Industry
+	// precedent: hermes-agent PR #96973 (structured reasoning exhaustion).
+	let thinkingChars = 0;
+	let thinkingBlocks = 0;
 	if (resolved.error) {
 		return { approved: false, disapproved: true, output: "", model: modelLabel(model), thinkingLevel, error: resolved.error };
 	}
@@ -1174,6 +1182,7 @@ export async function runGoalCompletionAuditor(args: {
 				// Check for thinking events from the assistant stream
 				const streamEvent = (event as any).assistantMessageEvent;
 				if (streamEvent?.type === "thinking_start") {
+					thinkingBlocks++;
 					progress.phase = "thinking";
 					if (!progress.label) progress.label = "Analyzing goal...";
 					emitProgress();
@@ -1190,6 +1199,11 @@ export async function runGoalCompletionAuditor(args: {
 				// we still capture whatever text the model produced.
 				if (streamEvent?.type === "text_delta" && typeof streamEvent.delta === "string") {
 					textDeltaAccum += streamEvent.delta;
+				}
+				// G5: accumulate reasoning evidence. thinking_delta carries the
+				// structured reasoning_content channel (separate from text).
+				if (streamEvent?.type === "thinking_delta" && typeof streamEvent.delta === "string") {
+					thinkingChars += streamEvent.delta.length;
 				}
 				// Capture text from text_end stream events — the verdict text lives
 				// here, not in message_end's finalMessage (pi-core can drop text
@@ -1531,6 +1545,27 @@ export async function runGoalCompletionAuditor(args: {
 				}
 			}
 			const output = outputParts.join("\n\n").trim();
+			// G5: reasoning-budget exhaustion classification. If the model streamed
+			// substantial structured reasoning but produced NO text verdict (even
+			// after the G4 follow-up above), this is budget exhaustion — the model
+			// spent its entire output allowance thinking. Treat it as a classified
+			// infrastructure error, NEVER as a marker-parsed disapproval: a silent
+			// {approved:false} here is indistinguishable from a real rejection and
+			// was perceived by the user as "auditor disabled" (2026-09-02 incident,
+			// role-smart/glm-5.3 reasoning-only completions).
+			if (output.length === 0 && thinkingChars > 0) {
+				const exhaustionError = `Auditor reasoning budget exhausted (no text output; ${thinkingChars} chars of thinking across ${thinkingBlocks} block(s) — raise max_tokens or use a non-reasoning auditor model)`;
+				logAuditorTrace(args.ctx.cwd, buildEndEntry({
+					goalId: args.goal.id,
+					approved: false,
+					disapproved: false,
+					model: modelLabel(model),
+					error: exhaustionError,
+					output: "",
+					elapsedMs: Date.now() - startedAt,
+				}));
+				return { approved: false, disapproved: false, output: "", model: modelLabel(model), thinkingLevel, error: exhaustionError };
+			}
 			const decision = parseAuditorDecision(output);
 			logAuditorTrace(args.ctx.cwd, buildEndEntry({
 				goalId: args.goal.id,
