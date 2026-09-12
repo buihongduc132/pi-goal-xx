@@ -126,6 +126,17 @@ describe("buildGoalAuditorPrompt", () => {
 		assert.match(out, /<disapproved\/>/);
 	});
 
+	it("contains hard gates for intention, plan, ceremony, and historical facts", () => {
+		const out = buildGoalAuditorPrompt({ goal: makeGoal(), detailedSummary: "d" });
+		assert.match(out, /USER-INTENTION ALIGNMENT IS A HARD GATE/);
+		assert.match(out, /RIGID PLAN\/TICKET GATE/);
+		assert.match(out, /CEREMONY GATE/);
+		assert.match(out, /HISTORICAL ORDER\/TIMING RULE/);
+		assert.match(out, /A single violation is disqualifying/);
+		assert.match(out, /do not reject solely for that irreversible discrepancy/);
+		assert.match(out, /call it out in the final approval report/);
+	});
+
 	it("includes completion summary when provided", () => {
 		const out = buildGoalAuditorPrompt({
 			goal: makeGoal(),

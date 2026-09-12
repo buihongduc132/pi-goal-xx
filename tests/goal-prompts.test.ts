@@ -264,6 +264,19 @@ describe("continuationPrompt", () => {
 		assert.match(out, /completion audit against the actual current state/);
 	});
 
+	it("includes the user-intention alignment audit and omits legacy style naming", () => {
+		const out = continuationPrompt(makeGoal({ id: "gAlignment", sisyphus: true }));
+		assert.doesNotMatch(out, /sisyphus/i);
+		assert.match(out, /USER-INTENTION ALIGNMENT AUDIT/);
+		assert.match(out, /five exact user requirement\/intention excerpts/);
+		assert.match(out, /exactly five random, substantive, verbatim requirement\/intention excerpts/);
+		assert.match(out, /Do not invent, paraphrase, or reuse an excerpt/);
+		assert.match(out, /fewer than five substantive excerpts exist/);
+		assert.match(out, /rigid plan file or remote ticket/);
+		assert.match(out, /overengineering, half-baked wiring/);
+		assert.match(out, /ceremony/);
+	});
+
 	it("injects task + contract blocks", () => {
 		const goal = makeGoal({
 			id: "gK2",
@@ -275,9 +288,9 @@ describe("continuationPrompt", () => {
 		assert.match(out, /VERIFICATION CONTRACT/);
 	});
 
-	it("injects sisyphus discipline block when sisyphus", () => {
+	it("does not inject legacy style naming into a checkpoint", () => {
 		const out = continuationPrompt(makeGoal({ id: "gK3", sisyphus: true }));
-		assert.match(out, /SISYPHUS STYLE goalId=gK3/);
+		assert.doesNotMatch(out, /sisyphus/i);
 	});
 
 	describe("continuationPrompt — custom prompt injection", () => {
@@ -297,14 +310,13 @@ describe("continuationPrompt", () => {
 				assert.equal(out.endsWith("\n"), false, "must not end with trailing newline");
 			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 		});
-		it("injects and orders after sisyphus", () => {
+		it("injects the custom block without legacy style naming", () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pgxx-cont-sis-"));
 			try {
 				const out = continuationPrompt(makeGoal({ id: "gKCS", sisyphus: true }), { goalPrompt: "CUSTOM" }, cwd);
-				const sisIdx = out.indexOf("SISYPHUS STYLE");
 				const customIdx = out.indexOf("PI GOAL CUSTOM PROMPT");
-				assert.ok(sisIdx > -1 && customIdx > -1);
-				assert.ok(sisIdx < customIdx, "sisyphus before custom in continuation");
+				assert.ok(customIdx > -1);
+				assert.doesNotMatch(out, /sisyphus/i);
 			} finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 		});
 	});
